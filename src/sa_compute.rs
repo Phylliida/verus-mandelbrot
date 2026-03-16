@@ -7,6 +7,7 @@ use vstd::prelude::*;
 use vstd::prelude::Ghost;
 
 use verus_rational::RuntimeRational;
+use verus_interval_arithmetic::RuntimeInterval;
 use crate::runtime_perturbation::RefOrbitPoint;
 use crate::runtime_series_approximation::SaCoeffPoint;
 
@@ -85,59 +86,19 @@ fn bignat_to_f64(b: &verus_bigint::RuntimeBigNatWitness) -> f64 {
     val
 }
 
-/// Truncate a RuntimeRational to at most `max_limbs` in both numerator and denominator.
-/// Drops the least-significant limbs from both by the same amount, preserving the ratio
-/// to within ~32*dropped_limbs bits of precision. This is lossy but prevents witness
-/// explosion during long iteration chains.
-///
-/// NOT verified — this is a pragmatic precision-management helper for the viewer.
-pub fn truncate_rational(r: &mut RuntimeRational, max_limbs: usize) {
-    // Find how many limbs to drop: drop from both num and den by the min excess
-    let num_len = r.numerator.magnitude.limbs_le.len();
-    let den_len = r.denominator.limbs_le.len();
-    let max_len = num_len.max(den_len);
-    if max_len <= max_limbs {
-        return;
-    }
-    // Drop the same number of low limbs from both to preserve the ratio
-    let drop = max_len - max_limbs;
-    if drop < num_len {
-        r.numerator.magnitude.limbs_le.drain(..drop);
-    }
-    if drop < den_len {
-        r.denominator.limbs_le.drain(..drop);
-    }
-    // Strip trailing zeros from both
-    while r.numerator.magnitude.limbs_le.len() > 1
-        && *r.numerator.magnitude.limbs_le.last().unwrap() == 0
-    {
-        r.numerator.magnitude.limbs_le.pop();
-    }
-    while r.denominator.limbs_le.len() > 1
-        && *r.denominator.limbs_le.last().unwrap() == 0
-    {
-        r.denominator.limbs_le.pop();
-    }
-}
-
-/// Truncate both components of a RefOrbitPoint.
-pub fn truncate_orbit_point(pt: &mut RefOrbitPoint, max_limbs: usize) {
-    truncate_rational(&mut pt.re, max_limbs);
-    truncate_rational(&mut pt.im, max_limbs);
-}
-
-/// Truncate both components of a SaCoeffPoint.
-pub fn truncate_sa_coeff(pt: &mut SaCoeffPoint, max_limbs: usize) {
-    truncate_rational(&mut pt.re, max_limbs);
-    truncate_rational(&mut pt.im, max_limbs);
+/// Convert a RuntimeInterval to f64 by taking the midpoint of [lo, hi].
+pub fn interval_to_f64(iv: &RuntimeInterval) -> f64 {
+    let lo = rational_to_f64(&iv.lo);
+    let hi = rational_to_f64(&iv.hi);
+    (lo + hi) / 2.0
 }
 
 /// Convert Vec<RefOrbitPoint> to interleaved f32 pairs [re0,im0,re1,im1,...] for GPU SSBO.
 pub fn orbit_to_f32(orbit: &[RefOrbitPoint]) -> Vec<f32> {
     let mut result: Vec<f32> = Vec::with_capacity(orbit.len() * 2);
     for pt in orbit {
-        result.push(rational_to_f64(&pt.re) as f32);
-        result.push(rational_to_f64(&pt.im) as f32);
+        result.push(interval_to_f64(&pt.re) as f32);
+        result.push(interval_to_f64(&pt.im) as f32);
     }
     result
 }
@@ -168,8 +129,8 @@ pub fn find_sa_skip(
     let mut best_sa_mag = 0.0f64;
 
     for (i, coeff) in sa_coeffs.iter().enumerate() {
-        let a_re_f64 = rational_to_f64(&coeff.re);
-        let a_im_f64 = rational_to_f64(&coeff.im);
+        let a_re_f64 = interval_to_f64(&coeff.re);
+        let a_im_f64 = interval_to_f64(&coeff.im);
         let sa_re_f64 = a_re_f64 * pixel_step_f64;
         let sa_im_f64 = a_im_f64 * pixel_step_f64;
         let sa_mag = sa_re_f64.abs().max(sa_im_f64.abs());
@@ -188,8 +149,8 @@ pub fn find_sa_skip(
     }
 
     if skip_n > 0 {
-        let a_re_f64 = rational_to_f64(&sa_coeffs[skip_n].re);
-        let a_im_f64 = rational_to_f64(&sa_coeffs[skip_n].im);
+        let a_re_f64 = interval_to_f64(&sa_coeffs[skip_n].re);
+        let a_im_f64 = interval_to_f64(&sa_coeffs[skip_n].im);
         SaSkipResult {
             skip_iters: skip_n as u32,
             sa_re: (a_re_f64 * pixel_step_f64) as f32,

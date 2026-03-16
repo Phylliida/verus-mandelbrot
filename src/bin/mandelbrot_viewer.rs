@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 use verus_mandelbrot::runtime_perturbation::compute_ref_orbit;
 use verus_mandelbrot::runtime_series_approximation::compute_sa_coefficients;
-use verus_mandelbrot::sa_compute::{fp_to_rational, rational_to_f64, orbit_to_f32, find_sa_skip, truncate_orbit_point, truncate_sa_coeff};
+use verus_mandelbrot::sa_compute::{fp_to_rational, interval_to_f64, orbit_to_f32, find_sa_skip};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, WindowEvent},
@@ -348,6 +348,15 @@ mod vulkan {
         sa_im: f32,          // SA coefficient * pixel_step (imag part)
         skip_iters: u32,     // iterations to skip via SA
         pub ref_orbit_dirty: bool,
+        // Cached orbit data (computed outside render critical section)
+        cached_orbit_data: Vec<f32>,
+        cached_ref_orbit_len: u32,
+        cached_ref_offset_re: f32,
+        cached_ref_offset_im: f32,
+        cached_sa_re: f32,
+        cached_sa_im: f32,
+        cached_skip_iters: u32,
+        cached_orbit_ready: bool,
         // Perturbation descriptor sets (bind ref_orbit SSBO at binding 1)
         perturb_descriptor_pool: RuntimeDescriptorPool,
         perturb_descriptor_sets: Vec<RuntimeDescriptorSet>,
@@ -741,6 +750,14 @@ mod vulkan {
                 sa_im: 0.0,
                 skip_iters: 0,
                 ref_orbit_dirty: true,
+                cached_orbit_data: Vec::new(),
+                cached_ref_orbit_len: 0,
+                cached_ref_offset_re: 0.0,
+                cached_ref_offset_im: 0.0,
+                cached_sa_re: 0.0,
+                cached_sa_im: 0.0,
+                cached_skip_iters: 0,
+                cached_orbit_ready: false,
                 perturb_descriptor_pool,
                 perturb_descriptor_sets,
                 keys_held: HashSet::new(),
@@ -1099,11 +1116,11 @@ mod vulkan {
             probe_iters // survived all iterations
         }
 
-        /// Compute reference orbit in full-precision fixed-point and upload to SSBO.
-        /// Uses hill-climbing on the iteration count landscape: samples 8 neighbors,
-        /// moves toward higher iteration counts, halves step size when stuck.
-        /// This quickly converges toward the Mandelbrot set interior.
-        fn compute_and_upload_ref_orbit(&mut self) {
+        /// Compute reference orbit data (pure computation, no Vulkan ops).
+        /// Stores results in cached fields for later upload during render.
+        pub fn precompute_ref_orbit(&mut self) {
+            if !self.ref_orbit_dirty { return; }
+
             let max_pts = (self.max_iters as usize).min(10000);
             let probe_iters = max_pts.min(500);
 
@@ -1182,92 +1199,64 @@ mod vulkan {
             }
 
             // Convert best point to RuntimeRational (verified exact arithmetic)
-            eprintln!("  input limbs: re={}, im={}", cur_re.len(), cur_im.len());
-            let t0 = std::time::Instant::now();
             let center_re_rat = fp_to_rational(&cur_re, cur_re_sign);
             let center_im_rat = fp_to_rational(&cur_im, cur_im_sign);
-            eprintln!("  fp_to_rational: {:.1}ms, re limbs: {}/{}, im limbs: {}/{}",
-                t0.elapsed().as_secs_f64() * 1000.0,
-                center_re_rat.numerator.magnitude.limbs_le.len(),
-                center_re_rat.denominator.limbs_le.len(),
-                center_im_rat.numerator.magnitude.limbs_le.len(),
-                center_im_rat.denominator.limbs_le.len());
 
-            // Call verified compute_ref_orbit (exact rational Mandelbrot iteration)
-            let t1 = std::time::Instant::now();
-            let mut orbit = compute_ref_orbit(&center_re_rat, &center_im_rat, max_pts as u32);
+            // Compute precision_bits from zoom level
+            let precision_bits = (needed_n(self.zoom_level) as u32) * 32;
+
+            // Call verified compute_ref_orbit (interval arithmetic with reduce)
+            let orbit = compute_ref_orbit(&center_re_rat, &center_im_rat, max_pts as u32, precision_bits);
             let best_iters = orbit.len();
-            eprintln!("  compute_ref_orbit: {:.1}ms ({} pts)", t1.elapsed().as_secs_f64() * 1000.0, best_iters);
 
-            // Print orbit values for debugging
-            for (idx, pt) in orbit.iter().enumerate() {
-                let re = rational_to_f64(&pt.re);
-                let im = rational_to_f64(&pt.im);
-                let num_limbs = pt.re.numerator.magnitude.limbs_le.len().max(pt.im.numerator.magnitude.limbs_le.len());
-                let den_limbs = pt.re.denominator.limbs_le.len().max(pt.im.denominator.limbs_le.len());
-                eprintln!("  orbit[{:4}] = ({:+.10e}, {:+.10e})  limbs: num={} den={}", idx, re, im, num_limbs, den_limbs);
-            }
+            // Call verified compute_sa_coefficients (interval arithmetic with reduce)
+            let sa_coeffs = compute_sa_coefficients(&orbit, precision_bits);
 
-            // Truncate orbit rationals to cap limb growth (keep ~128 bits = 4 limbs)
-            let t_trunc = std::time::Instant::now();
-            for pt in orbit.iter_mut() {
-                truncate_orbit_point(pt, 4);
-            }
-            eprintln!("  truncate orbit: {:.1}ms", t_trunc.elapsed().as_secs_f64() * 1000.0);
-
-            // Call verified compute_sa_coefficients
-            let t2 = std::time::Instant::now();
-            let mut sa_coeffs = compute_sa_coefficients(&orbit, &center_re_rat, &center_im_rat);
-            eprintln!("  compute_sa_coefficients: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
-
-            // Truncate SA coefficients too
-            for coeff in sa_coeffs.iter_mut() {
-                truncate_sa_coeff(coeff, 4);
-            }
-
-            // Convert orbit to f32 pairs for GPU upload
-            let t3 = std::time::Instant::now();
+            // Convert orbit to f32 pairs
             let mut best_orbit = orbit_to_f32(&orbit);
-            eprintln!("  orbit_to_f32: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
 
-            self.ref_offset_re = offset_re_px as f32;
-            self.ref_offset_im = offset_im_px as f32;
-            self.ref_orbit_len = (best_orbit.len() / 2) as u32;
+            // Clamp to max SSBO size
+            let max_floats = (self.ref_orbit.size / 4) as usize;
+            let orbit_len = if best_orbit.len() > max_floats {
+                best_orbit.truncate(max_floats);
+                (max_floats / 2) as u32
+            } else {
+                (best_orbit.len() / 2) as u32
+            };
 
             // Compute SA skip using verified SA coefficients
             let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
             let needs_sa = pixel_step_f64 < f32::MIN_POSITIVE as f64;
             let sa_result = find_sa_skip(&sa_coeffs, pixel_step_f64, needs_sa);
-            self.sa_re = sa_result.sa_re;
-            self.sa_im = sa_result.sa_im;
-            self.skip_iters = sa_result.skip_iters;
 
-            if sa_result.skip_iters > 0 {
-                eprintln!(
-                    "SA: skip {} iters, sa=({:e}, {:e}), pixel_step_f64={:e}",
-                    sa_result.skip_iters, sa_result.sa_re, sa_result.sa_im, pixel_step_f64,
-                );
-            } else if needs_sa {
-                eprintln!(
-                    "SA: no valid skip found (pixel_step_f64={:e}, orbit_len={})",
-                    pixel_step_f64, sa_coeffs.len(),
-                );
-            }
-
-            // Upload to SSBO (clamp to buffer size)
-            let max_floats = (self.ref_orbit.size / 4) as usize;
-            if best_orbit.len() > max_floats {
-                best_orbit.truncate(max_floats);
-                self.ref_orbit_len = (max_floats / 2) as u32;
-            }
-            let src: &[u8] = bytemuck::cast_slice(&best_orbit);
-            write_mapped_buffer(&self.ref_orbit, src, 0);
-
+            // Store in cache (no Vulkan ops)
+            self.cached_orbit_data = best_orbit;
+            self.cached_ref_orbit_len = orbit_len;
+            self.cached_ref_offset_re = offset_re_px as f32;
+            self.cached_ref_offset_im = offset_im_px as f32;
+            self.cached_sa_re = sa_result.sa_re;
+            self.cached_sa_im = sa_result.sa_im;
+            self.cached_skip_iters = sa_result.skip_iters;
+            self.cached_orbit_ready = true;
             self.ref_orbit_dirty = false;
+
             eprintln!(
                 "Ref orbit: {} iters (max {}), offset: ({:.0}, {:.0}) px, {} steps, SA skip: {}",
-                best_iters, max_pts, offset_re_px, offset_im_px, steps_taken, self.skip_iters,
+                best_iters, max_pts, offset_re_px, offset_im_px, steps_taken, sa_result.skip_iters,
             );
+        }
+
+        /// Upload cached orbit data to the ref_orbit SSBO (fast, called inside render).
+        fn upload_cached_orbit(&mut self) {
+            if !self.cached_orbit_ready { return; }
+            self.ref_offset_re = self.cached_ref_offset_re;
+            self.ref_offset_im = self.cached_ref_offset_im;
+            self.ref_orbit_len = self.cached_ref_orbit_len;
+            self.sa_re = self.cached_sa_re;
+            self.sa_im = self.cached_sa_im;
+            self.skip_iters = self.cached_skip_iters;
+            let src: &[u8] = bytemuck::cast_slice(&self.cached_orbit_data);
+            write_mapped_buffer(&self.ref_orbit, src, 0);
         }
 
         /// Upload coordinate data to the SSBO.
