@@ -1277,13 +1277,19 @@ mod vulkan {
             let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
             let max_offset = self.width.max(self.height) as f64 / 2.0;
 
-            if pixel_step_f64 as f32 != 0.0 {
-                // pixel_step fits in f32, no SA needed
+            // Use SA whenever pixel_step * max_offset would be subnormal in f32.
+            // GPUs typically flush subnormals to zero, so we need SA before that happens.
+            let dc_max = pixel_step_f64 * max_offset;
+            let needs_sa = dc_max < f32::MIN_POSITIVE as f64;
+
+            if !needs_sa {
+                // pixel_step produces normal f32 dc values, no SA needed
                 self.sa_re = 0.0;
                 self.sa_im = 0.0;
                 self.skip_iters = 0;
             } else {
                 // Find smallest skip_n where |A| * pixel_step * max_offset > 1e-6
+                // This ensures the SA-initialized δ is large enough for meaningful f32 iteration
                 let threshold = 1e-6;
                 let mut skip_n = 0usize;
                 for (i, &(a_re, a_im)) in sa_coeffs.iter().enumerate() {
@@ -1303,8 +1309,7 @@ mod vulkan {
                         skip_n, self.sa_re, self.sa_im, pixel_step_f64,
                     );
                 } else {
-                    // A never grew large enough — still set sa to avoid black
-                    // Use last available coefficient
+                    // A never grew large enough — use last available coefficient
                     let last = sa_coeffs.len().saturating_sub(1);
                     let (a_re, a_im) = sa_coeffs[last];
                     let sa_re_f64 = a_re * pixel_step_f64;
@@ -1313,10 +1318,15 @@ mod vulkan {
                         self.sa_re = sa_re_f64 as f32;
                         self.sa_im = sa_im_f64 as f32;
                         self.skip_iters = last as u32;
+                        eprintln!(
+                            "SA (fallback): skip {} iters, sa=({:e}, {:e})",
+                            last, self.sa_re, self.sa_im,
+                        );
                     } else {
                         self.sa_re = 0.0;
                         self.sa_im = 0.0;
                         self.skip_iters = 0;
+                        eprintln!("SA: unable to find valid skip point");
                     }
                 }
             }
