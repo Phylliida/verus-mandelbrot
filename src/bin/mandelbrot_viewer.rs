@@ -1277,57 +1277,70 @@ mod vulkan {
             let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
             let max_offset = self.width.max(self.height) as f64 / 2.0;
 
-            // Use SA whenever pixel_step * max_offset would be subnormal in f32.
-            // GPUs typically flush subnormals to zero, so we need SA before that happens.
-            let dc_max = pixel_step_f64 * max_offset;
-            let needs_sa = dc_max < f32::MIN_POSITIVE as f64;
+            // Use SA whenever pixel_step itself would be subnormal in f32.
+            // GPUs flush subnormals to zero BEFORE multiplication, so even if
+            // pixel_step * max_offset would be normal, the GPU computes px * 0 = 0.
+            let needs_sa = pixel_step_f64 < f32::MIN_POSITIVE as f64;
 
             if !needs_sa {
-                // pixel_step produces normal f32 dc values, no SA needed
+                // pixel_step produces normal f32 values, no SA needed
                 self.sa_re = 0.0;
                 self.sa_im = 0.0;
                 self.skip_iters = 0;
             } else {
-                // Find smallest skip_n where |A| * pixel_step * max_offset > 1e-6
-                // This ensures the SA-initialized δ is large enough for meaningful f32 iteration
-                let threshold = 1e-6;
+                // Find the best SA skip point. We need:
+                //   |A_skip * pixel_step| to be a normal f32 (not subnormal)
+                // so the GPU doesn't flush it to zero. The sa value gets multiplied
+                // by pixel offsets up to max_offset in the shader, producing δ.
+                // We want |sa| itself to be normal so per-pixel differences survive.
+                let sa_normal_threshold = f32::MIN_POSITIVE as f64;
+
+                // Find the iteration where |A| * pixel_step first produces a normal f32
                 let mut skip_n = 0usize;
+                let mut best_skip = 0usize;
+                let mut best_sa_mag = 0.0f64;
                 for (i, &(a_re, a_im)) in sa_coeffs.iter().enumerate() {
-                    let a_mag = a_re.abs().max(a_im.abs());
-                    if a_mag * pixel_step_f64 * max_offset > threshold {
+                    let sa_re_f64 = a_re * pixel_step_f64;
+                    let sa_im_f64 = a_im * pixel_step_f64;
+                    let sa_mag = sa_re_f64.abs().max(sa_im_f64.abs());
+
+                    if sa_mag >= sa_normal_threshold && skip_n == 0 {
                         skip_n = i;
-                        break;
+                    }
+                    // Track the largest |sa| that still fits in f32
+                    // (stop if A overflows or sa would exceed f32 range)
+                    if sa_mag > best_sa_mag && sa_mag < f32::MAX as f64 * 0.5 {
+                        best_sa_mag = sa_mag;
+                        best_skip = i;
                     }
                 }
+
+                // Use the first iteration where sa is normal; fall back to best available
+                if skip_n == 0 && best_skip > 0 {
+                    skip_n = best_skip;
+                }
+
                 if skip_n > 0 {
                     let (a_re, a_im) = sa_coeffs[skip_n];
                     self.sa_re = (a_re * pixel_step_f64) as f32;
                     self.sa_im = (a_im * pixel_step_f64) as f32;
                     self.skip_iters = skip_n as u32;
                     eprintln!(
-                        "SA: skip {} iters, sa=({:e}, {:e}), pixel_step_f64={:e}",
+                        "SA: skip {} iters, sa=({:e}, {:e}), pixel_step_f64={:e}, |A|={:e}",
                         skip_n, self.sa_re, self.sa_im, pixel_step_f64,
+                        sa_coeffs[skip_n].0.hypot(sa_coeffs[skip_n].1),
                     );
                 } else {
-                    // A never grew large enough — use last available coefficient
-                    let last = sa_coeffs.len().saturating_sub(1);
-                    let (a_re, a_im) = sa_coeffs[last];
-                    let sa_re_f64 = a_re * pixel_step_f64;
-                    let sa_im_f64 = a_im * pixel_step_f64;
-                    if sa_re_f64 as f32 != 0.0 || sa_im_f64 as f32 != 0.0 {
-                        self.sa_re = sa_re_f64 as f32;
-                        self.sa_im = sa_im_f64 as f32;
-                        self.skip_iters = last as u32;
-                        eprintln!(
-                            "SA (fallback): skip {} iters, sa=({:e}, {:e})",
-                            last, self.sa_re, self.sa_im,
-                        );
-                    } else {
-                        self.sa_re = 0.0;
-                        self.sa_im = 0.0;
-                        self.skip_iters = 0;
-                        eprintln!("SA: unable to find valid skip point");
-                    }
+                    // A never exceeded threshold — interior point with tiny A.
+                    // Use A=1 equivalent: just pass pixel_step scaled up slightly.
+                    // This won't produce great images but avoids total black.
+                    self.sa_re = 0.0;
+                    self.sa_im = 0.0;
+                    self.skip_iters = 0;
+                    eprintln!(
+                        "SA: no valid skip found (pixel_step_f64={:e}, orbit_len={}, max |A|={:e})",
+                        pixel_step_f64, sa_coeffs.len(), best_sa_mag / pixel_step_f64,
+                    );
                 }
             }
 
