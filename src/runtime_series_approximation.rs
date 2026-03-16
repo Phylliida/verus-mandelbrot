@@ -102,17 +102,14 @@ pub fn compute_sa_coefficients(
         let two_zi_ar = two.mul(&zi.mul(&ar));
         let new_im = two_zr_ai.add(&two_zi_ar);
 
-        // Normalize periodically
-        let norm_re = if i % 8 == 7 { new_re.normalize() } else { new_re };
-        let norm_im = if i % 8 == 7 { new_im.normalize() } else { new_im };
-
+        // Skip normalize — bigint div_rem is O(quotient), too slow for GCD
         coeffs.push(SaCoeffPoint {
-            re: copy_rational(&norm_re),
-            im: copy_rational(&norm_im),
+            re: copy_rational(&new_re),
+            im: copy_rational(&new_im),
         });
 
-        ar = norm_re;
-        ai = norm_im;
+        ar = new_re;
+        ai = new_im;
         i = i + 1;
     }
 

@@ -85,6 +85,53 @@ fn bignat_to_f64(b: &verus_bigint::RuntimeBigNatWitness) -> f64 {
     val
 }
 
+/// Truncate a RuntimeRational to at most `max_limbs` in both numerator and denominator.
+/// Drops the least-significant limbs from both by the same amount, preserving the ratio
+/// to within ~32*dropped_limbs bits of precision. This is lossy but prevents witness
+/// explosion during long iteration chains.
+///
+/// NOT verified — this is a pragmatic precision-management helper for the viewer.
+pub fn truncate_rational(r: &mut RuntimeRational, max_limbs: usize) {
+    // Find how many limbs to drop: drop from both num and den by the min excess
+    let num_len = r.numerator.magnitude.limbs_le.len();
+    let den_len = r.denominator.limbs_le.len();
+    let max_len = num_len.max(den_len);
+    if max_len <= max_limbs {
+        return;
+    }
+    // Drop the same number of low limbs from both to preserve the ratio
+    let drop = max_len - max_limbs;
+    if drop < num_len {
+        r.numerator.magnitude.limbs_le.drain(..drop);
+    }
+    if drop < den_len {
+        r.denominator.limbs_le.drain(..drop);
+    }
+    // Strip trailing zeros from both
+    while r.numerator.magnitude.limbs_le.len() > 1
+        && *r.numerator.magnitude.limbs_le.last().unwrap() == 0
+    {
+        r.numerator.magnitude.limbs_le.pop();
+    }
+    while r.denominator.limbs_le.len() > 1
+        && *r.denominator.limbs_le.last().unwrap() == 0
+    {
+        r.denominator.limbs_le.pop();
+    }
+}
+
+/// Truncate both components of a RefOrbitPoint.
+pub fn truncate_orbit_point(pt: &mut RefOrbitPoint, max_limbs: usize) {
+    truncate_rational(&mut pt.re, max_limbs);
+    truncate_rational(&mut pt.im, max_limbs);
+}
+
+/// Truncate both components of a SaCoeffPoint.
+pub fn truncate_sa_coeff(pt: &mut SaCoeffPoint, max_limbs: usize) {
+    truncate_rational(&mut pt.re, max_limbs);
+    truncate_rational(&mut pt.im, max_limbs);
+}
+
 /// Convert Vec<RefOrbitPoint> to interleaved f32 pairs [re0,im0,re1,im1,...] for GPU SSBO.
 pub fn orbit_to_f32(orbit: &[RefOrbitPoint]) -> Vec<f32> {
     let mut result: Vec<f32> = Vec::with_capacity(orbit.len() * 2);
