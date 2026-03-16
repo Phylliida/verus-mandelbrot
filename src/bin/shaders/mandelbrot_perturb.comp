@@ -22,7 +22,7 @@ layout(set = 0, binding = 1, std430) readonly buffer RefOrbit {
     float ref_orbit[];  // [re0, im0, re1, im1, ...]
 };
 
-// Push constants (40 bytes)
+// Push constants (52 bytes)
 layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
@@ -34,6 +34,9 @@ layout(push_constant) uniform PushConstants {
     uint pixel_scale;       // 1/2/4: resolution scale
     float ref_offset_px_re; // Offset from screen center to ref point, in pixels
     float ref_offset_px_im;
+    float sa_re;            // SA coefficient * pixel_step (real part)
+    float sa_im;            // SA coefficient * pixel_step (imag part)
+    uint skip_iters;        // Iterations to skip via SA
 };
 
 // ============================================================
@@ -81,20 +84,29 @@ void main() {
     float dx = float(int(bx + scale / 2u) - int(width >> 1u));
     float dy = float(int(by + scale / 2u) - int(height >> 1u));
 
-    // Δc = pixel offset from reference point
-    // Subtract pixel offset before multiplying by step — avoids f32 precision loss
-    float dc_re = (dx - ref_offset_px_re) * pixel_step_re;
-    float dc_im = -(dy + ref_offset_px_im) * pixel_step_im;  // screen Y is flipped vs math Y
+    // Pixel offset from reference point
+    float px_re = dx - ref_offset_px_re;
+    float px_im = -(dy + ref_offset_px_im);  // screen Y is flipped vs math Y
 
-    // Initialize delta: δ_0 = (0, 0)
-    float dr = 0.0;
-    float di = 0.0;
+    float dr, di, dc_re, dc_im;
+    if (skip_iters > 0u) {
+        // SA initialization: δ = A_skip · Δc ≈ (sa * pixel_offset)
+        dr = sa_re * px_re - sa_im * px_im;
+        di = sa_re * px_im + sa_im * px_re;
+        dc_re = 0.0;  // negligible after SA skip
+        dc_im = 0.0;
+    } else {
+        dr = 0.0;
+        di = 0.0;
+        dc_re = px_re * pixel_step_re;
+        dc_im = px_im * pixel_step_im;
+    }
 
     uint iter;
     uint orbit_len = min(max_iters, ref_orbit_len);
     float mag2 = 0.0;
 
-    for (iter = 0u; iter < orbit_len; iter++) {
+    for (iter = skip_iters; iter < orbit_len; iter++) {
         // Read reference orbit point Z_n
         float Zr = ref_orbit[iter * 2u];
         float Zi = ref_orbit[iter * 2u + 1u];

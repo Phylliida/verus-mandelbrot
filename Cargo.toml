@@ -13,13 +13,14 @@ verus-vulkan = { path = "../verus-vulkan", default-features = false }
 builtin = { package = "verus_builtin", path = "../verus/source/builtin" }
 
 # Windowing deps (for viewer binary)
+bytemuck = { version = "1", features = ["derive"], optional = true }
 ash = { version = "0.38", optional = true }
 winit = { version = "0.30", optional = true }
 ash-window = { version = "0.13", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 
 [features]
-viewer = ["ash", "winit", "ash-window", "raw-window-handle"]
+viewer = ["ash", "winit", "ash-window", "raw-window-handle", "bytemuck"]
 
 [[bin]]
 name = "mandelbrot_viewer"

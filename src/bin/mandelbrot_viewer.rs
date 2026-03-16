@@ -258,6 +258,7 @@ mod vulkan {
     use verus_vulkan::runtime::shader_module::RuntimeShaderModule;
     use verus_vulkan::runtime::surface::RuntimeSurface;
     use verus_vulkan::runtime::swapchain::RuntimeSwapchain;
+    use verus_vulkan::runtime::mapped_buffer::{RuntimeMappedBuffer, reclaim_buffer, release_buffer, write_mapped_buffer};
     use verus_vulkan::vk_context::VulkanContext;
 
     // Push constants: only scalar parameters (28 bytes, N-independent).
@@ -273,7 +274,7 @@ mod vulkan {
         pixel_scale: u32,
     }
 
-    // Push constants for perturbation shader (32 bytes).
+    // Push constants for perturbation shader (52 bytes).
     #[repr(C)]
     struct PerturbPushConstants {
         width: u32,
@@ -286,6 +287,9 @@ mod vulkan {
         pixel_scale: u32,
         ref_offset_px_re: f32,  // offset from screen center to ref point, in pixels
         ref_offset_px_im: f32,
+        sa_re: f32,        // SA coefficient * pixel_step (real part)
+        sa_im: f32,        // SA coefficient * pixel_step (imag part)
+        skip_iters: u32,   // iterations to skip via SA
     }
 
     /// Per-N pipeline variant resources.
@@ -311,11 +315,8 @@ mod vulkan {
         descriptor_set_layout: RuntimeDescriptorSetLayout,
         descriptor_pool: RuntimeDescriptorPool,
         descriptor_sets: Vec<RuntimeDescriptorSet>,
-        // SSBO for coordinate data
-        ssbo_buffer: vk::Buffer,
-        ssbo_memory: vk::DeviceMemory,
-        ssbo_size: u64,
-        ssbo_mapped_ptr: *mut u8,
+        // SSBO for coordinate data (ownership-tracked)
+        ssbo: RuntimeMappedBuffer,
         command_pool: RuntimeCommandPool,
         command_buffers: Vec<RuntimeCommandBuffer>,
         image_available_sem: RuntimeSemaphore,
@@ -340,14 +341,14 @@ mod vulkan {
         perturb_pipeline_layout: u64,
         perturb_shader_module: RuntimeShaderModule,
         perturb_pipeline: RuntimeComputePipeline,
-        // Reference orbit SSBO (separate from coordinate SSBO)
-        ref_orbit_buffer: vk::Buffer,
-        ref_orbit_memory: vk::DeviceMemory,
-        ref_orbit_size: u64,
-        ref_orbit_mapped_ptr: *mut u8,
+        // Reference orbit SSBO (ownership-tracked)
+        ref_orbit: RuntimeMappedBuffer,
         ref_orbit_len: u32,
         ref_offset_re: f32,  // offset from screen center to reference point
         ref_offset_im: f32,
+        sa_re: f32,          // SA coefficient * pixel_step (real part)
+        sa_im: f32,          // SA coefficient * pixel_step (imag part)
+        skip_iters: u32,     // iterations to skip via SA
         pub ref_orbit_dirty: bool,
         // Perturbation descriptor sets (bind ref_orbit SSBO at binding 1)
         perturb_descriptor_pool: RuntimeDescriptorPool,
@@ -363,68 +364,38 @@ mod vulkan {
         fn initial_view(width: u32, n: usize) -> (Vec<u32>, bool, Vec<u32>, bool, Vec<u32>) {
             let (cre, cre_sign) = f64_to_fp(-0.5, n);
             let (cim, _) = f64_to_fp(0.0, n);
-            let (step, _) = f64_to_fp(3.0 / width as f64, n);
+            let step = Self::compute_pixel_step(width, 0, n);
             (cre, cre_sign, cim, false, step)
         }
 
-        /// Find a host-visible, host-coherent memory type index.
-        fn find_host_visible_memory_type(ctx: &VulkanContext, type_filter: u32) -> u32 {
-            let mem_props = unsafe {
-                ctx.instance
-                    .get_physical_device_memory_properties(ctx.physical_device)
-            };
-            let desired = vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT;
-            for i in 0..mem_props.memory_type_count {
-                if (type_filter & (1 << i)) != 0
-                    && mem_props.memory_types[i as usize]
-                        .property_flags
-                        .contains(desired)
-                {
-                    return i;
+        /// Compute pixel_step at given zoom level with full precision in n limbs.
+        /// pixel_step = (3.0 / width) / 2^zoom_level
+        fn compute_pixel_step(width: u32, zoom_level: i32, n: usize) -> Vec<u32> {
+            let (step, _) = f64_to_fp(3.0 / width as f64, n);
+            if zoom_level <= 0 {
+                return step;
+            }
+            // Bulk shift: zoom_level bits right = (zoom_level/32) full limbs + (zoom_level%32) bits
+            let limb_shift = zoom_level as usize / 32;
+            let bit_shift = zoom_level as u32 % 32;
+            if limb_shift >= n {
+                return fp_zero(n);
+            }
+            // Shift whole limbs first
+            let mut shifted = fp_zero(n);
+            for i in limb_shift..n {
+                shifted[i] = step[i - limb_shift];
+            }
+            // Then shift remaining bits
+            if bit_shift > 0 {
+                let mut carry = 0u32;
+                for i in 0..n {
+                    let val = shifted[i];
+                    shifted[i] = (val >> bit_shift) | carry;
+                    carry = val << (32 - bit_shift);
                 }
             }
-            panic!("No suitable host-visible memory type found");
-        }
-
-        /// Create (or recreate) the SSBO buffer for coordinate data.
-        /// Size = 3 * max_n * 4 bytes (center_re + center_im + pixel_step).
-        fn create_ssbo(ctx: &VulkanContext, max_n: usize) -> (vk::Buffer, vk::DeviceMemory, u64, *mut u8) {
-            let size = (3 * max_n * 4) as u64;
-            let buf = unsafe {
-                ctx.device.create_buffer(
-                    &vk::BufferCreateInfo::default()
-                        .size(size)
-                        .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                    None,
-                )
-            }
-            .expect("Failed to create SSBO buffer");
-
-            let mem_req = unsafe { ctx.device.get_buffer_memory_requirements(buf) };
-            let mem_type_index =
-                Self::find_host_visible_memory_type(ctx, mem_req.memory_type_bits);
-
-            let mem = unsafe {
-                ctx.device.allocate_memory(
-                    &vk::MemoryAllocateInfo::default()
-                        .allocation_size(mem_req.size)
-                        .memory_type_index(mem_type_index),
-                    None,
-                )
-            }
-            .expect("Failed to allocate SSBO memory");
-
-            unsafe { ctx.device.bind_buffer_memory(buf, mem, 0) }
-                .expect("Failed to bind SSBO memory");
-
-            let ptr = unsafe {
-                ctx.device.map_memory(mem, 0, size, vk::MemoryMapFlags::empty())
-            }
-            .expect("Failed to map SSBO memory") as *mut u8;
-
-            (buf, mem, size, ptr)
+            shifted
         }
 
         pub fn new(window: Arc<Window>) -> Self {
@@ -559,8 +530,12 @@ mod vulkan {
 
             // Create SSBO (sized for max N=64)
             let max_n = *SUPPORTED_N.last().unwrap();
-            let (ssbo_buffer, ssbo_memory, ssbo_size, ssbo_mapped_ptr) =
-                Self::create_ssbo(&ctx, max_n);
+            let ssbo = ffi::vk_create_mapped_buffer(
+                &ctx,
+                Ghost::assume_new(),
+                (3 * max_n * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER.as_raw(),
+            );
 
             // Descriptor pool: STORAGE_IMAGE + STORAGE_BUFFER per swapchain image
             let mut descriptor_pool = ffi::vk_create_descriptor_pool_typed(
@@ -601,7 +576,7 @@ mod vulkan {
                 );
                 // Bind storage buffer (binding 1)
                 let bi = [vk::DescriptorBufferInfo {
-                    buffer: ssbo_buffer,
+                    buffer: vk::Buffer::from_raw(ssbo.handle),
                     offset: 0,
                     range: vk::WHOLE_SIZE,
                 }];
@@ -654,43 +629,12 @@ mod vulkan {
             );
 
             // Reference orbit SSBO: max 10000 orbit points * 2 floats * 4 bytes = 80KB
-            let ref_orbit_max_size = (10000 * 2 * 4) as u64;
-            let (ref_orbit_buffer, ref_orbit_memory, ref_orbit_size, ref_orbit_mapped_ptr) = {
-                let size = ref_orbit_max_size;
-                let buf = unsafe {
-                    ctx.device.create_buffer(
-                        &vk::BufferCreateInfo::default()
-                            .size(size)
-                            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-                            .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                        None,
-                    )
-                }
-                .expect("Failed to create ref orbit SSBO");
-
-                let mem_req = unsafe { ctx.device.get_buffer_memory_requirements(buf) };
-                let mem_type_index =
-                    Self::find_host_visible_memory_type(&ctx, mem_req.memory_type_bits);
-                let mem = unsafe {
-                    ctx.device.allocate_memory(
-                        &vk::MemoryAllocateInfo::default()
-                            .allocation_size(mem_req.size)
-                            .memory_type_index(mem_type_index),
-                        None,
-                    )
-                }
-                .expect("Failed to allocate ref orbit memory");
-
-                unsafe { ctx.device.bind_buffer_memory(buf, mem, 0) }
-                    .expect("Failed to bind ref orbit memory");
-
-                let ptr = unsafe {
-                    ctx.device.map_memory(mem, 0, size, vk::MemoryMapFlags::empty())
-                }
-                .expect("Failed to map ref orbit memory") as *mut u8;
-
-                (buf, mem, size, ptr)
-            };
+            let ref_orbit = ffi::vk_create_mapped_buffer(
+                &ctx,
+                Ghost::assume_new(),
+                (10000 * 2 * 4) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER.as_raw(),
+            );
 
             // Perturbation descriptor pool + sets (bind ref orbit SSBO)
             let mut perturb_descriptor_pool = ffi::vk_create_descriptor_pool_typed(
@@ -731,7 +675,7 @@ mod vulkan {
                 );
                 // Binding 1: ref orbit SSBO
                 let bi = [vk::DescriptorBufferInfo {
-                    buffer: ref_orbit_buffer,
+                    buffer: vk::Buffer::from_raw(ref_orbit.handle),
                     offset: 0,
                     range: vk::WHOLE_SIZE,
                 }];
@@ -768,10 +712,7 @@ mod vulkan {
                 descriptor_set_layout,
                 descriptor_pool,
                 descriptor_sets,
-                ssbo_buffer,
-                ssbo_memory,
-                ssbo_size,
-                ssbo_mapped_ptr,
+                ssbo,
                 command_pool,
                 command_buffers,
                 image_available_sem,
@@ -794,13 +735,13 @@ mod vulkan {
                 perturb_pipeline_layout,
                 perturb_shader_module,
                 perturb_pipeline,
-                ref_orbit_buffer,
-                ref_orbit_memory,
-                ref_orbit_size,
-                ref_orbit_mapped_ptr,
+                ref_orbit,
                 ref_orbit_len: 0,
                 ref_offset_re: 0.0,
                 ref_offset_im: 0.0,
+                sa_re: 0.0,
+                sa_im: 0.0,
+                skip_iters: 0,
                 ref_orbit_dirty: true,
                 perturb_descriptor_pool,
                 perturb_descriptor_sets,
@@ -818,12 +759,12 @@ mod vulkan {
             if new_n > self.current_n {
                 self.center_re = fp_extend(&self.center_re, new_n);
                 self.center_im = fp_extend(&self.center_im, new_n);
-                self.pixel_step = fp_extend(&self.pixel_step, new_n);
             } else {
                 self.center_re = fp_truncate(&self.center_re, new_n);
                 self.center_im = fp_truncate(&self.center_im, new_n);
-                self.pixel_step = fp_truncate(&self.pixel_step, new_n);
             }
+            // Recompute pixel_step at new N with full f64 precision
+            self.pixel_step = Self::compute_pixel_step(self.width, self.zoom_level, new_n);
             self.current_n = new_n;
             self.current_n_index = n_index(new_n);
             eprintln!(
@@ -920,7 +861,7 @@ mod vulkan {
                     vk::ImageLayout::GENERAL.as_raw() as u32,
                 );
                 let bi = [vk::DescriptorBufferInfo {
-                    buffer: self.ssbo_buffer,
+                    buffer: vk::Buffer::from_raw(self.ssbo.handle),
                     offset: 0,
                     range: vk::WHOLE_SIZE,
                 }];
@@ -975,7 +916,7 @@ mod vulkan {
                     vk::ImageLayout::GENERAL.as_raw() as u32,
                 );
                 let bi = [vk::DescriptorBufferInfo {
-                    buffer: self.ref_orbit_buffer,
+                    buffer: vk::Buffer::from_raw(self.ref_orbit.handle),
                     offset: 0,
                     range: vk::WHOLE_SIZE,
                 }];
@@ -1120,26 +1061,34 @@ mod vulkan {
         /// Convert sign-magnitude fixed-point limbs to f64.
         fn fp_to_f64(limbs: &[u32], sign: bool) -> f64 {
             let mut val = limbs[0] as f64;
-            for i in 1..limbs.len().min(3) {
-                val += limbs[i] as f64 / (4294967296.0f64).powi(i as i32);
+            for i in 1..limbs.len() {
+                let scale = (4294967296.0f64).powi(i as i32);
+                if scale.is_infinite() { break; }
+                val += limbs[i] as f64 / scale;
             }
             if sign { -val } else { val }
         }
 
         /// Compute a single reference orbit in full-precision fixed-point.
-        /// Returns (orbit_f32_pairs, iteration_count).
+        /// Returns (orbit_f32_pairs, iteration_count, sa_coeffs) where sa_coeffs
+        /// is a Vec of (A_re, A_im) f64 pairs for Series Approximation.
         fn compute_ref_orbit_fp(
             cr: &[u32], cr_sign: bool,
             ci: &[u32], ci_sign: bool,
             max_pts: usize,
-        ) -> (Vec<f32>, usize) {
+        ) -> (Vec<f32>, usize, Vec<(f64, f64)>) {
             let n = cr.len();
             let mut orbit: Vec<f32> = Vec::with_capacity(max_pts * 2);
+            let mut sa_coeffs: Vec<(f64, f64)> = Vec::with_capacity(max_pts);
             let mut zr = fp_zero(n);
             let mut zr_sign = false;
             let mut zi = fp_zero(n);
             let mut zi_sign = false;
             let mut iters = 0usize;
+
+            // SA coefficient: A_{n+1} = 2*Z_n*A_n + 1, A_0 = 0
+            let mut a_re = 0.0f64;
+            let mut a_im = 0.0f64;
 
             // Escape threshold: |z|² > 4 means integer limb >= 5
             // (conservative: check if zr² + zi² integer part > 4)
@@ -1150,10 +1099,26 @@ mod vulkan {
             };
 
             for _ in 0..max_pts {
-                // Convert current z to f32 for the orbit buffer
-                orbit.push(Self::fp_to_f64(&zr, zr_sign) as f32);
-                orbit.push(Self::fp_to_f64(&zi, zi_sign) as f32);
+                // Convert current z to f64 for SA computation
+                let z_re_f64 = Self::fp_to_f64(&zr, zr_sign);
+                let z_im_f64 = Self::fp_to_f64(&zi, zi_sign);
+
+                // Store orbit point as f32
+                orbit.push(z_re_f64 as f32);
+                orbit.push(z_im_f64 as f32);
+
+                // Store SA coefficient for this iteration
+                sa_coeffs.push((a_re, a_im));
+
                 iters += 1;
+
+                // Update SA: A_{n+1} = 2*Z_n*A_n + 1
+                // Re: 2*(Z_re*A_re - Z_im*A_im) + 1
+                // Im: 2*(Z_re*A_im + Z_im*A_re)
+                let new_a_re = 2.0 * (z_re_f64 * a_re - z_im_f64 * a_im) + 1.0;
+                let new_a_im = 2.0 * (z_re_f64 * a_im + z_im_f64 * a_re);
+                a_re = new_a_re;
+                a_im = new_a_im;
 
                 // z = z² + c
                 // new_zr = zr² - zi² + cr
@@ -1182,7 +1147,7 @@ mod vulkan {
                     break;
                 }
             }
-            (orbit, iters)
+            (orbit, iters, sa_coeffs)
         }
 
         /// Quick escape test: returns iteration count before escape (up to probe_iters).
@@ -1300,7 +1265,7 @@ mod vulkan {
             }
 
             // Compute the full orbit at the best point found
-            let (mut best_orbit, best_iters) = Self::compute_ref_orbit_fp(
+            let (mut best_orbit, best_iters, sa_coeffs) = Self::compute_ref_orbit_fp(
                 &cur_re, cur_re_sign, &cur_im, cur_im_sign, max_pts,
             );
 
@@ -1308,25 +1273,67 @@ mod vulkan {
             self.ref_offset_im = offset_im_px as f32;
             self.ref_orbit_len = (best_orbit.len() / 2) as u32;
 
+            // Compute SA skip
+            let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
+            let max_offset = self.width.max(self.height) as f64 / 2.0;
+
+            if pixel_step_f64 as f32 != 0.0 {
+                // pixel_step fits in f32, no SA needed
+                self.sa_re = 0.0;
+                self.sa_im = 0.0;
+                self.skip_iters = 0;
+            } else {
+                // Find smallest skip_n where |A| * pixel_step * max_offset > 1e-6
+                let threshold = 1e-6;
+                let mut skip_n = 0usize;
+                for (i, &(a_re, a_im)) in sa_coeffs.iter().enumerate() {
+                    let a_mag = a_re.abs().max(a_im.abs());
+                    if a_mag * pixel_step_f64 * max_offset > threshold {
+                        skip_n = i;
+                        break;
+                    }
+                }
+                if skip_n > 0 {
+                    let (a_re, a_im) = sa_coeffs[skip_n];
+                    self.sa_re = (a_re * pixel_step_f64) as f32;
+                    self.sa_im = (a_im * pixel_step_f64) as f32;
+                    self.skip_iters = skip_n as u32;
+                    eprintln!(
+                        "SA: skip {} iters, sa=({:e}, {:e}), pixel_step_f64={:e}",
+                        skip_n, self.sa_re, self.sa_im, pixel_step_f64,
+                    );
+                } else {
+                    // A never grew large enough — still set sa to avoid black
+                    // Use last available coefficient
+                    let last = sa_coeffs.len().saturating_sub(1);
+                    let (a_re, a_im) = sa_coeffs[last];
+                    let sa_re_f64 = a_re * pixel_step_f64;
+                    let sa_im_f64 = a_im * pixel_step_f64;
+                    if sa_re_f64 as f32 != 0.0 || sa_im_f64 as f32 != 0.0 {
+                        self.sa_re = sa_re_f64 as f32;
+                        self.sa_im = sa_im_f64 as f32;
+                        self.skip_iters = last as u32;
+                    } else {
+                        self.sa_re = 0.0;
+                        self.sa_im = 0.0;
+                        self.skip_iters = 0;
+                    }
+                }
+            }
+
             // Upload to SSBO (clamp to buffer size)
-            let max_floats = (self.ref_orbit_size / 4) as usize;
+            let max_floats = (self.ref_orbit.size / 4) as usize;
             if best_orbit.len() > max_floats {
                 best_orbit.truncate(max_floats);
                 self.ref_orbit_len = (max_floats / 2) as u32;
             }
-            let byte_len = best_orbit.len() * 4;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    best_orbit.as_ptr() as *const u8,
-                    self.ref_orbit_mapped_ptr,
-                    byte_len,
-                );
-            }
+            let src: &[u8] = bytemuck::cast_slice(&best_orbit);
+            write_mapped_buffer(&self.ref_orbit, src, 0);
 
             self.ref_orbit_dirty = false;
             eprintln!(
-                "Ref orbit: {} iters (max {}), offset: ({:.0}, {:.0}) px, {} steps",
-                best_iters, max_pts, offset_re_px, offset_im_px, steps_taken,
+                "Ref orbit: {} iters (max {}), offset: ({:.0}, {:.0}) px, {} steps, SA skip: {}",
+                best_iters, max_pts, offset_re_px, offset_im_px, steps_taken, self.skip_iters,
             );
         }
 
@@ -1335,29 +1342,14 @@ mod vulkan {
             let n = self.current_n;
             let coord_bytes = n * 4; // bytes per coordinate array
             let total = 3 * coord_bytes;
-            debug_assert!(total as u64 <= self.ssbo_size);
+            debug_assert!(total as u64 <= self.ssbo.size);
 
-            unsafe {
-                let dst = self.ssbo_mapped_ptr;
-                // center_re
-                std::ptr::copy_nonoverlapping(
-                    self.center_re.as_ptr() as *const u8,
-                    dst,
-                    coord_bytes,
-                );
-                // center_im
-                std::ptr::copy_nonoverlapping(
-                    self.center_im.as_ptr() as *const u8,
-                    dst.add(coord_bytes),
-                    coord_bytes,
-                );
-                // pixel_step
-                std::ptr::copy_nonoverlapping(
-                    self.pixel_step.as_ptr() as *const u8,
-                    dst.add(2 * coord_bytes),
-                    coord_bytes,
-                );
-            }
+            let src_re: &[u8] = bytemuck::cast_slice(&self.center_re);
+            write_mapped_buffer(&self.ssbo, src_re, 0);
+            let src_im: &[u8] = bytemuck::cast_slice(&self.center_im);
+            write_mapped_buffer(&self.ssbo, src_im, coord_bytes);
+            let src_step: &[u8] = bytemuck::cast_slice(&self.pixel_step);
+            write_mapped_buffer(&self.ssbo, src_step, 2 * coord_bytes);
         }
 
         pub fn render(&mut self) {
@@ -1370,9 +1362,13 @@ mod vulkan {
                 Ghost::assume_new(),
                 u64::MAX,
             );
+            // Reclaim both SSBOs — fence@.signaled proved by vk_wait_for_fences
+            reclaim_buffer(&mut self.ssbo, &self.in_flight_fence);
+            reclaim_buffer(&mut self.ref_orbit, &self.in_flight_fence);
+
             ffi::vk_reset_fences(&self.ctx, &mut self.in_flight_fence);
 
-            // Now safe to write SSBO data (previous frame is done using it)
+            // Now safe to write SSBO data — HostOwned proved by reclaim_buffer
             if self.perturbation_mode {
                 if self.ref_orbit_dirty {
                     self.compute_and_upload_ref_orbit();
@@ -1380,6 +1376,10 @@ mod vulkan {
             } else {
                 self.upload_ssbo();
             }
+
+            // Release both SSBOs before GPU submission
+            release_buffer(&mut self.ssbo);
+            release_buffer(&mut self.ref_orbit);
 
             let idx = ffi::vk_acquire_next_image(
                 &self.ctx,
@@ -1442,6 +1442,9 @@ mod vulkan {
                     pixel_scale: self.pixel_scale,
                     ref_offset_px_re: self.ref_offset_re,
                     ref_offset_px_im: self.ref_offset_im,
+                    sa_re: self.sa_re,
+                    sa_im: self.sa_im,
+                    skip_iters: self.skip_iters,
                 };
                 let pc_bytes: &[u8] = unsafe {
                     std::slice::from_raw_parts(
@@ -1549,8 +1552,35 @@ mod vulkan {
         }
 
         pub fn destroy(&mut self) {
+            unsafe { let _ = self.ctx.device.device_wait_idle(); }
+
+            // After device_wait_idle, fence is conceptually signaled.
+            // Wait on it to prove fence@.signaled for reclaim.
+            ffi::vk_wait_for_fences(
+                &self.ctx,
+                &mut self.in_flight_fence,
+                Ghost::assume_new(),
+                u64::MAX,
+            );
+
+            // Reclaim SSBOs so they are HostOwned (required for destroy)
+            reclaim_buffer(&mut self.ssbo, &self.in_flight_fence);
+            reclaim_buffer(&mut self.ref_orbit, &self.in_flight_fence);
+
+            // Move SSBOs out and destroy via FFI
+            let ssbo = std::mem::replace(&mut self.ssbo, RuntimeMappedBuffer {
+                handle: 0, mem_handle: 0, mapped_ptr: 0, size: 0,
+                state: Ghost::assume_new(),
+            });
+            ffi::vk_destroy_mapped_buffer(&self.ctx, ssbo);
+
+            let ref_orbit = std::mem::replace(&mut self.ref_orbit, RuntimeMappedBuffer {
+                handle: 0, mem_handle: 0, mapped_ptr: 0, size: 0,
+                state: Ghost::assume_new(),
+            });
+            ffi::vk_destroy_mapped_buffer(&self.ctx, ref_orbit);
+
             unsafe {
-                let _ = self.ctx.device.device_wait_idle();
                 for pv in &self.pipelines {
                     self.ctx.device.destroy_pipeline(
                         vk::Pipeline::from_raw(pv.compute_pipeline.handle),
@@ -1573,10 +1603,6 @@ mod vulkan {
                     vk::DescriptorSetLayout::from_raw(self.descriptor_set_layout.handle),
                     None,
                 );
-                // Destroy coordinate SSBO
-                self.ctx.device.unmap_memory(self.ssbo_memory);
-                self.ctx.device.destroy_buffer(self.ssbo_buffer, None);
-                self.ctx.device.free_memory(self.ssbo_memory, None);
 
                 // Destroy perturbation resources
                 self.ctx.device.destroy_pipeline(
@@ -1595,9 +1621,6 @@ mod vulkan {
                     vk::DescriptorPool::from_raw(self.perturb_descriptor_pool.handle),
                     None,
                 );
-                self.ctx.device.unmap_memory(self.ref_orbit_memory);
-                self.ctx.device.destroy_buffer(self.ref_orbit_buffer, None);
-                self.ctx.device.free_memory(self.ref_orbit_memory, None);
 
                 for iv in &self.image_views {
                     self.ctx
