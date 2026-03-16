@@ -2,8 +2,9 @@
 use crate::perturbation::*;
 #[cfg(verus_keep_ghost)]
 use crate::series_approximation::*;
-#[cfg(verus_keep_ghost)]
 use crate::runtime_perturbation::RefOrbitPoint;
+#[cfg(not(verus_keep_ghost))]
+use vstd::prelude::Ghost;
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
@@ -11,7 +12,6 @@ use verus_rational::RuntimeRational;
 #[cfg(verus_keep_ghost)]
 use verus_rational::Rational;
 
-#[cfg(verus_keep_ghost)]
 verus! {
 
 /// Copy a RuntimeRational by copying its internal witnesses.

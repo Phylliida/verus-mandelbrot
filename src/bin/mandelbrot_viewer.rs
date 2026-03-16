@@ -21,6 +21,9 @@
 //! Run: `cargo run --bin mandelbrot_viewer --features viewer`
 
 use std::collections::HashSet;
+use verus_mandelbrot::runtime_perturbation::compute_ref_orbit;
+use verus_mandelbrot::runtime_series_approximation::compute_sa_coefficients;
+use verus_mandelbrot::sa_compute::{fp_to_rational, rational_to_f64, orbit_to_f32, find_sa_skip};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, WindowEvent},
@@ -211,11 +214,6 @@ fn fp_mul(a: &[u32], b: &[u32]) -> Vec<u32> {
         r[i] = acc[i] as u32;
     }
     r
-}
-
-/// Signed multiply: returns (|a*b|, sign).
-fn signed_mul(a: &[u32], a_sign: bool, b: &[u32], b_sign: bool) -> (Vec<u32>, bool) {
-    (fp_mul(a, b), a_sign != b_sign)
 }
 
 /// Extend limbs from old_n to new_n (pad with zeros on LSB side).
@@ -1069,87 +1067,6 @@ mod vulkan {
             if sign { -val } else { val }
         }
 
-        /// Compute a single reference orbit in full-precision fixed-point.
-        /// Returns (orbit_f32_pairs, iteration_count, sa_coeffs) where sa_coeffs
-        /// is a Vec of (A_re, A_im) f64 pairs for Series Approximation.
-        fn compute_ref_orbit_fp(
-            cr: &[u32], cr_sign: bool,
-            ci: &[u32], ci_sign: bool,
-            max_pts: usize,
-        ) -> (Vec<f32>, usize, Vec<(f64, f64)>) {
-            let n = cr.len();
-            let mut orbit: Vec<f32> = Vec::with_capacity(max_pts * 2);
-            let mut sa_coeffs: Vec<(f64, f64)> = Vec::with_capacity(max_pts);
-            let mut zr = fp_zero(n);
-            let mut zr_sign = false;
-            let mut zi = fp_zero(n);
-            let mut zi_sign = false;
-            let mut iters = 0usize;
-
-            // SA coefficient: A_{n+1} = 2*Z_n*A_n + 1, A_0 = 0
-            let mut a_re = 0.0f64;
-            let mut a_im = 0.0f64;
-
-            // Escape threshold: |z|² > 4 means integer limb >= 5
-            // (conservative: check if zr² + zi² integer part > 4)
-            let four = {
-                let mut v = fp_zero(n);
-                v[0] = 4;
-                v
-            };
-
-            for _ in 0..max_pts {
-                // Convert current z to f64 for SA computation
-                let z_re_f64 = Self::fp_to_f64(&zr, zr_sign);
-                let z_im_f64 = Self::fp_to_f64(&zi, zi_sign);
-
-                // Store orbit point as f32
-                orbit.push(z_re_f64 as f32);
-                orbit.push(z_im_f64 as f32);
-
-                // Store SA coefficient for this iteration
-                sa_coeffs.push((a_re, a_im));
-
-                iters += 1;
-
-                // Update SA: A_{n+1} = 2*Z_n*A_n + 1
-                // Re: 2*(Z_re*A_re - Z_im*A_im) + 1
-                // Im: 2*(Z_re*A_im + Z_im*A_re)
-                let new_a_re = 2.0 * (z_re_f64 * a_re - z_im_f64 * a_im) + 1.0;
-                let new_a_im = 2.0 * (z_re_f64 * a_im + z_im_f64 * a_re);
-                a_re = new_a_re;
-                a_im = new_a_im;
-
-                // z = z² + c
-                // new_zr = zr² - zi² + cr
-                // new_zi = 2·zr·zi + ci
-                let (zr2, zr2_sign) = signed_mul(&zr, zr_sign, &zr, zr_sign); // zr², always positive
-                let (zi2, zi2_sign) = signed_mul(&zi, zi_sign, &zi, zi_sign); // zi², always positive
-                let (zrzi, zrzi_sign) = signed_mul(&zr, zr_sign, &zi, zi_sign);
-                let two_zrzi = fp_add(&zrzi, &zrzi); // 2·zr·zi (unsigned double)
-
-                // new_zr = (zr² - zi²) + cr
-                let (diff, diff_sign) = signed_add(&zr2, zr2_sign, &zi2, !zi2_sign);
-                let (new_zr, new_zr_sign) = signed_add(&diff, diff_sign, cr, cr_sign);
-
-                // new_zi = 2·zr·zi + ci
-                let (new_zi, new_zi_sign) = signed_add(&two_zrzi, zrzi_sign, ci, ci_sign);
-
-                zr = new_zr;
-                zr_sign = new_zr_sign;
-                zi = new_zi;
-                zi_sign = new_zi_sign;
-
-                // Escape check: |z|² > 4
-                // zr² + zi² (both positive after squaring)
-                let mag2 = fp_add(&fp_mul(&zr, &zr), &fp_mul(&zi, &zi));
-                if fp_ge(&mag2, &four) {
-                    break;
-                }
-            }
-            (orbit, iters, sa_coeffs)
-        }
-
         /// Quick escape test: returns iteration count before escape (up to probe_iters).
         fn probe_escape_fp(
             cr: &[u32], cr_sign: bool,
@@ -1264,84 +1181,42 @@ mod vulkan {
                 }
             }
 
-            // Compute the full orbit at the best point found
-            let (mut best_orbit, best_iters, sa_coeffs) = Self::compute_ref_orbit_fp(
-                &cur_re, cur_re_sign, &cur_im, cur_im_sign, max_pts,
-            );
+            // Convert best point to RuntimeRational (verified exact arithmetic)
+            let center_re_rat = fp_to_rational(&cur_re, cur_re_sign);
+            let center_im_rat = fp_to_rational(&cur_im, cur_im_sign);
+
+            // Call verified compute_ref_orbit (exact rational Mandelbrot iteration)
+            let orbit = compute_ref_orbit(&center_re_rat, &center_im_rat, max_pts as u32);
+            let best_iters = orbit.len();
+
+            // Call verified compute_sa_coefficients
+            let sa_coeffs = compute_sa_coefficients(&orbit, &center_re_rat, &center_im_rat);
+
+            // Convert orbit to f32 pairs for GPU upload
+            let mut best_orbit = orbit_to_f32(&orbit);
 
             self.ref_offset_re = offset_re_px as f32;
             self.ref_offset_im = offset_im_px as f32;
             self.ref_orbit_len = (best_orbit.len() / 2) as u32;
 
-            // Compute SA skip
+            // Compute SA skip using verified SA coefficients
             let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
-            let max_offset = self.width.max(self.height) as f64 / 2.0;
-
-            // Use SA whenever pixel_step itself would be subnormal in f32.
-            // GPUs flush subnormals to zero BEFORE multiplication, so even if
-            // pixel_step * max_offset would be normal, the GPU computes px * 0 = 0.
             let needs_sa = pixel_step_f64 < f32::MIN_POSITIVE as f64;
+            let sa_result = find_sa_skip(&sa_coeffs, pixel_step_f64, needs_sa);
+            self.sa_re = sa_result.sa_re;
+            self.sa_im = sa_result.sa_im;
+            self.skip_iters = sa_result.skip_iters;
 
-            if !needs_sa {
-                // pixel_step produces normal f32 values, no SA needed
-                self.sa_re = 0.0;
-                self.sa_im = 0.0;
-                self.skip_iters = 0;
-            } else {
-                // Find the best SA skip point. We need:
-                //   |A_skip * pixel_step| to be a normal f32 (not subnormal)
-                // so the GPU doesn't flush it to zero. The sa value gets multiplied
-                // by pixel offsets up to max_offset in the shader, producing δ.
-                // We want |sa| itself to be normal so per-pixel differences survive.
-                let sa_normal_threshold = f32::MIN_POSITIVE as f64;
-
-                // Find the iteration where |A| * pixel_step first produces a normal f32
-                let mut skip_n = 0usize;
-                let mut best_skip = 0usize;
-                let mut best_sa_mag = 0.0f64;
-                for (i, &(a_re, a_im)) in sa_coeffs.iter().enumerate() {
-                    let sa_re_f64 = a_re * pixel_step_f64;
-                    let sa_im_f64 = a_im * pixel_step_f64;
-                    let sa_mag = sa_re_f64.abs().max(sa_im_f64.abs());
-
-                    if sa_mag >= sa_normal_threshold && skip_n == 0 {
-                        skip_n = i;
-                    }
-                    // Track the largest |sa| that still fits in f32
-                    // (stop if A overflows or sa would exceed f32 range)
-                    if sa_mag > best_sa_mag && sa_mag < f32::MAX as f64 * 0.5 {
-                        best_sa_mag = sa_mag;
-                        best_skip = i;
-                    }
-                }
-
-                // Use the first iteration where sa is normal; fall back to best available
-                if skip_n == 0 && best_skip > 0 {
-                    skip_n = best_skip;
-                }
-
-                if skip_n > 0 {
-                    let (a_re, a_im) = sa_coeffs[skip_n];
-                    self.sa_re = (a_re * pixel_step_f64) as f32;
-                    self.sa_im = (a_im * pixel_step_f64) as f32;
-                    self.skip_iters = skip_n as u32;
-                    eprintln!(
-                        "SA: skip {} iters, sa=({:e}, {:e}), pixel_step_f64={:e}, |A|={:e}",
-                        skip_n, self.sa_re, self.sa_im, pixel_step_f64,
-                        sa_coeffs[skip_n].0.hypot(sa_coeffs[skip_n].1),
-                    );
-                } else {
-                    // A never exceeded threshold — interior point with tiny A.
-                    // Use A=1 equivalent: just pass pixel_step scaled up slightly.
-                    // This won't produce great images but avoids total black.
-                    self.sa_re = 0.0;
-                    self.sa_im = 0.0;
-                    self.skip_iters = 0;
-                    eprintln!(
-                        "SA: no valid skip found (pixel_step_f64={:e}, orbit_len={}, max |A|={:e})",
-                        pixel_step_f64, sa_coeffs.len(), best_sa_mag / pixel_step_f64,
-                    );
-                }
+            if sa_result.skip_iters > 0 {
+                eprintln!(
+                    "SA: skip {} iters, sa=({:e}, {:e}), pixel_step_f64={:e}",
+                    sa_result.skip_iters, sa_result.sa_re, sa_result.sa_im, pixel_step_f64,
+                );
+            } else if needs_sa {
+                eprintln!(
+                    "SA: no valid skip found (pixel_step_f64={:e}, orbit_len={})",
+                    pixel_step_f64, sa_coeffs.len(),
+                );
             }
 
             // Upload to SSBO (clamp to buffer size)
