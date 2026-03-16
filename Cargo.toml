@@ -9,6 +9,22 @@ verus-algebra = { path = "../verus-algebra" }
 verus-bigint = { path = "../verus-bigint" }
 verus-rational = { path = "../verus-rational" }
 verus-interval-arithmetic = { path = "../verus-interval-arithmetic" }
+verus-vulkan = { path = "../verus-vulkan", default-features = false }
+builtin = { package = "verus_builtin", path = "../verus/source/builtin" }
+
+# Windowing deps (for viewer binary)
+ash = { version = "0.38", optional = true }
+winit = { version = "0.30", optional = true }
+ash-window = { version = "0.13", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[features]
+viewer = ["ash", "winit", "ash-window", "raw-window-handle"]
+
+[[bin]]
+name = "mandelbrot_viewer"
+path = "src/bin/mandelbrot_viewer.rs"
+required-features = ["viewer"]
 
 [package.metadata.verus]
 verify = true
