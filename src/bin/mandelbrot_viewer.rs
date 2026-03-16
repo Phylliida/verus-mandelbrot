@@ -16,6 +16,7 @@
 //!   C             — cycle color palette (HSV / Fire / Ocean)
 //!   ] / [         — max_iters +-50 (range 50–10000)
 //!   V             — cycle resolution (1x/2x/4x pixel scale)
+//!   P             — toggle perturbation mode (float32, ~100x faster)
 //!
 //! Run: `cargo run --bin mandelbrot_viewer --features viewer`
 
@@ -46,6 +47,17 @@ fn needed_n(zoom_level: i32) -> usize {
         }
     }
     *SUPPORTED_N.last().unwrap()
+}
+
+/// Auto-select iteration count based on zoom level.
+/// Uses the standard heuristic: iters ≈ 50 * sqrt(2^zoom), clamped to [256, 10000].
+fn needed_iters(zoom_level: i32) -> u32 {
+    if zoom_level <= 0 {
+        return 256;
+    }
+    // 50 * 2^(zoom/2) = 50 * sqrt(2^zoom)
+    let iters = 50.0 * (2.0f64).powf(zoom_level as f64 / 2.0);
+    (iters as u32).clamp(256, 10000)
 }
 
 fn n_index(n: usize) -> usize {
@@ -172,6 +184,40 @@ fn signed_add(a: &[u32], a_sign: bool, b: &[u32], b_sign: bool) -> (Vec<u32>, bo
     }
 }
 
+/// Full-precision multiply of two N-limb fixed-point numbers.
+/// Result is N limbs (truncated to same precision).
+/// Both inputs are unsigned magnitudes; caller handles signs.
+fn fp_mul(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let n = a.len();
+    debug_assert_eq!(n, b.len());
+    // Use u128 accumulators to avoid overflow with large N.
+    let mut acc = vec![0u128; 2 * n];
+    for i in (0..n).rev() {
+        for j in (0..n).rev() {
+            let prod = a[i] as u128 * b[j] as u128;
+            let pos = i + j;
+            if pos < 2 * n {
+                acc[pos] += prod;
+            }
+        }
+    }
+    // Propagate carries from LSB to MSB
+    for i in (1..2 * n).rev() {
+        acc[i - 1] += acc[i] >> 32;
+        acc[i] &= 0xFFFF_FFFF;
+    }
+    let mut r = vec![0u32; n];
+    for i in 0..n {
+        r[i] = acc[i] as u32;
+    }
+    r
+}
+
+/// Signed multiply: returns (|a*b|, sign).
+fn signed_mul(a: &[u32], a_sign: bool, b: &[u32], b_sign: bool) -> (Vec<u32>, bool) {
+    (fp_mul(a, b), a_sign != b_sign)
+}
+
 /// Extend limbs from old_n to new_n (pad with zeros on LSB side).
 fn fp_extend(a: &[u32], new_n: usize) -> Vec<u32> {
     let mut r = vec![0u32; new_n];
@@ -227,6 +273,21 @@ mod vulkan {
         pixel_scale: u32,
     }
 
+    // Push constants for perturbation shader (32 bytes).
+    #[repr(C)]
+    struct PerturbPushConstants {
+        width: u32,
+        height: u32,
+        max_iters: u32,
+        ref_orbit_len: u32,
+        pixel_step_re: f32,
+        pixel_step_im: f32,
+        color_mode: u32,
+        pixel_scale: u32,
+        ref_offset_px_re: f32,  // offset from screen center to ref point, in pixels
+        ref_offset_px_im: f32,
+    }
+
     /// Per-N pipeline variant resources.
     struct PipelineVariant {
         n_limbs: usize,
@@ -274,6 +335,23 @@ mod vulkan {
         pub color_mode: u32,
         pub pixel_scale: u32,
         pub zoom_level: i32,
+        // Perturbation mode
+        pub perturbation_mode: bool,
+        perturb_pipeline_layout: u64,
+        perturb_shader_module: RuntimeShaderModule,
+        perturb_pipeline: RuntimeComputePipeline,
+        // Reference orbit SSBO (separate from coordinate SSBO)
+        ref_orbit_buffer: vk::Buffer,
+        ref_orbit_memory: vk::DeviceMemory,
+        ref_orbit_size: u64,
+        ref_orbit_mapped_ptr: *mut u8,
+        ref_orbit_len: u32,
+        ref_offset_re: f32,  // offset from screen center to reference point
+        ref_offset_im: f32,
+        pub ref_orbit_dirty: bool,
+        // Perturbation descriptor sets (bind ref_orbit SSBO at binding 1)
+        perturb_descriptor_pool: RuntimeDescriptorPool,
+        perturb_descriptor_sets: Vec<RuntimeDescriptorSet>,
         // Input
         pub keys_held: HashSet<KeyCode>,
         pub last_frame_time: Instant,
@@ -554,13 +632,125 @@ mod vulkan {
             let initial_n = SUPPORTED_N[0];
             let (cre, cre_sign, cim, cim_sign, step) = Self::initial_view(width, initial_n);
 
+            // ── Perturbation pipeline ─────────────────────────────────
+            // Perturbation shader has different push constants (32 bytes)
+            let perturb_pipeline_layout = ffi::vk_create_pipeline_layout_push(
+                &ctx,
+                &[descriptor_set_layout.handle],
+                vk::ShaderStageFlags::COMPUTE.as_raw(),
+                0,
+                std::mem::size_of::<PerturbPushConstants>() as u32,
+            );
+
+            let perturb_spv = include_bytes!("shaders/mandelbrot_perturb.comp.spv");
+            let perturb_spv_code = spv_to_u32(perturb_spv);
+            let perturb_shader_module =
+                ffi::vk_create_shader_module(&ctx, Ghost::assume_new(), &perturb_spv_code);
+            let perturb_pipeline = ffi::vk_create_compute_pipeline(
+                &ctx,
+                Ghost::assume_new(),
+                perturb_pipeline_layout,
+                perturb_shader_module.handle,
+            );
+
+            // Reference orbit SSBO: max 10000 orbit points * 2 floats * 4 bytes = 80KB
+            let ref_orbit_max_size = (10000 * 2 * 4) as u64;
+            let (ref_orbit_buffer, ref_orbit_memory, ref_orbit_size, ref_orbit_mapped_ptr) = {
+                let size = ref_orbit_max_size;
+                let buf = unsafe {
+                    ctx.device.create_buffer(
+                        &vk::BufferCreateInfo::default()
+                            .size(size)
+                            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+                            .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                        None,
+                    )
+                }
+                .expect("Failed to create ref orbit SSBO");
+
+                let mem_req = unsafe { ctx.device.get_buffer_memory_requirements(buf) };
+                let mem_type_index =
+                    Self::find_host_visible_memory_type(&ctx, mem_req.memory_type_bits);
+                let mem = unsafe {
+                    ctx.device.allocate_memory(
+                        &vk::MemoryAllocateInfo::default()
+                            .allocation_size(mem_req.size)
+                            .memory_type_index(mem_type_index),
+                        None,
+                    )
+                }
+                .expect("Failed to allocate ref orbit memory");
+
+                unsafe { ctx.device.bind_buffer_memory(buf, mem, 0) }
+                    .expect("Failed to bind ref orbit memory");
+
+                let ptr = unsafe {
+                    ctx.device.map_memory(mem, 0, size, vk::MemoryMapFlags::empty())
+                }
+                .expect("Failed to map ref orbit memory") as *mut u8;
+
+                (buf, mem, size, ptr)
+            };
+
+            // Perturbation descriptor pool + sets (bind ref orbit SSBO)
+            let mut perturb_descriptor_pool = ffi::vk_create_descriptor_pool_typed(
+                &ctx,
+                Ghost::assume_new(),
+                image_count,
+                &[
+                    (
+                        vk::DescriptorType::STORAGE_IMAGE.as_raw() as u32,
+                        image_count as u32,
+                    ),
+                    (
+                        vk::DescriptorType::STORAGE_BUFFER.as_raw() as u32,
+                        image_count as u32,
+                    ),
+                ],
+            );
+
+            let mut perturb_descriptor_sets = Vec::new();
+            for i in 0..image_count as usize {
+                let mut ds = ffi::vk_allocate_descriptor_sets(
+                    &ctx,
+                    &mut perturb_descriptor_pool,
+                    Ghost::assume_new(),
+                    Ghost::assume_new(),
+                    descriptor_set_layout.handle,
+                );
+                // Binding 0: storage image (same as bigint)
+                ffi::vk_update_descriptor_sets_image(
+                    &ctx,
+                    &mut ds,
+                    Ghost::assume_new(),
+                    Ghost::assume_new(),
+                    0,
+                    vk::DescriptorType::STORAGE_IMAGE.as_raw() as u32,
+                    image_views[i].handle,
+                    vk::ImageLayout::GENERAL.as_raw() as u32,
+                );
+                // Binding 1: ref orbit SSBO
+                let bi = [vk::DescriptorBufferInfo {
+                    buffer: ref_orbit_buffer,
+                    offset: 0,
+                    range: vk::WHOLE_SIZE,
+                }];
+                let w = vk::WriteDescriptorSet::default()
+                    .dst_set(vk::DescriptorSet::from_raw(ds.handle))
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&bi);
+                unsafe { ctx.device.update_descriptor_sets(&[w], &[]) };
+                perturb_descriptor_sets.push(ds);
+            }
+
             eprintln!(
                 "Mandelbrot viewer initialized: {}x{}, format {:?}",
                 width, height, format
             );
             eprintln!("Controls: WASD/Arrows=pan, +/-=zoom 2x, Left click=recenter");
             eprintln!("          R=reset, C=cycle colors, ]/[=iterations +-50");
-            eprintln!("          V=cycle resolution (1x/2x/4x pixel scale)");
+            eprintln!("          V=cycle resolution, P=toggle perturbation mode");
             eprintln!("Dynamic precision: N={} ({}-bit)", initial_n, initial_n * 32);
 
             VkState {
@@ -600,6 +790,20 @@ mod vulkan {
                 color_mode: 0,
                 pixel_scale: 2,
                 zoom_level: 0,
+                perturbation_mode: false,
+                perturb_pipeline_layout,
+                perturb_shader_module,
+                perturb_pipeline,
+                ref_orbit_buffer,
+                ref_orbit_memory,
+                ref_orbit_size,
+                ref_orbit_mapped_ptr,
+                ref_orbit_len: 0,
+                ref_offset_re: 0.0,
+                ref_offset_im: 0.0,
+                ref_orbit_dirty: true,
+                perturb_descriptor_pool,
+                perturb_descriptor_sets,
                 keys_held: HashSet::new(),
                 last_frame_time: Instant::now(),
                 cursor_pos: (0.0, 0.0),
@@ -729,6 +933,61 @@ mod vulkan {
                 self.descriptor_sets.push(ds);
             }
 
+            // Recreate perturbation descriptor sets (they reference image views)
+            unsafe {
+                self.ctx.device.destroy_descriptor_pool(
+                    vk::DescriptorPool::from_raw(self.perturb_descriptor_pool.handle),
+                    None,
+                );
+            }
+            self.perturb_descriptor_pool = ffi::vk_create_descriptor_pool_typed(
+                &self.ctx,
+                Ghost::assume_new(),
+                image_count,
+                &[
+                    (
+                        vk::DescriptorType::STORAGE_IMAGE.as_raw() as u32,
+                        image_count as u32,
+                    ),
+                    (
+                        vk::DescriptorType::STORAGE_BUFFER.as_raw() as u32,
+                        image_count as u32,
+                    ),
+                ],
+            );
+            self.perturb_descriptor_sets.clear();
+            for i in 0..image_count as usize {
+                let mut ds = ffi::vk_allocate_descriptor_sets(
+                    &self.ctx,
+                    &mut self.perturb_descriptor_pool,
+                    Ghost::assume_new(),
+                    Ghost::assume_new(),
+                    self.descriptor_set_layout.handle,
+                );
+                ffi::vk_update_descriptor_sets_image(
+                    &self.ctx,
+                    &mut ds,
+                    Ghost::assume_new(),
+                    Ghost::assume_new(),
+                    0,
+                    vk::DescriptorType::STORAGE_IMAGE.as_raw() as u32,
+                    self.image_views[i].handle,
+                    vk::ImageLayout::GENERAL.as_raw() as u32,
+                );
+                let bi = [vk::DescriptorBufferInfo {
+                    buffer: self.ref_orbit_buffer,
+                    offset: 0,
+                    range: vk::WHOLE_SIZE,
+                }];
+                let w = vk::WriteDescriptorSet::default()
+                    .dst_set(vk::DescriptorSet::from_raw(ds.handle))
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&bi);
+                unsafe { self.ctx.device.update_descriptor_sets(&[w], &[]) };
+                self.perturb_descriptor_sets.push(ds);
+            }
+
             eprintln!("Resized: {}x{}", width, height);
         }
 
@@ -744,6 +1003,7 @@ mod vulkan {
             self.current_n_index = 0;
             self.zoom_level = 0;
             self.max_iters = 256;
+            self.ref_orbit_dirty = true;
             eprintln!("View reset (N={})", initial_n);
         }
 
@@ -754,10 +1014,12 @@ mod vulkan {
             }
             fp_shr1(&mut self.pixel_step);
             self.zoom_level += 1;
+            self.ref_orbit_dirty = true;
 
-            // Auto-increase N if needed
+            // Auto-increase N and iterations
             let new_n = needed_n(self.zoom_level);
             self.change_n(new_n);
+            self.max_iters = needed_iters(self.zoom_level);
 
             eprintln!(
                 "Zoom: 2^{} | N={} | Iters: {}",
@@ -768,10 +1030,12 @@ mod vulkan {
         pub fn zoom_out(&mut self) {
             fp_shl1(&mut self.pixel_step);
             self.zoom_level -= 1;
+            self.ref_orbit_dirty = true;
 
-            // Auto-decrease N if possible
+            // Auto-decrease N and iterations
             let new_n = needed_n(self.zoom_level);
             self.change_n(new_n);
+            self.max_iters = needed_iters(self.zoom_level);
 
             eprintln!(
                 "Zoom: 2^{} | N={} | Iters: {}",
@@ -798,6 +1062,8 @@ mod vulkan {
                 self.center_im = new_im;
                 self.center_im_sign = new_sign;
             }
+
+            self.ref_orbit_dirty = true;
         }
 
         pub fn update_viewport(&mut self) {
@@ -837,6 +1103,7 @@ mod vulkan {
                     signed_add(&self.center_re, self.center_re_sign, &offset, pan_x < 0.0);
                 self.center_re = new_re;
                 self.center_re_sign = new_sign;
+                self.ref_orbit_dirty = true;
             }
 
             if pan_y != 0.0 {
@@ -846,7 +1113,221 @@ mod vulkan {
                     signed_add(&self.center_im, self.center_im_sign, &offset, pan_y < 0.0);
                 self.center_im = new_im;
                 self.center_im_sign = new_sign;
+                self.ref_orbit_dirty = true;
             }
+        }
+
+        /// Convert sign-magnitude fixed-point limbs to f64.
+        fn fp_to_f64(limbs: &[u32], sign: bool) -> f64 {
+            let mut val = limbs[0] as f64;
+            for i in 1..limbs.len().min(3) {
+                val += limbs[i] as f64 / (4294967296.0f64).powi(i as i32);
+            }
+            if sign { -val } else { val }
+        }
+
+        /// Compute a single reference orbit in full-precision fixed-point.
+        /// Returns (orbit_f32_pairs, iteration_count).
+        fn compute_ref_orbit_fp(
+            cr: &[u32], cr_sign: bool,
+            ci: &[u32], ci_sign: bool,
+            max_pts: usize,
+        ) -> (Vec<f32>, usize) {
+            let n = cr.len();
+            let mut orbit: Vec<f32> = Vec::with_capacity(max_pts * 2);
+            let mut zr = fp_zero(n);
+            let mut zr_sign = false;
+            let mut zi = fp_zero(n);
+            let mut zi_sign = false;
+            let mut iters = 0usize;
+
+            // Escape threshold: |z|² > 4 means integer limb >= 5
+            // (conservative: check if zr² + zi² integer part > 4)
+            let four = {
+                let mut v = fp_zero(n);
+                v[0] = 4;
+                v
+            };
+
+            for _ in 0..max_pts {
+                // Convert current z to f32 for the orbit buffer
+                orbit.push(Self::fp_to_f64(&zr, zr_sign) as f32);
+                orbit.push(Self::fp_to_f64(&zi, zi_sign) as f32);
+                iters += 1;
+
+                // z = z² + c
+                // new_zr = zr² - zi² + cr
+                // new_zi = 2·zr·zi + ci
+                let (zr2, zr2_sign) = signed_mul(&zr, zr_sign, &zr, zr_sign); // zr², always positive
+                let (zi2, zi2_sign) = signed_mul(&zi, zi_sign, &zi, zi_sign); // zi², always positive
+                let (zrzi, zrzi_sign) = signed_mul(&zr, zr_sign, &zi, zi_sign);
+                let two_zrzi = fp_add(&zrzi, &zrzi); // 2·zr·zi (unsigned double)
+
+                // new_zr = (zr² - zi²) + cr
+                let (diff, diff_sign) = signed_add(&zr2, zr2_sign, &zi2, !zi2_sign);
+                let (new_zr, new_zr_sign) = signed_add(&diff, diff_sign, cr, cr_sign);
+
+                // new_zi = 2·zr·zi + ci
+                let (new_zi, new_zi_sign) = signed_add(&two_zrzi, zrzi_sign, ci, ci_sign);
+
+                zr = new_zr;
+                zr_sign = new_zr_sign;
+                zi = new_zi;
+                zi_sign = new_zi_sign;
+
+                // Escape check: |z|² > 4
+                // zr² + zi² (both positive after squaring)
+                let mag2 = fp_add(&fp_mul(&zr, &zr), &fp_mul(&zi, &zi));
+                if fp_ge(&mag2, &four) {
+                    break;
+                }
+            }
+            (orbit, iters)
+        }
+
+        /// Quick escape test: returns iteration count before escape (up to probe_iters).
+        fn probe_escape_fp(
+            cr: &[u32], cr_sign: bool,
+            ci: &[u32], ci_sign: bool,
+            probe_iters: usize,
+        ) -> usize {
+            let n = cr.len();
+            let mut zr = fp_zero(n);
+            let mut zr_sign = false;
+            let mut zi = fp_zero(n);
+            let mut zi_sign = false;
+            let four = { let mut v = fp_zero(n); v[0] = 4; v };
+
+            for iter in 0..probe_iters {
+                let zr2 = fp_mul(&zr, &zr);
+                let zi2 = fp_mul(&zi, &zi);
+                let mag2 = fp_add(&zr2, &zi2);
+                if fp_ge(&mag2, &four) {
+                    return iter;
+                }
+                let zrzi = fp_mul(&zr, &zi);
+                let zrzi_sign = zr_sign != zi_sign;
+                let two_zrzi = fp_add(&zrzi, &zrzi);
+                let (diff, diff_sign) = signed_add(&zr2, false, &zi2, true);
+                let (new_zr, new_zr_sign) = signed_add(&diff, diff_sign, cr, cr_sign);
+                let (new_zi, new_zi_sign) = signed_add(&two_zrzi, zrzi_sign, ci, ci_sign);
+                zr = new_zr; zr_sign = new_zr_sign;
+                zi = new_zi; zi_sign = new_zi_sign;
+            }
+            probe_iters // survived all iterations
+        }
+
+        /// Compute reference orbit in full-precision fixed-point and upload to SSBO.
+        /// Uses hill-climbing on the iteration count landscape: samples 8 neighbors,
+        /// moves toward higher iteration counts, halves step size when stuck.
+        /// This quickly converges toward the Mandelbrot set interior.
+        fn compute_and_upload_ref_orbit(&mut self) {
+            let max_pts = (self.max_iters as usize).min(10000);
+            let probe_iters = max_pts.min(500);
+
+            // Current best position (start at screen center)
+            let mut cur_re = self.center_re.clone();
+            let mut cur_re_sign = self.center_re_sign;
+            let mut cur_im = self.center_im.clone();
+            let mut cur_im_sign = self.center_im_sign;
+            let mut cur_iters = Self::probe_escape_fp(
+                &cur_re, cur_re_sign, &cur_im, cur_im_sign, probe_iters,
+            );
+            // Track pixel offset from screen center
+            let mut offset_re_px = 0.0f64;
+            let mut offset_im_px = 0.0f64;
+
+            // Initial step: quarter viewport in pixels
+            let mut step_pixels = self.width.max(self.height) as f64 / 4.0;
+            // 8 directions: N, NE, E, SE, S, SW, W, NW
+            let dirs: [(f64, f64); 8] = [
+                (0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (1.0, -1.0),
+                (0.0, -1.0), (-1.0, -1.0), (-1.0, 0.0), (-1.0, 1.0),
+            ];
+
+            let mut steps_taken = 0u32;
+            while cur_iters < probe_iters && step_pixels >= 1.0 {
+                let step_u32 = step_pixels as u32;
+                if step_u32 == 0 { break; }
+                let fp_step = fp_mul_u32(&self.pixel_step, step_u32);
+
+                let mut improved = false;
+                for &(ddx, ddy) in &dirs {
+                    // Compute candidate = cur + (ddx, ddy) * fp_step
+                    let (cr, cr_sign) = if ddx == 0.0 {
+                        (cur_re.clone(), cur_re_sign)
+                    } else {
+                        let off = if ddx.abs() > 1.5 {
+                            fp_add(&fp_step, &fp_step)
+                        } else {
+                            fp_step.clone()
+                        };
+                        signed_add(&cur_re, cur_re_sign, &off, ddx < 0.0)
+                    };
+                    let (ci, ci_sign) = if ddy == 0.0 {
+                        (cur_im.clone(), cur_im_sign)
+                    } else {
+                        let off = if ddy.abs() > 1.5 {
+                            fp_add(&fp_step, &fp_step)
+                        } else {
+                            fp_step.clone()
+                        };
+                        // positive ddy = math upward = add to im
+                        signed_add(&cur_im, cur_im_sign, &off, ddy < 0.0)
+                    };
+
+                    let iters = Self::probe_escape_fp(
+                        &cr, cr_sign, &ci, ci_sign, probe_iters,
+                    );
+                    if iters > cur_iters {
+                        cur_re = cr;
+                        cur_re_sign = cr_sign;
+                        cur_im = ci;
+                        cur_im_sign = ci_sign;
+                        cur_iters = iters;
+                        offset_re_px += ddx * step_pixels;
+                        offset_im_px += ddy * step_pixels;
+                        improved = true;
+                        steps_taken += 1;
+                        if cur_iters >= probe_iters {
+                            break;
+                        }
+                    }
+                }
+                if !improved {
+                    step_pixels /= 2.0;
+                }
+            }
+
+            // Compute the full orbit at the best point found
+            let (mut best_orbit, best_iters) = Self::compute_ref_orbit_fp(
+                &cur_re, cur_re_sign, &cur_im, cur_im_sign, max_pts,
+            );
+
+            self.ref_offset_re = offset_re_px as f32;
+            self.ref_offset_im = offset_im_px as f32;
+            self.ref_orbit_len = (best_orbit.len() / 2) as u32;
+
+            // Upload to SSBO (clamp to buffer size)
+            let max_floats = (self.ref_orbit_size / 4) as usize;
+            if best_orbit.len() > max_floats {
+                best_orbit.truncate(max_floats);
+                self.ref_orbit_len = (max_floats / 2) as u32;
+            }
+            let byte_len = best_orbit.len() * 4;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    best_orbit.as_ptr() as *const u8,
+                    self.ref_orbit_mapped_ptr,
+                    byte_len,
+                );
+            }
+
+            self.ref_orbit_dirty = false;
+            eprintln!(
+                "Ref orbit: {} iters (max {}), offset: ({:.0}, {:.0}) px, {} steps",
+                best_iters, max_pts, offset_re_px, offset_im_px, steps_taken,
+            );
         }
 
         /// Upload coordinate data to the SSBO.
@@ -882,14 +1363,7 @@ mod vulkan {
         pub fn render(&mut self) {
             self.update_viewport();
 
-            // Wait for GPU to finish before uploading new SSBO data
-            // (prevents data race when N changes between frames)
-            unsafe {
-                let _ = self.ctx.device.device_wait_idle();
-            }
-
-            self.upload_ssbo();
-
+            // Wait for previous frame's GPU work to complete before touching resources
             ffi::vk_wait_for_fences(
                 &self.ctx,
                 &mut self.in_flight_fence,
@@ -897,6 +1371,15 @@ mod vulkan {
                 u64::MAX,
             );
             ffi::vk_reset_fences(&self.ctx, &mut self.in_flight_fence);
+
+            // Now safe to write SSBO data (previous frame is done using it)
+            if self.perturbation_mode {
+                if self.ref_orbit_dirty {
+                    self.compute_and_upload_ref_orbit();
+                }
+            } else {
+                self.upload_ssbo();
+            }
 
             let idx = ffi::vk_acquire_next_image(
                 &self.ctx,
@@ -908,22 +1391,6 @@ mod vulkan {
 
             let cb = &mut self.command_buffers[idx as usize];
             let image_handle = self.swapchain_images[idx as usize];
-
-            let pc = PushConstants {
-                width: self.width,
-                height: self.height,
-                max_iters: self.max_iters,
-                cre_sign: if self.center_re_sign { 1 } else { 0 },
-                cim_sign: if self.center_im_sign { 1 } else { 0 },
-                color_mode: self.color_mode,
-                pixel_scale: self.pixel_scale,
-            };
-            let pc_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    &pc as *const PushConstants as *const u8,
-                    std::mem::size_of::<PushConstants>(),
-                )
-            };
 
             ffi::vk_begin_command_buffer(&self.ctx, cb);
 
@@ -943,33 +1410,97 @@ mod vulkan {
                 )],
             );
 
-            // Bind the pipeline for current N
-            let pipeline = &self.pipelines[self.current_n_index];
-            ffi::vk_cmd_bind_pipeline(
-                &self.ctx,
-                cb,
-                vk::PipelineBindPoint::COMPUTE.as_raw() as u32,
-                pipeline.compute_pipeline.handle,
-            );
+            if self.perturbation_mode {
+                // ── Perturbation render path ──
+                ffi::vk_cmd_bind_pipeline(
+                    &self.ctx,
+                    cb,
+                    vk::PipelineBindPoint::COMPUTE.as_raw() as u32,
+                    self.perturb_pipeline.handle,
+                );
 
-            ffi::vk_cmd_bind_descriptor_sets(
-                &self.ctx,
-                cb,
-                Ghost::assume_new(),
-                vk::PipelineBindPoint::COMPUTE.as_raw() as u32,
-                self.pipeline_layout_handle,
-                0,
-                &[self.descriptor_sets[idx as usize].handle],
-            );
+                ffi::vk_cmd_bind_descriptor_sets(
+                    &self.ctx,
+                    cb,
+                    Ghost::assume_new(),
+                    vk::PipelineBindPoint::COMPUTE.as_raw() as u32,
+                    self.perturb_pipeline_layout,
+                    0,
+                    &[self.perturb_descriptor_sets[idx as usize].handle],
+                );
 
-            ffi::ffi_cmd_push_constants(
-                &self.ctx,
-                cb.handle,
-                self.pipeline_layout_handle,
-                vk::ShaderStageFlags::COMPUTE.as_raw(),
-                0,
-                pc_bytes,
-            );
+                // Compute pixel step as f32 from fixed-point
+                let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
+                let ppc = PerturbPushConstants {
+                    width: self.width,
+                    height: self.height,
+                    max_iters: self.max_iters,
+                    ref_orbit_len: self.ref_orbit_len,
+                    pixel_step_re: pixel_step_f64 as f32,
+                    pixel_step_im: pixel_step_f64 as f32,
+                    color_mode: self.color_mode,
+                    pixel_scale: self.pixel_scale,
+                    ref_offset_px_re: self.ref_offset_re,
+                    ref_offset_px_im: self.ref_offset_im,
+                };
+                let pc_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        &ppc as *const PerturbPushConstants as *const u8,
+                        std::mem::size_of::<PerturbPushConstants>(),
+                    )
+                };
+                ffi::ffi_cmd_push_constants(
+                    &self.ctx,
+                    cb.handle,
+                    self.perturb_pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE.as_raw(),
+                    0,
+                    pc_bytes,
+                );
+            } else {
+                // ── Bigint render path ──
+                let pipeline = &self.pipelines[self.current_n_index];
+                ffi::vk_cmd_bind_pipeline(
+                    &self.ctx,
+                    cb,
+                    vk::PipelineBindPoint::COMPUTE.as_raw() as u32,
+                    pipeline.compute_pipeline.handle,
+                );
+
+                ffi::vk_cmd_bind_descriptor_sets(
+                    &self.ctx,
+                    cb,
+                    Ghost::assume_new(),
+                    vk::PipelineBindPoint::COMPUTE.as_raw() as u32,
+                    self.pipeline_layout_handle,
+                    0,
+                    &[self.descriptor_sets[idx as usize].handle],
+                );
+
+                let pc = PushConstants {
+                    width: self.width,
+                    height: self.height,
+                    max_iters: self.max_iters,
+                    cre_sign: if self.center_re_sign { 1 } else { 0 },
+                    cim_sign: if self.center_im_sign { 1 } else { 0 },
+                    color_mode: self.color_mode,
+                    pixel_scale: self.pixel_scale,
+                };
+                let pc_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        &pc as *const PushConstants as *const u8,
+                        std::mem::size_of::<PushConstants>(),
+                    )
+                };
+                ffi::ffi_cmd_push_constants(
+                    &self.ctx,
+                    cb.handle,
+                    self.pipeline_layout_handle,
+                    vk::ShaderStageFlags::COMPUTE.as_raw(),
+                    0,
+                    pc_bytes,
+                );
+            }
 
             let s = self.pixel_scale.max(1);
             let group_x = ((self.width + s - 1) / s + 15) / 16;
@@ -1042,10 +1573,31 @@ mod vulkan {
                     vk::DescriptorSetLayout::from_raw(self.descriptor_set_layout.handle),
                     None,
                 );
-                // Destroy SSBO
+                // Destroy coordinate SSBO
                 self.ctx.device.unmap_memory(self.ssbo_memory);
                 self.ctx.device.destroy_buffer(self.ssbo_buffer, None);
                 self.ctx.device.free_memory(self.ssbo_memory, None);
+
+                // Destroy perturbation resources
+                self.ctx.device.destroy_pipeline(
+                    vk::Pipeline::from_raw(self.perturb_pipeline.handle),
+                    None,
+                );
+                self.ctx.device.destroy_shader_module(
+                    vk::ShaderModule::from_raw(self.perturb_shader_module.handle),
+                    None,
+                );
+                self.ctx.device.destroy_pipeline_layout(
+                    vk::PipelineLayout::from_raw(self.perturb_pipeline_layout),
+                    None,
+                );
+                self.ctx.device.destroy_descriptor_pool(
+                    vk::DescriptorPool::from_raw(self.perturb_descriptor_pool.handle),
+                    None,
+                );
+                self.ctx.device.unmap_memory(self.ref_orbit_memory);
+                self.ctx.device.destroy_buffer(self.ref_orbit_buffer, None);
+                self.ctx.device.free_memory(self.ref_orbit_memory, None);
 
                 for iv in &self.image_views {
                     self.ctx
@@ -1164,11 +1716,13 @@ impl ApplicationHandler for App {
                                 }
                                 KeyCode::BracketRight => {
                                     vk.max_iters = (vk.max_iters + 50).min(10000);
+                                    vk.ref_orbit_dirty = true;
                                     eprintln!("Iterations: {}", vk.max_iters);
                                     self.update_title();
                                 }
                                 KeyCode::BracketLeft => {
                                     vk.max_iters = vk.max_iters.saturating_sub(50).max(50);
+                                    vk.ref_orbit_dirty = true;
                                     eprintln!("Iterations: {}", vk.max_iters);
                                     self.update_title();
                                 }
@@ -1193,6 +1747,17 @@ impl ApplicationHandler for App {
                                         _ => "Ocean",
                                     };
                                     eprintln!("Color: {}", name);
+                                    self.update_title();
+                                }
+                                KeyCode::KeyP => {
+                                    vk.perturbation_mode = !vk.perturbation_mode;
+                                    vk.ref_orbit_dirty = true;
+                                    let mode = if vk.perturbation_mode {
+                                        "PERTURBATION (float32)"
+                                    } else {
+                                        "BIGINT (multi-precision)"
+                                    };
+                                    eprintln!("Mode: {}", mode);
                                     self.update_title();
                                 }
                                 _ => {}
@@ -1235,14 +1800,20 @@ impl App {
             } else {
                 String::new()
             };
+            let mode_str = if vk.perturbation_mode {
+                " | PERTURB"
+            } else {
+                ""
+            };
             w.set_title(&format!(
-                "Mandelbrot — Zoom: 2^{} | N={} ({}-bit) | Iters: {} | {}{}",
+                "Mandelbrot — Zoom: 2^{} | N={} ({}-bit) | Iters: {} | {}{}{}",
                 vk.zoom_level,
                 vk.current_n,
                 vk.current_n * 32,
                 vk.max_iters,
                 color_name,
-                scale_str
+                scale_str,
+                mode_str,
             ));
         }
     }

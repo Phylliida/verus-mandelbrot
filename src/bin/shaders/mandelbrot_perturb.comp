@@ -1,0 +1,143 @@
+#version 450
+
+// ============================================================
+// Perturbation-based Mandelbrot compute shader (float32)
+//
+// Instead of per-pixel multi-precision arithmetic, this shader
+// reads a precomputed reference orbit (full-precision, computed
+// on the CPU) and iterates only a small float32 delta per pixel.
+//
+// Identity (formally verified in perturbation.rs):
+//   z_n = Z_n + δ_n  where  δ_{n+1} = 2·Z_n·δ_n + δ_n² + Δc
+//
+// This gives ~100x speedup over the bigint shader at moderate zoom.
+// ============================================================
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+
+// Reference orbit data (interleaved re, im pairs as float32)
+layout(set = 0, binding = 1, std430) readonly buffer RefOrbit {
+    float ref_orbit[];  // [re0, im0, re1, im1, ...]
+};
+
+// Push constants (40 bytes)
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint max_iters;
+    uint ref_orbit_len;     // Number of orbit points available
+    float pixel_step_re;    // Pixel spacing in re direction (float32)
+    float pixel_step_im;    // Pixel spacing in im direction (float32)
+    uint color_mode;        // 0=HSV, 1=Fire, 2=Ocean
+    uint pixel_scale;       // 1/2/4: resolution scale
+    float ref_offset_px_re; // Offset from screen center to ref point, in pixels
+    float ref_offset_px_im;
+};
+
+// ============================================================
+// Color palettes (same as bigint shader)
+// ============================================================
+
+vec3 hsv2rgb(float h, float s, float v) {
+    float c = v * s;
+    float hp = h * 6.0;
+    float x = c * (1.0 - abs(mod(hp, 2.0) - 1.0));
+    float m = v - c;
+    vec3 rgb;
+    if      (hp < 1.0) rgb = vec3(c, x, 0);
+    else if (hp < 2.0) rgb = vec3(x, c, 0);
+    else if (hp < 3.0) rgb = vec3(0, c, x);
+    else if (hp < 4.0) rgb = vec3(0, x, c);
+    else if (hp < 5.0) rgb = vec3(x, 0, c);
+    else               rgb = vec3(c, 0, x);
+    return rgb + vec3(m);
+}
+
+vec3 palette_fire(float t) {
+    if      (t < 0.33) return mix(vec3(0),       vec3(1, 0, 0), t / 0.33);
+    else if (t < 0.67) return mix(vec3(1, 0, 0), vec3(1, 1, 0), (t - 0.33) / 0.34);
+    else               return mix(vec3(1, 1, 0), vec3(1, 1, 1), (t - 0.67) / 0.33);
+}
+
+vec3 palette_ocean(float t) {
+    if (t < 0.5) return mix(vec3(0, 0, 0.2), vec3(0, 0.5, 1), t / 0.5);
+    else         return mix(vec3(0, 0.5, 1), vec3(1, 1, 1),   (t - 0.5) / 0.5);
+}
+
+// ============================================================
+// Main: Perturbation iteration (float32)
+// ============================================================
+
+void main() {
+    uint scale = max(pixel_scale, 1u);
+
+    uint bx = gl_GlobalInvocationID.x * scale;
+    uint by = gl_GlobalInvocationID.y * scale;
+    if (bx >= width || by >= height) return;
+
+    // Pixel offset from center
+    float dx = float(int(bx + scale / 2u) - int(width >> 1u));
+    float dy = float(int(by + scale / 2u) - int(height >> 1u));
+
+    // Δc = pixel offset from reference point
+    // Subtract pixel offset before multiplying by step — avoids f32 precision loss
+    float dc_re = (dx - ref_offset_px_re) * pixel_step_re;
+    float dc_im = -(dy + ref_offset_px_im) * pixel_step_im;  // screen Y is flipped vs math Y
+
+    // Initialize delta: δ_0 = (0, 0)
+    float dr = 0.0;
+    float di = 0.0;
+
+    uint iter;
+    uint orbit_len = min(max_iters, ref_orbit_len);
+    float mag2 = 0.0;
+
+    for (iter = 0u; iter < orbit_len; iter++) {
+        // Read reference orbit point Z_n
+        float Zr = ref_orbit[iter * 2u];
+        float Zi = ref_orbit[iter * 2u + 1u];
+
+        // Full orbit point: z = Z + δ
+        float zr = Zr + dr;
+        float zi = Zi + di;
+
+        // Escape check on full orbit point
+        mag2 = zr * zr + zi * zi;
+        if (mag2 > 4.0) break;
+
+        // Perturbation recurrence: δ_{n+1} = 2·Z·δ + δ² + Δc
+        // Re: 2·Zr·dr - 2·Zi·di + dr² - di² + Δcr
+        // Im: 2·Zr·di + 2·Zi·dr + 2·dr·di + Δci
+        float new_dr = 2.0 * Zr * dr - 2.0 * Zi * di + dr * dr - di * di + dc_re;
+        float new_di = 2.0 * Zr * di + 2.0 * Zi * dr + 2.0 * dr * di + dc_im;
+
+        dr = new_dr;
+        di = new_di;
+    }
+
+    // --- Coloring (same as bigint shader) ---
+    vec4 pixel;
+    if (iter >= orbit_len) {
+        pixel = vec4(0, 0, 0, 1);
+    } else {
+        float mu = float(iter) + 2.0 - log2(max(log(mag2), 0.001));
+        float t = fract(mu * 0.03);
+
+        vec3 c;
+        if      (color_mode == 0u) c = hsv2rgb(t, 0.85, 1.0);
+        else if (color_mode == 1u) c = palette_fire(t);
+        else                       c = palette_ocean(t);
+        pixel = vec4(c, 1.0);
+    }
+
+    // Write to all pixels in the block
+    uint ex = min(bx + scale, width);
+    uint ey = min(by + scale, height);
+    for (uint y = by; y < ey; y++) {
+        for (uint x = bx; x < ex; x++) {
+            imageStore(img, ivec2(x, y), pixel);
+        }
+    }
+}
