@@ -7,30 +7,40 @@
 //   limb[0] = integer part, limb[1..N-1] = fractional bits
 //   Value = (-1)^sign * (limb[0] + limb[1]/2^32 + ... + limb[N-1]/2^(32*(N-1)))
 //
-// To increase precision: change N_LIMBS, update push constants
-// in both shader and Rust, recompile.
-//   N_LIMBS=4  -> 128-bit, 96 fractional bits, ~29 decimal digits
-//   N_LIMBS=8  -> 256-bit, 224 fractional bits, ~67 decimal digits
+// N_LIMBS is set at compile time via -DN_LIMBS=X.
+// Supported values: 2, 4, 8, 16, 32, 64
+//   N_LIMBS=2  ->  64-bit, 32 fractional bits,  ~10 decimal digits
+//   N_LIMBS=4  -> 128-bit, 96 fractional bits,  ~29 decimal digits
+//   N_LIMBS=8  -> 256-bit, 224 fractional bits,  ~67 decimal digits
 //   N_LIMBS=16 -> 512-bit, 480 fractional bits, ~144 decimal digits
-//     (N>8 requires switching push constants to UBO/SSBO)
+//   N_LIMBS=32 -> 1024-bit, 992 fractional bits, ~299 decimal digits
+//   N_LIMBS=64 -> 2048-bit, 2016 fractional bits, ~607 decimal digits
 // ============================================================
 
+#ifndef N_LIMBS
 #define N_LIMBS 4
+#endif
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
 
-layout(push_constant) uniform PushConstants {
+// Coordinate data via SSBO (supports arbitrary N_LIMBS)
+layout(set = 0, binding = 1, std430) readonly buffer CoordData {
     uint center_re[N_LIMBS];
     uint center_im[N_LIMBS];
     uint pixel_step[N_LIMBS];
+};
+
+// Scalar parameters via push constants (28 bytes, N-independent)
+layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
     uint max_iters;
     uint cre_sign;
     uint cim_sign;
     uint color_mode;
+    uint pixel_scale;   // 1=full, 2=half, 4=quarter resolution
 };
 
 // ============================================================
@@ -42,7 +52,6 @@ void fp_zero(out uint r[N_LIMBS]) {
     for (int i = 0; i < N_LIMBS; i++) r[i] = 0u;
 }
 
-// Unsigned add: r = a + b (overflow silently discarded)
 void fp_add(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
     uint carry = 0u;
     for (int i = N_LIMBS - 1; i >= 0; i--) {
@@ -53,7 +62,6 @@ void fp_add(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
     }
 }
 
-// Unsigned subtract: r = a - b (assumes a >= b)
 void fp_sub(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
     uint borrow = 0u;
     for (int i = N_LIMBS - 1; i >= 0; i--) {
@@ -64,7 +72,6 @@ void fp_sub(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
     }
 }
 
-// Unsigned compare: a >= b? (lexicographic MSB-first)
 bool fp_ge(in uint a[N_LIMBS], in uint b[N_LIMBS]) {
     for (int i = 0; i < N_LIMBS; i++) {
         if (a[i] > b[i]) return true;
@@ -73,7 +80,6 @@ bool fp_ge(in uint a[N_LIMBS], in uint b[N_LIMBS]) {
     return true;
 }
 
-// Left shift by 1 bit (multiply by 2)
 void fp_shl1(inout uint a[N_LIMBS]) {
     for (int i = 0; i < N_LIMBS - 1; i++) {
         a[i] = (a[i] << 1u) | (a[i + 1] >> 31u);
@@ -81,7 +87,6 @@ void fp_shl1(inout uint a[N_LIMBS]) {
     a[N_LIMBS - 1] <<= 1u;
 }
 
-// Multiply N-limb value by a single uint32 (for pixel offset computation)
 void fp_mul_u32(in uint a[N_LIMBS], uint n, out uint r[N_LIMBS]) {
     uint carry = 0u;
     for (int i = N_LIMBS - 1; i >= 0; i--) {
@@ -95,21 +100,15 @@ void fp_mul_u32(in uint a[N_LIMBS], uint n, out uint r[N_LIMBS]) {
     }
 }
 
-// Full N x N fixed-point multiply
-// Schoolbook algorithm with 3-register accumulator per column.
-// Computes all 2N-1 product columns, keeps top N columns
-// (equivalent to right-shifting the integer product by (N-1) limbs).
+// Schoolbook N x N fixed-point multiply (right-shift by N-1 limbs)
 void fp_mul(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
     uint carry_lo = 0u, carry_hi = 0u;
 
-    // Process columns from LSB (2*(N-1)) to MSB (0)
     for (int col = 2 * (N_LIMBS - 1); col >= 0; col--) {
-        // 3-register accumulator: (acc_hi : acc_mid : acc_lo)
         uint acc_lo = carry_lo;
         uint acc_mid = carry_hi;
         uint acc_hi = 0u;
 
-        // Accumulate partial products a[i] * b[col-i]
         int i_min = max(0, col - (N_LIMBS - 1));
         int i_max = min(col, N_LIMBS - 1);
 
@@ -117,7 +116,6 @@ void fp_mul(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
             uint hi, lo;
             umulExtended(a[i], b[col - i], hi, lo);
 
-            // Add 64-bit partial product (hi:lo) to 96-bit accumulator
             uint c1, c2, c3;
             acc_lo = uaddCarry(acc_lo, lo, c1);
             acc_mid = uaddCarry(acc_mid, hi, c2);
@@ -125,37 +123,28 @@ void fp_mul(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
             acc_hi += c2 + c3;
         }
 
-        // Store result for columns in output range [0, N_LIMBS-1]
         if (col < N_LIMBS) {
             r[col] = acc_lo;
         }
 
-        // Carry upper 64 bits to next column
         carry_lo = acc_mid;
         carry_hi = acc_hi;
     }
 }
 
-// ============================================================
-// Sign-magnitude arithmetic
-// sign: 0 = positive, 1 = negative
-// ============================================================
-
+// Sign-magnitude add
 void signed_add(
     in uint a[N_LIMBS], uint sa,
     in uint b[N_LIMBS], uint sb,
     out uint r[N_LIMBS], out uint sr
 ) {
     if (sa == sb) {
-        // Same sign: add magnitudes, keep sign
         fp_add(a, b, r);
         sr = sa;
     } else if (fp_ge(a, b)) {
-        // |a| >= |b|: result has a's sign
         fp_sub(a, b, r);
         sr = sa;
     } else {
-        // |b| > |a|: result has b's sign
         fp_sub(b, a, r);
         sr = sb;
     }
@@ -196,22 +185,23 @@ vec3 palette_ocean(float t) {
 // ============================================================
 
 void main() {
-    uint px = gl_GlobalInvocationID.x;
-    uint py = gl_GlobalInvocationID.y;
-    if (px >= width || py >= height) return;
+    uint scale = max(pixel_scale, 1u);
+
+    // Each thread covers a scale x scale block of pixels
+    uint bx = gl_GlobalInvocationID.x * scale;
+    uint by = gl_GlobalInvocationID.y * scale;
+    if (bx >= width || by >= height) return;
+
+    // Sample at center of block
+    int dx = int(bx + scale / 2u) - int(width >> 1u);
+    int dy = int(by + scale / 2u) - int(height >> 1u);
 
     // --- Compute c = center + pixel_offset ---
-    int dx = int(px) - int(width >> 1u);
-    int dy = int(py) - int(height >> 1u);
-
-    // Real part: c_re = center_re + dx * pixel_step
     uint offset[N_LIMBS];
     fp_mul_u32(pixel_step, uint(abs(dx)), offset);
     uint c_re[N_LIMBS], c_re_sign;
     signed_add(center_re, cre_sign, offset, (dx < 0) ? 1u : 0u, c_re, c_re_sign);
 
-    // Imaginary part: c_im = center_im - dy * pixel_step
-    // (negate dy: screen Y goes down, imaginary axis goes up)
     fp_mul_u32(pixel_step, uint(abs(dy)), offset);
     uint c_im[N_LIMBS], c_im_sign;
     signed_add(center_im, cim_sign, offset, (dy > 0) ? 1u : 0u, c_im, c_im_sign);
@@ -226,22 +216,17 @@ void main() {
     uint iter;
 
     for (iter = 0u; iter < max_iters; iter++) {
-        // re^2, im^2 (magnitudes always positive)
         fp_mul(z_re, z_re, re2);
         fp_mul(z_im, z_im, im2);
 
-        // Escape check: |z|^2 = re^2 + im^2 >= 4
         fp_add(re2, im2, mag2);
         if (mag2[0] >= 4u) break;
 
-        // z_im_new = 2 * z_re * z_im + c_im
-        // (must use OLD z_re before updating it)
         fp_mul(z_re, z_im, reim);
         uint reim_sign = z_re_sign ^ z_im_sign;
         fp_shl1(reim);
         signed_add(reim, reim_sign, c_im, c_im_sign, z_im, z_im_sign);
 
-        // z_re_new = re^2 - im^2 + c_re
         uint diff[N_LIMBS], diff_sign;
         signed_add(re2, 0u, im2, 1u, diff, diff_sign);
         signed_add(diff, diff_sign, c_re, c_re_sign, z_re, z_re_sign);
@@ -250,9 +235,8 @@ void main() {
     // --- Coloring ---
     vec4 pixel;
     if (iter >= max_iters) {
-        pixel = vec4(0, 0, 0, 1);  // Interior: black
+        pixel = vec4(0, 0, 0, 1);
     } else {
-        // Smooth iteration count (avoids color banding)
         float m2 = float(mag2[0]) + float(mag2[1]) / 4294967296.0;
         float mu = float(iter) + 2.0 - log2(max(log(m2), 0.001));
         float t = fract(mu * 0.03);
@@ -264,5 +248,12 @@ void main() {
         pixel = vec4(c, 1.0);
     }
 
-    imageStore(img, ivec2(px, py), pixel);
+    // Write to all pixels in the block
+    uint ex = min(bx + scale, width);
+    uint ey = min(by + scale, height);
+    for (uint y = by; y < ey; y++) {
+        for (uint x = bx; x < ex; x++) {
+            imageStore(img, ivec2(x, y), pixel);
+        }
+    }
 }

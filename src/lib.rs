@@ -4,6 +4,8 @@ pub mod complex_interval;
 #[cfg(verus_keep_ghost)]
 pub mod mandelbrot;
 
+#[cfg(verus_keep_ghost)]
 pub mod runtime_complex_interval;
 
+#[cfg(verus_keep_ghost)]
 pub mod runtime_mandelbrot;
