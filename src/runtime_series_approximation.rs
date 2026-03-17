@@ -11,7 +11,7 @@ use vstd::prelude::*;
 use verus_rational::RuntimeRational;
 #[cfg(verus_keep_ghost)]
 use verus_rational::Rational;
-use verus_interval_arithmetic::RuntimeInterval;
+use verus_interval_arithmetic::{RuntimeInterval, build_pow2};
 
 verus! {
 
@@ -80,6 +80,8 @@ pub fn compute_sa_coefficients(
 
     let mut ar = RuntimeInterval::from_point(&zero);
     let mut ai = RuntimeInterval::from_point(&zero);
+    // Precompute 2^precision_bits once for all reduce calls
+    let pow2_wit = build_pow2(precision_bits);
 
     let orbit_len = orbit.len();
     let mut i: usize = 1;
@@ -89,6 +91,8 @@ pub fn compute_sa_coefficients(
             one_iv.wf_spec(),
             ar.wf_spec(),
             ai.wf_spec(),
+            pow2_wit.wf_spec(),
+            pow2_wit.model@ == verus_interval_arithmetic::interval::pow2_spec(precision_bits as nat),
             1 <= i <= orbit_len,
             orbit_len == orbit@.len(),
             coeffs@.len() == i as int,
@@ -103,12 +107,12 @@ pub fn compute_sa_coefficients(
         // A_{n+1}_re = 2·Zr·Ar - 2·Zi·Ai + 1
         let two_zr_ar = RuntimeInterval::scale(&two, &zr.mul(&ar));
         let two_zi_ai = RuntimeInterval::scale(&two, &zi.mul(&ai));
-        let new_re = two_zr_ar.sub(&two_zi_ai).add(&one_iv).reduce(precision_bits);
+        let new_re = two_zr_ar.sub(&two_zi_ai).add(&one_iv).reduce_with_pow2(&pow2_wit, Ghost(precision_bits as nat));
 
         // A_{n+1}_im = 2·Zr·Ai + 2·Zi·Ar
         let two_zr_ai = RuntimeInterval::scale(&two, &zr.mul(&ai));
         let two_zi_ar = RuntimeInterval::scale(&two, &zi.mul(&ar));
-        let new_im = two_zr_ai.add(&two_zi_ar).reduce(precision_bits);
+        let new_im = two_zr_ai.add(&two_zi_ar).reduce_with_pow2(&pow2_wit, Ghost(precision_bits as nat));
 
         coeffs.push(SaCoeffPoint {
             re: copy_interval(&new_re),

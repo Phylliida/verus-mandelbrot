@@ -8,7 +8,7 @@ use vstd::prelude::*;
 use verus_rational::RuntimeRational;
 #[cfg(verus_keep_ghost)]
 use verus_rational::Rational;
-use verus_interval_arithmetic::RuntimeInterval;
+use verus_interval_arithmetic::{RuntimeInterval, build_pow2};
 
 verus! {
 
@@ -81,6 +81,12 @@ pub fn compute_ref_orbit(
     let mut zi = RuntimeInterval::from_point(&zero);
     let two = RuntimeRational::from_int(2);
     let four = RuntimeRational::from_int(4);
+    // Bailout threshold: if upper bound of |z|² exceeds this, the interval
+    // has blown up and the orbit is no longer useful for perturbation.
+    // Keep tight (16) so we stop before interval midpoints become unreliable.
+    let bailout = RuntimeRational::from_int(16);
+    // Precompute 2^precision_bits once for all reduce calls
+    let pow2_wit = build_pow2(precision_bits);
 
     let mut i: u32 = 0;
     while i < max_iters
@@ -91,6 +97,9 @@ pub fn compute_ref_orbit(
             zi.wf_spec(),
             two.wf_spec(),
             four.wf_spec(),
+            bailout.wf_spec(),
+            pow2_wit.wf_spec(),
+            pow2_wit.model@ == verus_interval_arithmetic::interval::pow2_spec(precision_bits as nat),
             0 <= i <= max_iters,
             orbit@.len() == (i as int) + 1,
             forall|j: int| 0 <= j < orbit@.len() ==> (#[trigger] orbit@[j]).wf_spec(),
@@ -104,8 +113,8 @@ pub fn compute_ref_orbit(
         let zr_zi = zr.mul(&zi);
         let two_zr_zi = RuntimeInterval::scale(&two, &zr_zi);
 
-        let new_re = zr2.sub(&zi2).add(&c_re).reduce(precision_bits);
-        let new_im = two_zr_zi.add(&c_im).reduce(precision_bits);
+        let new_re = zr2.sub(&zi2).add(&c_re).reduce_with_pow2(&pow2_wit, Ghost(precision_bits as nat));
+        let new_im = two_zr_zi.add(&c_im).reduce_with_pow2(&pow2_wit, Ghost(precision_bits as nat));
 
         // Push a copy of the orbit point
         orbit.push(RefOrbitPoint {
@@ -113,13 +122,16 @@ pub fn compute_ref_orbit(
             im: copy_interval(&new_im),
         });
 
-        // Check escape: lower bound of |z|² > 4 means definitely escaped
+        // Check escape: lower bound of |z|² > 4 means definitely escaped.
+        // Also bail out if upper bound exceeds bailout threshold — interval
+        // arithmetic error has grown too large for the orbit to be useful.
         let mag_re2 = new_re.square();
         let mag_im2 = new_im.square();
         let mag_sq = mag_re2.add(&mag_im2);
         let escaped = four.lt(&mag_sq.lo);
+        let blown = bailout.lt(&mag_sq.hi);
 
-        if escaped {
+        if escaped || blown {
             return orbit;
         }
 

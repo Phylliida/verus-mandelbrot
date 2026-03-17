@@ -366,6 +366,41 @@ mod vulkan {
         pub cursor_pos: (f64, f64),
     }
 
+    /// Result of probing a candidate reference point.
+    #[derive(Clone, Debug)]
+    enum ProbeResult {
+        Escaped(usize),
+        Survived(usize),
+        Interior { iters_run: usize, period: usize },
+    }
+
+    impl ProbeResult {
+        fn score(&self) -> usize {
+            match self {
+                ProbeResult::Interior { .. } => usize::MAX,
+                ProbeResult::Survived(n) => *n,
+                ProbeResult::Escaped(n) => *n,
+            }
+        }
+        fn is_interior(&self) -> bool {
+            matches!(self, ProbeResult::Interior { .. })
+        }
+    }
+
+    /// Approximate equality for sign-magnitude fixed-point: checks that
+    /// |a - b| has its top N-2 limbs all zero (64 bits of slack).
+    /// Returns false when N <= 2 (period detection disabled at low precision).
+    fn fp_approx_eq(a: &[u32], a_sign: bool, b: &[u32], b_sign: bool) -> bool {
+        let n = a.len();
+        if n <= 2 { return false; }
+        let (diff, _) = signed_add(a, a_sign, b, b_sign);
+        // Check that limbs 0..N-2 are all zero (only bottom 2 limbs may be nonzero)
+        for i in 0..n - 2 {
+            if diff[i] != 0 { return false; }
+        }
+        true
+    }
+
     impl VkState {
         /// Initial view: center = (-0.5, 0.0), view width = 3.0 Mandelbrot units
         fn initial_view(width: u32, n: usize) -> (Vec<u32>, bool, Vec<u32>, bool, Vec<u32>) {
@@ -1084,12 +1119,14 @@ mod vulkan {
             if sign { -val } else { val }
         }
 
-        /// Quick escape test: returns iteration count before escape (up to probe_iters).
+        /// Probe a candidate point: returns ProbeResult indicating escape, survival,
+        /// or interior detection (via Brent's cycle-finding algorithm).
         fn probe_escape_fp(
             cr: &[u32], cr_sign: bool,
             ci: &[u32], ci_sign: bool,
             probe_iters: usize,
-        ) -> usize {
+            detect_period: bool,
+        ) -> ProbeResult {
             let n = cr.len();
             let mut zr = fp_zero(n);
             let mut zr_sign = false;
@@ -1097,12 +1134,20 @@ mod vulkan {
             let mut zi_sign = false;
             let four = { let mut v = fp_zero(n); v[0] = 4; v };
 
+            // Brent's cycle detection state
+            let mut tort_zr = fp_zero(n);
+            let mut tort_zr_sign = false;
+            let mut tort_zi = fp_zero(n);
+            let mut tort_zi_sign = false;
+            let mut power = 1usize;
+            let mut lambda = 0usize;
+
             for iter in 0..probe_iters {
                 let zr2 = fp_mul(&zr, &zr);
                 let zi2 = fp_mul(&zi, &zi);
                 let mag2 = fp_add(&zr2, &zi2);
                 if fp_ge(&mag2, &four) {
-                    return iter;
+                    return ProbeResult::Escaped(iter);
                 }
                 let zrzi = fp_mul(&zr, &zi);
                 let zrzi_sign = zr_sign != zi_sign;
@@ -1112,85 +1157,242 @@ mod vulkan {
                 let (new_zi, new_zi_sign) = signed_add(&two_zrzi, zrzi_sign, ci, ci_sign);
                 zr = new_zr; zr_sign = new_zr_sign;
                 zi = new_zi; zi_sign = new_zi_sign;
+
+                if detect_period && iter > 0 {
+                    lambda += 1;
+                    // Check if z ≈ tortoise
+                    if fp_approx_eq(&zr, zr_sign, &tort_zr, tort_zr_sign)
+                        && fp_approx_eq(&zi, zi_sign, &tort_zi, tort_zi_sign)
+                    {
+                        return ProbeResult::Interior { iters_run: iter + 1, period: lambda };
+                    }
+                    // Brent's: update tortoise at powers of 2
+                    if lambda == power {
+                        tort_zr = zr.clone();
+                        tort_zr_sign = zr_sign;
+                        tort_zi = zi.clone();
+                        tort_zi_sign = zi_sign;
+                        power *= 2;
+                        lambda = 0;
+                    }
+                }
             }
-            probe_iters // survived all iterations
+            ProbeResult::Survived(probe_iters)
         }
 
         /// Compute reference orbit data (pure computation, no Vulkan ops).
         /// Stores results in cached fields for later upload during render.
         pub fn precompute_ref_orbit(&mut self) {
             if !self.ref_orbit_dirty { return; }
+            eprintln!("Precomputing orbit (zoom=2^{}, N={}, iters={})...",
+                self.zoom_level, self.current_n, self.max_iters);
+            let t_total = std::time::Instant::now();
 
             let max_pts = (self.max_iters as usize).min(10000);
-            let probe_iters = max_pts.min(500);
+            let n = self.current_n;
 
-            // Current best position (start at screen center)
-            let mut cur_re = self.center_re.clone();
-            let mut cur_re_sign = self.center_re_sign;
-            let mut cur_im = self.center_im.clone();
-            let mut cur_im_sign = self.center_im_sign;
-            let mut cur_iters = Self::probe_escape_fp(
-                &cur_re, cur_re_sign, &cur_im, cur_im_sign, probe_iters,
-            );
-            // Track pixel offset from screen center
-            let mut offset_re_px = 0.0f64;
-            let mut offset_im_px = 0.0f64;
+            // Helper: compute candidate c from pixel offset (px, py) in screen coords
+            let pixel_step = self.pixel_step.clone();
+            let center_re = self.center_re.clone();
+            let center_re_sign = self.center_re_sign;
+            let center_im = self.center_im.clone();
+            let center_im_sign = self.center_im_sign;
 
-            // Initial step: quarter viewport in pixels
-            let mut step_pixels = self.width.max(self.height) as f64 / 4.0;
-            // 8 directions: N, NE, E, SE, S, SW, W, NW
+            let offset_to_c = |px: i32, py: i32| -> (Vec<u32>, bool, Vec<u32>, bool) {
+                let (cr, cr_sign) = if px == 0 {
+                    (center_re.clone(), center_re_sign)
+                } else {
+                    let off = fp_mul_u32(&pixel_step, px.unsigned_abs());
+                    signed_add(&center_re, center_re_sign, &off, px < 0)
+                };
+                let (ci, ci_sign) = if py == 0 {
+                    (center_im.clone(), center_im_sign)
+                } else {
+                    let off = fp_mul_u32(&pixel_step, py.unsigned_abs());
+                    signed_add(&center_im, center_im_sign, &off, py > 0)
+                };
+                (cr, cr_sign, ci, ci_sign)
+            };
+
+            // Distance from viewport center in pixels (for tiebreaking)
+            let center_dist = |px: f64, py: f64| -> f64 {
+                (px * px + py * py).sqrt()
+            };
+
+            // ── Phase 1a: Coarse grid scan (fast filter, no period detection) ──
+            let grid_n = 9i32;
+            let half = grid_n / 2;
+            let coarse_step_x = self.width as i32 / grid_n;
+            let coarse_step_y = self.height as i32 / grid_n;
+            let coarse_iters = 200;
+
+            struct Candidate {
+                re: Vec<u32>, re_sign: bool,
+                im: Vec<u32>, im_sign: bool,
+                px: f64, py: f64,
+                result: ProbeResult,
+            }
+
+            let mut candidates: Vec<Candidate> = Vec::with_capacity(81);
+            for gy in -half..=half {
+                for gx in -half..=half {
+                    let px = gx * coarse_step_x;
+                    let py = gy * coarse_step_y;
+                    let (cr, cr_sign, ci, ci_sign) = offset_to_c(px, py);
+                    let result = Self::probe_escape_fp(&cr, cr_sign, &ci, ci_sign, coarse_iters, false);
+                    candidates.push(Candidate {
+                        re: cr, re_sign: cr_sign,
+                        im: ci, im_sign: ci_sign,
+                        px: px as f64, py: -(py as f64),
+                        result,
+                    });
+                }
+            }
+
+            // ── Phase 1b: Re-probe top 10 with period detection ──
+            candidates.sort_by(|a, b| b.result.score().cmp(&a.result.score()));
+            let fine_iters = if n >= 32 { max_pts.min(1000) } else { max_pts.min(2000) };
+            let top_n = candidates.len().min(10);
+            for i in 0..top_n {
+                let c = &candidates[i];
+                let result = Self::probe_escape_fp(
+                    &c.re, c.re_sign, &c.im, c.im_sign, fine_iters, true,
+                );
+                candidates[i].result = result;
+            }
+
+            // Best selection: interior beats non-interior; among similar scores, prefer center
+            candidates[..top_n].sort_by(|a, b| {
+                let sa = a.result.score();
+                let sb = b.result.score();
+                if a.result.is_interior() != b.result.is_interior() {
+                    return b.result.is_interior().cmp(&a.result.is_interior());
+                }
+                if a.result.is_interior() {
+                    // Both interior: prefer closer to center
+                    let da = center_dist(a.px, a.py);
+                    let db = center_dist(b.px, b.py);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    // Non-interior: if within 10% of each other, prefer closer to center
+                    let max_score = sa.max(sb);
+                    let min_score = sa.min(sb);
+                    if max_score > 0 && (max_score - min_score) * 10 <= max_score {
+                        let da = center_dist(a.px, a.py);
+                        let db = center_dist(b.px, b.py);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        sb.cmp(&sa)
+                    }
+                }
+            });
+
+            let best = &candidates[0];
+            let mut cur_re = best.re.clone();
+            let mut cur_re_sign = best.re_sign;
+            let mut cur_im = best.im.clone();
+            let mut cur_im_sign = best.im_sign;
+            let mut cur_result = best.result.clone();
+            let mut offset_re_px = best.px;
+            let mut offset_im_px = best.py;
+
+            // Phase 1 done silently
+
+            // ── Phase 2: Fine grid around best point ──
+            let fine_grid_n = 5i32;
+            let fine_half = fine_grid_n / 2;
+            let fine_spacing_x = coarse_step_x / 5;
+            let fine_spacing_y = coarse_step_y / 5;
+            let fine_probe_iters = if cur_result.is_interior() { 500 } else { fine_iters };
+
+            if fine_spacing_x > 0 && fine_spacing_y > 0 {
+                let base_px = best.px as i32;
+                // Convert best.py back to screen coords (undo the Y flip)
+                let base_py = -(best.py as i32);
+
+                for fy in -fine_half..=fine_half {
+                    for fx in -fine_half..=fine_half {
+                        if fx == 0 && fy == 0 { continue; } // already probed
+                        let px = base_px + fx * fine_spacing_x;
+                        let py = base_py + fy * fine_spacing_y;
+                        let (cr, cr_sign, ci, ci_sign) = offset_to_c(px, py);
+                        let result = Self::probe_escape_fp(
+                            &cr, cr_sign, &ci, ci_sign, fine_probe_iters, true,
+                        );
+                        let cand_px = px as f64;
+                        let cand_py = -(py as f64);
+
+                        // Compare: interior always wins; among same class, higher score wins;
+                        // tiebreak by center proximity
+                        let dominated = if result.is_interior() && !cur_result.is_interior() {
+                            true
+                        } else if !result.is_interior() && cur_result.is_interior() {
+                            false
+                        } else if result.is_interior() && cur_result.is_interior() {
+                            center_dist(cand_px, cand_py) < center_dist(offset_re_px, offset_im_px)
+                        } else {
+                            let rs = result.score();
+                            let cs = cur_result.score();
+                            rs > cs || (rs * 10 >= cs * 9
+                                && center_dist(cand_px, cand_py) < center_dist(offset_re_px, offset_im_px))
+                        };
+
+                        if dominated {
+                            cur_re = cr; cur_re_sign = cr_sign;
+                            cur_im = ci; cur_im_sign = ci_sign;
+                            cur_result = result;
+                            offset_re_px = cand_px;
+                            offset_im_px = cand_py;
+                        }
+                    }
+                }
+            }
+
+            // Phase 2 done silently
+
+            // ── Phase 3: Hill climbing from best (8-direction) ──
+            let coarse_spacing = coarse_step_x.max(coarse_step_y) as f64;
+            let mut step_pixels = coarse_spacing / 2.0;
             let dirs: [(f64, f64); 8] = [
                 (0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (1.0, -1.0),
                 (0.0, -1.0), (-1.0, -1.0), (-1.0, 0.0), (-1.0, 1.0),
             ];
 
             let mut steps_taken = 0u32;
-            while cur_iters < probe_iters && step_pixels >= 1.0 {
+            while !cur_result.is_interior() && step_pixels >= 1.0 {
                 let step_u32 = step_pixels as u32;
                 if step_u32 == 0 { break; }
                 let fp_step = fp_mul_u32(&self.pixel_step, step_u32);
 
                 let mut improved = false;
                 for &(ddx, ddy) in &dirs {
-                    // Compute candidate = cur + (ddx, ddy) * fp_step
                     let (cr, cr_sign) = if ddx == 0.0 {
                         (cur_re.clone(), cur_re_sign)
                     } else {
-                        let off = if ddx.abs() > 1.5 {
-                            fp_add(&fp_step, &fp_step)
-                        } else {
-                            fp_step.clone()
-                        };
-                        signed_add(&cur_re, cur_re_sign, &off, ddx < 0.0)
+                        signed_add(&cur_re, cur_re_sign, &fp_step, ddx < 0.0)
                     };
                     let (ci, ci_sign) = if ddy == 0.0 {
                         (cur_im.clone(), cur_im_sign)
                     } else {
-                        let off = if ddy.abs() > 1.5 {
-                            fp_add(&fp_step, &fp_step)
-                        } else {
-                            fp_step.clone()
-                        };
-                        // positive ddy = math upward = add to im
-                        signed_add(&cur_im, cur_im_sign, &off, ddy < 0.0)
+                        signed_add(&cur_im, cur_im_sign, &fp_step, ddy < 0.0)
                     };
 
-                    let iters = Self::probe_escape_fp(
-                        &cr, cr_sign, &ci, ci_sign, probe_iters,
+                    let result = Self::probe_escape_fp(
+                        &cr, cr_sign, &ci, ci_sign, fine_iters, true,
                     );
-                    if iters > cur_iters {
-                        cur_re = cr;
-                        cur_re_sign = cr_sign;
-                        cur_im = ci;
-                        cur_im_sign = ci_sign;
-                        cur_iters = iters;
-                        offset_re_px += ddx * step_pixels;
-                        offset_im_px += ddy * step_pixels;
-                        improved = true;
+
+                    if result.score() > cur_result.score() {
+                        let new_dx = offset_re_px + ddx * step_pixels;
+                        let new_dy = offset_im_px + ddy * step_pixels;
+                        cur_re = cr; cur_re_sign = cr_sign;
+                        cur_im = ci; cur_im_sign = ci_sign;
+                        cur_result = result;
+                        offset_re_px = new_dx;
+                        offset_im_px = new_dy;
                         steps_taken += 1;
-                        if cur_iters >= probe_iters {
-                            break;
-                        }
+                        improved = true;
+
+                        if cur_result.is_interior() { break; }
                     }
                 }
                 if !improved {
@@ -1198,18 +1400,16 @@ mod vulkan {
                 }
             }
 
-            // Convert best point to RuntimeRational (verified exact arithmetic)
             let center_re_rat = fp_to_rational(&cur_re, cur_re_sign);
             let center_im_rat = fp_to_rational(&cur_im, cur_im_sign);
 
-            // Compute precision_bits from zoom level
-            let precision_bits = (needed_n(self.zoom_level) as u32) * 32;
+            let zoom_bits = (needed_n(self.zoom_level) as u32) * 32;
+            let precision_bits = zoom_bits + 64;
 
-            // Call verified compute_ref_orbit (interval arithmetic with reduce)
+            let t0 = std::time::Instant::now();
             let orbit = compute_ref_orbit(&center_re_rat, &center_im_rat, max_pts as u32, precision_bits);
-            let best_iters = orbit.len();
+            let orbit_iters = orbit.len();
 
-            // Call verified compute_sa_coefficients (interval arithmetic with reduce)
             let sa_coeffs = compute_sa_coefficients(&orbit, precision_bits);
 
             // Convert orbit to f32 pairs
@@ -1228,6 +1428,9 @@ mod vulkan {
             let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
             let needs_sa = pixel_step_f64 < f32::MIN_POSITIVE as f64;
             let sa_result = find_sa_skip(&sa_coeffs, pixel_step_f64, needs_sa);
+            if sa_result.skip_iters > 0 {
+                eprintln!("  SA skip: {} iters, sa=({:e}, {:e})", sa_result.skip_iters, sa_result.sa_re, sa_result.sa_im);
+            }
 
             // Store in cache (no Vulkan ops)
             self.cached_orbit_data = best_orbit;
@@ -1241,14 +1444,18 @@ mod vulkan {
             self.ref_orbit_dirty = false;
 
             eprintln!(
-                "Ref orbit: {} iters (max {}), offset: ({:.0}, {:.0}) px, {} steps, SA skip: {}",
-                best_iters, max_pts, offset_re_px, offset_im_px, steps_taken, sa_result.skip_iters,
+                "Ref orbit: {} pts (max {}), search={:?}, offset=({:.0},{:.0})px, {} climb steps, SA skip={}, total {:.0}ms",
+                orbit_iters, max_pts, cur_result, offset_re_px, offset_im_px, steps_taken,
+                sa_result.skip_iters, t_total.elapsed().as_secs_f64() * 1000.0,
             );
         }
 
         /// Upload cached orbit data to the ref_orbit SSBO (fast, called inside render).
         fn upload_cached_orbit(&mut self) {
-            if !self.cached_orbit_ready { return; }
+            if !self.cached_orbit_ready {
+                eprintln!("  [upload] skipped (not ready)");
+                return;
+            }
             self.ref_offset_re = self.cached_ref_offset_re;
             self.ref_offset_im = self.cached_ref_offset_im;
             self.ref_orbit_len = self.cached_ref_orbit_len;
@@ -1256,6 +1463,8 @@ mod vulkan {
             self.sa_im = self.cached_sa_im;
             self.skip_iters = self.cached_skip_iters;
             let src: &[u8] = bytemuck::cast_slice(&self.cached_orbit_data);
+            eprintln!("  [upload] {} bytes, orbit_len={}, buf handle=0x{:x}",
+                src.len(), self.ref_orbit_len, self.ref_orbit.handle);
             write_mapped_buffer(&self.ref_orbit, src, 0);
         }
 
@@ -1277,6 +1486,11 @@ mod vulkan {
         pub fn render(&mut self) {
             self.update_viewport();
 
+            // Precompute orbit data BEFORE fence wait (no Vulkan ops, safe to do anytime)
+            if self.perturbation_mode && self.ref_orbit_dirty {
+                self.precompute_ref_orbit();
+            }
+
             // Wait for previous frame's GPU work to complete before touching resources
             ffi::vk_wait_for_fences(
                 &self.ctx,
@@ -1292,9 +1506,7 @@ mod vulkan {
 
             // Now safe to write SSBO data — HostOwned proved by reclaim_buffer
             if self.perturbation_mode {
-                if self.ref_orbit_dirty {
-                    self.compute_and_upload_ref_orbit();
-                }
+                self.upload_cached_orbit();
             } else {
                 self.upload_ssbo();
             }
@@ -1309,6 +1521,28 @@ mod vulkan {
                 self.image_available_sem.handle,
                 0,
                 u64::MAX,
+            );
+
+            // Re-bind image view after acquire to ensure MoltenVK has current Metal drawable
+            ffi::vk_update_descriptor_sets_image(
+                &self.ctx,
+                &mut self.descriptor_sets[idx as usize],
+                Ghost::assume_new(),
+                Ghost::assume_new(),
+                0,
+                vk::DescriptorType::STORAGE_IMAGE.as_raw() as u32,
+                self.image_views[idx as usize].handle,
+                vk::ImageLayout::GENERAL.as_raw() as u32,
+            );
+            ffi::vk_update_descriptor_sets_image(
+                &self.ctx,
+                &mut self.perturb_descriptor_sets[idx as usize],
+                Ghost::assume_new(),
+                Ghost::assume_new(),
+                0,
+                vk::DescriptorType::STORAGE_IMAGE.as_raw() as u32,
+                self.image_views[idx as usize].handle,
+                vk::ImageLayout::GENERAL.as_raw() as u32,
             );
 
             let cb = &mut self.command_buffers[idx as usize];
@@ -1334,6 +1568,11 @@ mod vulkan {
 
             if self.perturbation_mode {
                 // ── Perturbation render path ──
+                eprintln!("  [render] perturb idx={}, ds=0x{:x}, pipeline=0x{:x}, ref_orbit=0x{:x}",
+                    idx,
+                    self.perturb_descriptor_sets[idx as usize].handle,
+                    self.perturb_pipeline.handle,
+                    self.ref_orbit.handle);
                 ffi::vk_cmd_bind_pipeline(
                     &self.ctx,
                     cb,
@@ -1450,6 +1689,7 @@ mod vulkan {
 
             ffi::vk_end_command_buffer(&self.ctx, cb);
 
+            eprintln!("  [render] submitting...");
             let wait_stage = vk::PipelineStageFlags::COMPUTE_SHADER.as_raw();
             ffi::vk_queue_submit(
                 &self.ctx,
