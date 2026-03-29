@@ -6,22 +6,22 @@ use crate::complex_interval::ComplexInterval;
 
 verus! {
 
-/// One Mandelbrot iteration: z_{n+1} = z_n² + c.
+///  One Mandelbrot iteration: z_{n+1} = z_n² + c.
 pub open spec fn mandelbrot_step_spec(z: ComplexInterval, c: ComplexInterval) -> ComplexInterval {
     z.square_spec().add_spec(c)
 }
 
-/// The escape threshold as an interval: [4, 4].
+///  The escape threshold as an interval: [4, 4].
 pub open spec fn escape_threshold_spec() -> Interval {
     Interval::from_point_spec(Rational::from_int_spec(4))
 }
 
-/// Certainly escaped: the entire |z|² interval is above 4.
+///  Certainly escaped: the entire |z|² interval is above 4.
 pub open spec fn certainly_escaped_spec(z: ComplexInterval) -> bool {
     escape_threshold_spec().certainly_lt_spec(z.magnitude_squared_spec())
 }
 
-/// N iterations of z_{n+1} = z_n² + c starting from z0, reducing each step.
+///  N iterations of z_{n+1} = z_n² + c starting from z0, reducing each step.
 pub open spec fn mandelbrot_iterate_spec(z0: ComplexInterval, c: ComplexInterval, n: nat, k: nat) -> ComplexInterval
     decreases n,
 {
@@ -33,9 +33,9 @@ pub open spec fn mandelbrot_iterate_spec(z0: ComplexInterval, c: ComplexInterval
     }
 }
 
-// ── Proofs ───────────────────────────────────────────────────────
+//  ── Proofs ───────────────────────────────────────────────────────
 
-/// One Mandelbrot step preserves well-formedness.
+///  One Mandelbrot step preserves well-formedness.
 pub proof fn lemma_step_wf(z: ComplexInterval, c: ComplexInterval)
     requires
         z.wf_spec(),
@@ -47,9 +47,9 @@ pub proof fn lemma_step_wf(z: ComplexInterval, c: ComplexInterval)
     ComplexInterval::lemma_add_wf(z.square_spec(), c);
 }
 
-/// One step preserves containment:
-/// if (zx, zy) in z and (cx, cy) in c,
-/// then (zx²-zy²+cx, 2·zx·zy+cy) in step(z, c).
+///  One step preserves containment:
+///  if (zx, zy) in z and (cx, cy) in c,
+///  then (zx²-zy²+cx, 2·zx·zy+cy) in step(z, c).
 pub proof fn lemma_step_containment(
     z: ComplexInterval, c: ComplexInterval,
     zx: Rational, zy: Rational,
@@ -76,7 +76,7 @@ pub proof fn lemma_step_containment(
     );
 }
 
-/// Escape soundness: if certainly_escaped(z), then for any (x,y) in z, x²+y² > 4.
+///  Escape soundness: if certainly_escaped(z), then for any (x,y) in z, x²+y² > 4.
 pub proof fn lemma_escape_soundness(z: ComplexInterval, x: Rational, y: Rational)
     requires
         z.wf_spec(),
@@ -86,16 +86,16 @@ pub proof fn lemma_escape_soundness(z: ComplexInterval, x: Rational, y: Rational
         Rational::from_int_spec(4).lt_spec(
             x.mul_spec(x).add_spec(y.mul_spec(y))),
 {
-    // certainly_escaped means: 4 < z.magnitude_squared().lo
-    // magnitude_squared containment: x²+y² in z.magnitude_squared()
-    // so x²+y² >= z.magnitude_squared().lo > 4
+    //  certainly_escaped means: 4 < z.magnitude_squared().lo
+    //  magnitude_squared containment: x²+y² in z.magnitude_squared()
+    //  so x²+y² >= z.magnitude_squared().lo > 4
     ComplexInterval::lemma_magnitude_squared_containment(z, x, y);
     ComplexInterval::lemma_magnitude_squared_wf(z);
     let mag2 = z.magnitude_squared_spec();
     let val = x.mul_spec(x).add_spec(y.mul_spec(y));
-    // val >= mag2.lo (from contains)
-    // 4 < mag2.lo (from certainly_escaped)
-    // => 4 < val (by transitivity)
+    //  val >= mag2.lo (from contains)
+    //  4 < mag2.lo (from certainly_escaped)
+    //  => 4 < val (by transitivity)
     let four = Rational::from_int_spec(4);
     assert(four.lt_spec(mag2.lo));
     assert(mag2.contains_spec(val));
@@ -103,4 +103,4 @@ pub proof fn lemma_escape_soundness(z: ComplexInterval, x: Rational, y: Rational
     Rational::lemma_lt_le_transitive(four, mag2.lo, val);
 }
 
-} // verus!
+} //  verus!

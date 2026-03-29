@@ -13,19 +13,19 @@ use crate::runtime_series_approximation::SaCoeffPoint;
 
 verus! {
 
-/// Convert viewer sign-magnitude fixed-point (MSB-first limbs) to RuntimeRational.
+///  Convert viewer sign-magnitude fixed-point (MSB-first limbs) to RuntimeRational.
 ///
-/// The viewer format: value = ±(limb[0] + limb[1]/2^32 + limb[2]/2^64 + ...)
+///  The viewer format: value = ±(limb[0] + limb[1]/2^32 + limb[2]/2^64 + ...)
 ///
-/// Built as: result = limb[0] + limb[1]*(1/B) + limb[2]*(1/B)^2 + ...
-/// where B = 2^32 = 4294967296, using RuntimeRational::from_frac(1, B) as the base.
+///  Built as: result = limb[0] + limb[1]*(1/B) + limb[2]*(1/B)^2 + ...
+///  where B = 2^32 = 4294967296, using RuntimeRational::from_frac(1, B) as the base.
 pub fn fp_to_rational(limbs: &[u32], sign: bool) -> (out: RuntimeRational)
     requires limbs.len() > 0,
     ensures out.wf_spec(),
 {
-    let inv_base = RuntimeRational::from_frac(1, 4294967296i64); // 1/2^32
+    let inv_base = RuntimeRational::from_frac(1, 4294967296i64); //  1/2^32
     let mut result = RuntimeRational::from_int(limbs[0] as i64);
-    let mut power = RuntimeRational::from_frac(1, 4294967296i64); // starts at 1/B
+    let mut power = RuntimeRational::from_frac(1, 4294967296i64); //  starts at 1/B
 
     let n = limbs.len();
     let mut j: usize = 1;
@@ -48,7 +48,7 @@ pub fn fp_to_rational(limbs: &[u32], sign: bool) -> (out: RuntimeRational)
         j = j + 1;
     }
 
-    // Apply sign: negate if negative
+    //  Apply sign: negate if negative
     if sign {
         let zero = RuntimeRational::from_int(0);
         result = zero.sub(&result);
@@ -57,12 +57,12 @@ pub fn fp_to_rational(limbs: &[u32], sign: bool) -> (out: RuntimeRational)
     result
 }
 
-} // verus!
+} //  verus!
 
-// ── f64/f32 conversion helpers (outside verus! — floats not supported by verifier) ──
+//  ── f64/f32 conversion helpers (outside verus! — floats not supported by verifier) ──
 
-/// Convert RuntimeRational to f64 by reading BigInt limbs directly.
-/// Lossy (f64 has ~52 bits of mantissa) but sufficient for GPU upload.
+///  Convert RuntimeRational to f64 by reading BigInt limbs directly.
+///  Lossy (f64 has ~52 bits of mantissa) but sufficient for GPU upload.
 pub fn rational_to_f64(r: &RuntimeRational) -> f64 {
     let num_f64 = bigint_to_f64(&r.numerator);
     let den_f64 = bignat_to_f64(&r.denominator);
@@ -78,7 +78,7 @@ fn bignat_to_f64(b: &verus_bigint::RuntimeBigNatWitness) -> f64 {
     let limbs = &b.limbs_le;
     let n = limbs.len();
     let mut val = 0.0f64;
-    // Process MSB to LSB for better floating-point precision
+    //  Process MSB to LSB for better floating-point precision
     for i in 0..n {
         let idx = n - 1 - i;
         val = val * 4294967296.0f64 + limbs[idx] as f64;
@@ -86,14 +86,14 @@ fn bignat_to_f64(b: &verus_bigint::RuntimeBigNatWitness) -> f64 {
     val
 }
 
-/// Convert a RuntimeInterval to f64 by taking the midpoint of [lo, hi].
+///  Convert a RuntimeInterval to f64 by taking the midpoint of [lo, hi].
 pub fn interval_to_f64(iv: &RuntimeInterval) -> f64 {
     let lo = rational_to_f64(&iv.lo);
     let hi = rational_to_f64(&iv.hi);
     (lo + hi) / 2.0
 }
 
-/// Convert Vec<RefOrbitPoint> to interleaved f32 pairs [re0,im0,re1,im1,...] for GPU SSBO.
+///  Convert Vec<RefOrbitPoint> to interleaved f32 pairs [re0,im0,re1,im1,...] for GPU SSBO.
 pub fn orbit_to_f32(orbit: &[RefOrbitPoint]) -> Vec<f32> {
     let mut result: Vec<f32> = Vec::with_capacity(orbit.len() * 2);
     for pt in orbit {
@@ -103,15 +103,15 @@ pub fn orbit_to_f32(orbit: &[RefOrbitPoint]) -> Vec<f32> {
     result
 }
 
-/// SA skip result.
+///  SA skip result.
 pub struct SaSkipResult {
     pub skip_iters: u32,
     pub sa_re: f32,
     pub sa_im: f32,
 }
 
-/// Find SA skip: first iteration where |A * pixel_step| is a normal f32.
-/// Returns skip_iters=0 if SA is not needed or no valid skip was found.
+///  Find SA skip: first iteration where |A * pixel_step| is a normal f32.
+///  Returns skip_iters=0 if SA is not needed or no valid skip was found.
 pub fn find_sa_skip(
     sa_coeffs: &[SaCoeffPoint],
     pixel_step_f64: f64,

@@ -22,16 +22,16 @@ compile_error!(
 #[cfg(verus_keep_ghost)]
 verus! {
 
-/// Result of iterating the Mandelbrot map on a pixel.
+///  Result of iterating the Mandelbrot map on a pixel.
 pub enum MandelbrotResult {
-    /// Certainly escaped at iteration n (|z|² > 4 proved).
+    ///  Certainly escaped at iteration n (|z|² > 4 proved).
     Escaped(u32),
-    /// Completed max_iters without escaping.
+    ///  Completed max_iters without escaping.
     Contained(u32),
 }
 
-/// Iterate z_{n+1} = z² + c with interval arithmetic and dyadic reduction.
-/// Returns Escaped(n) if escape is proved, or Contained(max_iters) otherwise.
+///  Iterate z_{n+1} = z² + c with interval arithmetic and dyadic reduction.
+///  Returns Escaped(n) if escape is proved, or Contained(max_iters) otherwise.
 pub fn mandelbrot_iterate(
     c_re: &RuntimeRational,
     c_im: &RuntimeRational,
@@ -59,13 +59,13 @@ pub fn mandelbrot_iterate(
             0 <= i <= max_iters,
         decreases max_iters - i,
     {
-        // z = z² + c
+        //  z = z² + c
         let z_squared = z.square();
         let z_next = z_squared.add(&c);
-        // Reduce to keep denominator bounded
+        //  Reduce to keep denominator bounded
         let z_reduced = z_next.reduce(precision);
 
-        // Check escape
+        //  Check escape
         let mag2 = z_reduced.magnitude_squared();
         let escaped = threshold.certainly_lt(&mag2);
         if escaped {
@@ -79,8 +79,8 @@ pub fn mandelbrot_iterate(
     MandelbrotResult::Contained(max_iters)
 }
 
-/// Compute Mandelbrot iteration for a grid of pixels.
-/// Returns a Vec of Vecs (row-major), each element is a MandelbrotResult.
+///  Compute Mandelbrot iteration for a grid of pixels.
+///  Returns a Vec of Vecs (row-major), each element is a MandelbrotResult.
 pub fn mandelbrot_grid(
     re_min: &RuntimeRational,
     re_max: &RuntimeRational,
@@ -103,8 +103,8 @@ pub fn mandelbrot_grid(
 {
     let mut grid: Vec<Vec<MandelbrotResult>> = Vec::new();
 
-    // Precompute step sizes: re_step = (re_max - re_min) / width
-    //                        im_step = (im_max - im_min) / height
+    //  Precompute step sizes: re_step = (re_max - re_min) / width
+    //                         im_step = (im_max - im_min) / height
     let re_range = re_max.sub(re_min);
     let im_range = im_max.sub(im_min);
     let w_rat = RuntimeRational::from_int(width as i64);
@@ -116,7 +116,7 @@ pub fn mandelbrot_grid(
     let re_step = re_range.div(&w_rat);
     let im_step = im_range.div(&h_rat);
 
-    // Half-pixel offset for pixel centers
+    //  Half-pixel offset for pixel centers
     let two = RuntimeRational::from_int(2);
     proof { Rational::lemma_eqv_zero_iff_num_zero(two@); }
     let half_re = re_step.div(&two);
@@ -138,7 +138,7 @@ pub fn mandelbrot_grid(
         decreases height - row,
     {
         let mut row_results: Vec<MandelbrotResult> = Vec::new();
-        // im_center = im_min + (row + 0.5) * im_step = im_min + row * im_step + half_im
+        //  im_center = im_min + (row + 0.5) * im_step = im_min + row * im_step + half_im
         let row_rat = RuntimeRational::from_int(row as i64);
         let im_offset = row_rat.mul(&im_step);
         let im_base = im_min.add(&im_offset);
@@ -155,7 +155,7 @@ pub fn mandelbrot_grid(
                 row_results@.len() == col as int,
             decreases width - col,
         {
-            // re_center = re_min + (col + 0.5) * re_step
+            //  re_center = re_min + (col + 0.5) * re_step
             let col_rat = RuntimeRational::from_int(col as i64);
             let re_offset = col_rat.mul(&re_step);
             let re_base = re_min.add(&re_offset);
@@ -172,4 +172,4 @@ pub fn mandelbrot_grid(
     grid
 }
 
-} // verus!
+} //  verus!

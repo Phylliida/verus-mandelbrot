@@ -15,7 +15,7 @@ use verus_interval_arithmetic::{RuntimeInterval, build_pow2};
 
 verus! {
 
-/// Copy a RuntimeRational by copying its internal witnesses.
+///  Copy a RuntimeRational by copying its internal witnesses.
 fn copy_rational(r: &RuntimeRational) -> (out: RuntimeRational)
     requires r.wf_spec(),
     ensures out.wf_spec(), out@ == r@,
@@ -29,7 +29,7 @@ fn copy_rational(r: &RuntimeRational) -> (out: RuntimeRational)
     }
 }
 
-/// Copy a RuntimeInterval by copying both endpoints.
+///  Copy a RuntimeInterval by copying both endpoints.
 fn copy_interval(iv: &RuntimeInterval) -> (out: RuntimeInterval)
     requires iv.wf_spec(),
     ensures out.wf_spec(), out@.lo == iv@.lo, out@.hi == iv@.hi,
@@ -37,7 +37,7 @@ fn copy_interval(iv: &RuntimeInterval) -> (out: RuntimeInterval)
     RuntimeInterval::from_endpoints(copy_rational(&iv.lo), copy_rational(&iv.hi))
 }
 
-/// A single SA coefficient point stored as intervals with bounded precision.
+///  A single SA coefficient point stored as intervals with bounded precision.
 pub struct SaCoeffPoint {
     pub re: RuntimeInterval,
     pub im: RuntimeInterval,
@@ -49,10 +49,10 @@ impl SaCoeffPoint {
     }
 }
 
-/// Compute SA coefficients A_0, A_1, ..., A_{k-1} along the reference orbit.
-/// A_0 = (0, 0), A_{n+1} = 2·Z_n·A_n + (1, 0).
+///  Compute SA coefficients A_0, A_1, ..., A_{k-1} along the reference orbit.
+///  A_0 = (0, 0), A_{n+1} = 2·Z_n·A_n + (1, 0).
 ///
-/// Uses interval arithmetic with precision capped at `precision_bits` via `reduce(k)`.
+///  Uses interval arithmetic with precision capped at `precision_bits` via `reduce(k)`.
 pub fn compute_sa_coefficients(
     orbit: &Vec<RefOrbitPoint>,
     precision_bits: u32,
@@ -70,7 +70,7 @@ pub fn compute_sa_coefficients(
     let two = RuntimeRational::from_int(2);
     let one = RuntimeRational::from_int(1);
 
-    // A_0 = (0, 0) as point intervals
+    //  A_0 = (0, 0) as point intervals
     let zero_iv = RuntimeInterval::from_point(&zero);
     let one_iv = RuntimeInterval::from_point(&one);
     coeffs.push(SaCoeffPoint {
@@ -80,7 +80,7 @@ pub fn compute_sa_coefficients(
 
     let mut ar = RuntimeInterval::from_point(&zero);
     let mut ai = RuntimeInterval::from_point(&zero);
-    // Precompute 2^precision_bits once for all reduce calls
+    //  Precompute 2^precision_bits once for all reduce calls
     let pow2_wit = build_pow2(precision_bits);
 
     let orbit_len = orbit.len();
@@ -100,16 +100,16 @@ pub fn compute_sa_coefficients(
             forall|j: int| 0 <= j < coeffs@.len() ==> (#[trigger] coeffs@[j]).wf_spec(),
         decreases orbit_len - i,
     {
-        // Z_n = orbit[i-1]  (interval components)
+        //  Z_n = orbit[i-1]  (interval components)
         let zr = &orbit[i - 1].re;
         let zi = &orbit[i - 1].im;
 
-        // A_{n+1}_re = 2·Zr·Ar - 2·Zi·Ai + 1
+        //  A_{n+1}_re = 2·Zr·Ar - 2·Zi·Ai + 1
         let two_zr_ar = RuntimeInterval::scale(&two, &zr.mul(&ar));
         let two_zi_ai = RuntimeInterval::scale(&two, &zi.mul(&ai));
         let new_re = two_zr_ar.sub(&two_zi_ai).add(&one_iv).reduce_with_pow2(&pow2_wit, Ghost(precision_bits as nat));
 
-        // A_{n+1}_im = 2·Zr·Ai + 2·Zi·Ar
+        //  A_{n+1}_im = 2·Zr·Ai + 2·Zi·Ar
         let two_zr_ai = RuntimeInterval::scale(&two, &zr.mul(&ai));
         let two_zi_ar = RuntimeInterval::scale(&two, &zi.mul(&ar));
         let new_im = two_zr_ai.add(&two_zi_ar).reduce_with_pow2(&pow2_wit, Ghost(precision_bits as nat));
@@ -127,4 +127,4 @@ pub fn compute_sa_coefficients(
     coeffs
 }
 
-} // verus!
+} //  verus!

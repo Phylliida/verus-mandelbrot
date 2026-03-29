@@ -1,21 +1,21 @@
 #version 450
 
-// ============================================================
-// Multi-precision fixed-point Mandelbrot set compute shader
+//  ============================================================
+//  Multi-precision fixed-point Mandelbrot set compute shader
 //
-// Format: sign-magnitude, N_LIMBS x uint32 limbs (MSB-first)
-//   limb[0] = integer part, limb[1..N-1] = fractional bits
-//   Value = (-1)^sign * (limb[0] + limb[1]/2^32 + ... + limb[N-1]/2^(32*(N-1)))
+//  Format: sign-magnitude, N_LIMBS x uint32 limbs (MSB-first)
+//    limb[0] = integer part, limb[1..N-1] = fractional bits
+//    Value = (-1)^sign * (limb[0] + limb[1]/2^32 + ... + limb[N-1]/2^(32*(N-1)))
 //
-// N_LIMBS is set at compile time via -DN_LIMBS=X.
-// Supported values: 2, 4, 8, 16, 32, 64
-//   N_LIMBS=2  ->  64-bit, 32 fractional bits,  ~10 decimal digits
-//   N_LIMBS=4  -> 128-bit, 96 fractional bits,  ~29 decimal digits
-//   N_LIMBS=8  -> 256-bit, 224 fractional bits,  ~67 decimal digits
-//   N_LIMBS=16 -> 512-bit, 480 fractional bits, ~144 decimal digits
-//   N_LIMBS=32 -> 1024-bit, 992 fractional bits, ~299 decimal digits
-//   N_LIMBS=64 -> 2048-bit, 2016 fractional bits, ~607 decimal digits
-// ============================================================
+//  N_LIMBS is set at compile time via -DN_LIMBS=X.
+//  Supported values: 2, 4, 8, 16, 32, 64
+//    N_LIMBS=2  ->  64-bit, 32 fractional bits,  ~10 decimal digits
+//    N_LIMBS=4  -> 128-bit, 96 fractional bits,  ~29 decimal digits
+//    N_LIMBS=8  -> 256-bit, 224 fractional bits,  ~67 decimal digits
+//    N_LIMBS=16 -> 512-bit, 480 fractional bits, ~144 decimal digits
+//    N_LIMBS=32 -> 1024-bit, 992 fractional bits, ~299 decimal digits
+//    N_LIMBS=64 -> 2048-bit, 2016 fractional bits, ~607 decimal digits
+//  ============================================================
 
 #ifndef N_LIMBS
 #define N_LIMBS 4
@@ -25,14 +25,14 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
 
-// Coordinate data via SSBO (supports arbitrary N_LIMBS)
+//  Coordinate data via SSBO (supports arbitrary N_LIMBS)
 layout(set = 0, binding = 1, std430) readonly buffer CoordData {
     uint center_re[N_LIMBS];
     uint center_im[N_LIMBS];
     uint pixel_step[N_LIMBS];
 };
 
-// Scalar parameters via push constants (28 bytes, N-independent)
+//  Scalar parameters via push constants (28 bytes, N-independent)
 layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
@@ -40,13 +40,13 @@ layout(push_constant) uniform PushConstants {
     uint cre_sign;
     uint cim_sign;
     uint color_mode;
-    uint pixel_scale;   // 1=full, 2=half, 4=quarter resolution
+    uint pixel_scale;   //  1=full, 2=half, 4=quarter resolution
 };
 
-// ============================================================
-// Multi-precision unsigned arithmetic
-// All functions use MSB-first: limb[0] = most significant
-// ============================================================
+//  ============================================================
+//  Multi-precision unsigned arithmetic
+//  All functions use MSB-first: limb[0] = most significant
+//  ============================================================
 
 void fp_zero(out uint r[N_LIMBS]) {
     for (int i = 0; i < N_LIMBS; i++) r[i] = 0u;
@@ -100,7 +100,7 @@ void fp_mul_u32(in uint a[N_LIMBS], uint n, out uint r[N_LIMBS]) {
     }
 }
 
-// Schoolbook N x N fixed-point multiply (right-shift by N-1 limbs)
+//  Schoolbook N x N fixed-point multiply (right-shift by N-1 limbs)
 void fp_mul(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
     uint carry_lo = 0u, carry_hi = 0u;
 
@@ -132,7 +132,7 @@ void fp_mul(in uint a[N_LIMBS], in uint b[N_LIMBS], out uint r[N_LIMBS]) {
     }
 }
 
-// Sign-magnitude add
+//  Sign-magnitude add
 void signed_add(
     in uint a[N_LIMBS], uint sa,
     in uint b[N_LIMBS], uint sb,
@@ -150,9 +150,9 @@ void signed_add(
     }
 }
 
-// ============================================================
-// Color palettes
-// ============================================================
+//  ============================================================
+//  Color palettes
+//  ============================================================
 
 vec3 hsv2rgb(float h, float s, float v) {
     float c = v * s;
@@ -180,23 +180,23 @@ vec3 palette_ocean(float t) {
     else         return mix(vec3(0, 0.5, 1), vec3(1, 1, 1),   (t - 0.5) / 0.5);
 }
 
-// ============================================================
-// Main: Mandelbrot iteration with multi-precision arithmetic
-// ============================================================
+//  ============================================================
+//  Main: Mandelbrot iteration with multi-precision arithmetic
+//  ============================================================
 
 void main() {
     uint scale = max(pixel_scale, 1u);
 
-    // Each thread covers a scale x scale block of pixels
+    //  Each thread covers a scale x scale block of pixels
     uint bx = gl_GlobalInvocationID.x * scale;
     uint by = gl_GlobalInvocationID.y * scale;
     if (bx >= width || by >= height) return;
 
-    // Sample at center of block
+    //  Sample at center of block
     int dx = int(bx + scale / 2u) - int(width >> 1u);
     int dy = int(by + scale / 2u) - int(height >> 1u);
 
-    // --- Compute c = center + pixel_offset ---
+    //  --- Compute c = center + pixel_offset ---
     uint offset[N_LIMBS];
     fp_mul_u32(pixel_step, uint(abs(dx)), offset);
     uint c_re[N_LIMBS], c_re_sign;
@@ -206,7 +206,7 @@ void main() {
     uint c_im[N_LIMBS], c_im_sign;
     signed_add(center_im, cim_sign, offset, (dy > 0) ? 1u : 0u, c_im, c_im_sign);
 
-    // --- Iterate z = z^2 + c ---
+    //  --- Iterate z = z^2 + c ---
     uint z_re[N_LIMBS], z_im[N_LIMBS];
     uint z_re_sign = 0u, z_im_sign = 0u;
     fp_zero(z_re);
@@ -232,7 +232,7 @@ void main() {
         signed_add(diff, diff_sign, c_re, c_re_sign, z_re, z_re_sign);
     }
 
-    // --- Coloring ---
+    //  --- Coloring ---
     vec4 pixel;
     if (iter >= max_iters) {
         pixel = vec4(0, 0, 0, 1);
@@ -248,7 +248,7 @@ void main() {
         pixel = vec4(c, 1.0);
     }
 
-    // Write to all pixels in the block
+    //  Write to all pixels in the block
     uint ex = min(bx + scale, width);
     uint ey = min(by + scale, height);
     for (uint y = by; y < ey; y++) {

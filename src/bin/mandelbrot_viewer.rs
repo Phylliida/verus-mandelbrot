@@ -32,18 +32,18 @@ use winit::{
     window::{Window, WindowId, WindowAttributes},
 };
 
-// Supported N_LIMBS values (must match compiled shader variants).
+//  Supported N_LIMBS values (must match compiled shader variants).
 const SUPPORTED_N: &[usize] = &[2, 4, 8, 16, 32, 64];
 
-/// Choose minimum N_LIMBS for a given zoom level (2^zoom_level magnification).
-/// Each limb gives 32 fractional bits of precision. limb[0] is integer part,
-/// so fractional bits = (N-1)*32. We want fractional bits > zoom_level + ~10 guard bits.
+///  Choose minimum N_LIMBS for a given zoom level (2^zoom_level magnification).
+///  Each limb gives 32 fractional bits of precision. limb[0] is integer part,
+///  so fractional bits = (N-1)*32. We want fractional bits > zoom_level + ~10 guard bits.
 fn needed_n(zoom_level: i32) -> usize {
     if zoom_level < 0 {
         return SUPPORTED_N[0];
     }
     let bits_needed = zoom_level as usize + 10;
-    let limbs_needed = bits_needed / 32 + 2; // +1 for integer limb, +1 for rounding
+    let limbs_needed = bits_needed / 32 + 2; //  +1 for integer limb, +1 for rounding
     for &n in SUPPORTED_N {
         if n >= limbs_needed {
             return n;
@@ -52,13 +52,13 @@ fn needed_n(zoom_level: i32) -> usize {
     *SUPPORTED_N.last().unwrap()
 }
 
-/// Auto-select iteration count based on zoom level.
-/// Uses the standard heuristic: iters ≈ 50 * sqrt(2^zoom), clamped to [256, 10000].
+///  Auto-select iteration count based on zoom level.
+///  Uses the standard heuristic: iters ≈ 50 * sqrt(2^zoom), clamped to [256, 10000].
 fn needed_iters(zoom_level: i32) -> u32 {
     if zoom_level <= 0 {
         return 256;
     }
-    // 50 * 2^(zoom/2) = 50 * sqrt(2^zoom)
+    //  50 * 2^(zoom/2) = 50 * sqrt(2^zoom)
     let iters = 50.0 * (2.0f64).powf(zoom_level as f64 / 2.0);
     (iters as u32).clamp(256, 10000)
 }
@@ -67,20 +67,20 @@ fn n_index(n: usize) -> usize {
     SUPPORTED_N.iter().position(|&x| x == n).unwrap()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Multi-precision fixed-point helpers (MSB-first limbs, matching GLSL shader)
+//  ═══════════════════════════════════════════════════════════════════════════
+//  Multi-precision fixed-point helpers (MSB-first limbs, matching GLSL shader)
 //
-// Format: limb[0] = integer part, limb[1..N-1] = fractional bits
-// Value = limb[0] + limb[1]/2^32 + limb[2]/2^64 + ... + limb[N-1]/2^(32*(N-1))
-// ═══════════════════════════════════════════════════════════════════════════
+//  Format: limb[0] = integer part, limb[1..N-1] = fractional bits
+//  Value = limb[0] + limb[1]/2^32 + limb[2]/2^64 + ... + limb[N-1]/2^(32*(N-1))
+//  ═══════════════════════════════════════════════════════════════════════════
 
-/// Create a zero-valued N-limb fixed-point number.
+///  Create a zero-valued N-limb fixed-point number.
 fn fp_zero(n: usize) -> Vec<u32> {
     vec![0u32; n]
 }
 
-/// Convert f64 to N-limb fixed-point magnitude + sign.
-/// Precision is limited by f64's 52-bit mantissa (sufficient for initialization).
+///  Convert f64 to N-limb fixed-point magnitude + sign.
+///  Precision is limited by f64's 52-bit mantissa (sufficient for initialization).
 fn f64_to_fp(val: f64, n: usize) -> (Vec<u32>, bool) {
     let sign = val < 0.0;
     let abs_val = val.abs();
@@ -90,7 +90,7 @@ fn f64_to_fp(val: f64, n: usize) -> (Vec<u32>, bool) {
     let mut limbs = vec![0u32; n];
     limbs[0] = int_part as u32;
     for i in 1..n {
-        frac *= 4294967296.0; // 2^32
+        frac *= 4294967296.0; //  2^32
         let limb_val = frac as u64;
         limbs[i] = limb_val as u32;
         frac -= limb_val as f64;
@@ -98,7 +98,7 @@ fn f64_to_fp(val: f64, n: usize) -> (Vec<u32>, bool) {
     (limbs, sign)
 }
 
-/// Unsigned addition: r = a + b (carry discarded).
+///  Unsigned addition: r = a + b (carry discarded).
 fn fp_add(a: &[u32], b: &[u32]) -> Vec<u32> {
     let n = a.len();
     debug_assert_eq!(n, b.len());
@@ -112,7 +112,7 @@ fn fp_add(a: &[u32], b: &[u32]) -> Vec<u32> {
     r
 }
 
-/// Unsigned subtraction: r = a - b (assumes a >= b).
+///  Unsigned subtraction: r = a - b (assumes a >= b).
 fn fp_sub(a: &[u32], b: &[u32]) -> Vec<u32> {
     let n = a.len();
     debug_assert_eq!(n, b.len());
@@ -131,7 +131,7 @@ fn fp_sub(a: &[u32], b: &[u32]) -> Vec<u32> {
     r
 }
 
-/// Unsigned comparison: true if a >= b.
+///  Unsigned comparison: true if a >= b.
 fn fp_ge(a: &[u32], b: &[u32]) -> bool {
     for i in 0..a.len() {
         if a[i] > b[i] { return true; }
@@ -140,12 +140,12 @@ fn fp_ge(a: &[u32], b: &[u32]) -> bool {
     true
 }
 
-/// Check if all limbs are zero.
+///  Check if all limbs are zero.
 fn fp_is_zero(a: &[u32]) -> bool {
     a.iter().all(|&x| x == 0)
 }
 
-/// Right-shift by 1 bit (zoom in = halve pixel_step).
+///  Right-shift by 1 bit (zoom in = halve pixel_step).
 fn fp_shr1(a: &mut [u32]) {
     let n = a.len();
     for i in (1..n).rev() {
@@ -154,7 +154,7 @@ fn fp_shr1(a: &mut [u32]) {
     a[0] >>= 1;
 }
 
-/// Left-shift by 1 bit (zoom out = double pixel_step).
+///  Left-shift by 1 bit (zoom out = double pixel_step).
 fn fp_shl1(a: &mut [u32]) {
     let n = a.len();
     for i in 0..n - 1 {
@@ -163,7 +163,7 @@ fn fp_shl1(a: &mut [u32]) {
     a[n - 1] <<= 1;
 }
 
-/// Multiply N-limb value by a u32 scalar.
+///  Multiply N-limb value by a u32 scalar.
 fn fp_mul_u32(a: &[u32], scalar: u32) -> Vec<u32> {
     let n = a.len();
     let mut r = vec![0u32; n];
@@ -176,7 +176,7 @@ fn fp_mul_u32(a: &[u32], scalar: u32) -> Vec<u32> {
     r
 }
 
-/// Sign-magnitude addition.
+///  Sign-magnitude addition.
 fn signed_add(a: &[u32], a_sign: bool, b: &[u32], b_sign: bool) -> (Vec<u32>, bool) {
     if a_sign == b_sign {
         (fp_add(a, b), a_sign)
@@ -187,13 +187,13 @@ fn signed_add(a: &[u32], a_sign: bool, b: &[u32], b_sign: bool) -> (Vec<u32>, bo
     }
 }
 
-/// Full-precision multiply of two N-limb fixed-point numbers.
-/// Result is N limbs (truncated to same precision).
-/// Both inputs are unsigned magnitudes; caller handles signs.
+///  Full-precision multiply of two N-limb fixed-point numbers.
+///  Result is N limbs (truncated to same precision).
+///  Both inputs are unsigned magnitudes; caller handles signs.
 fn fp_mul(a: &[u32], b: &[u32]) -> Vec<u32> {
     let n = a.len();
     debug_assert_eq!(n, b.len());
-    // Use u128 accumulators to avoid overflow with large N.
+    //  Use u128 accumulators to avoid overflow with large N.
     let mut acc = vec![0u128; 2 * n];
     for i in (0..n).rev() {
         for j in (0..n).rev() {
@@ -204,7 +204,7 @@ fn fp_mul(a: &[u32], b: &[u32]) -> Vec<u32> {
             }
         }
     }
-    // Propagate carries from LSB to MSB
+    //  Propagate carries from LSB to MSB
     for i in (1..2 * n).rev() {
         acc[i - 1] += acc[i] >> 32;
         acc[i] &= 0xFFFF_FFFF;
@@ -216,7 +216,7 @@ fn fp_mul(a: &[u32], b: &[u32]) -> Vec<u32> {
     r
 }
 
-/// Extend limbs from old_n to new_n (pad with zeros on LSB side).
+///  Extend limbs from old_n to new_n (pad with zeros on LSB side).
 fn fp_extend(a: &[u32], new_n: usize) -> Vec<u32> {
     let mut r = vec![0u32; new_n];
     let copy_len = a.len().min(new_n);
@@ -224,14 +224,14 @@ fn fp_extend(a: &[u32], new_n: usize) -> Vec<u32> {
     r
 }
 
-/// Truncate limbs from old_n to new_n (drop LSB limbs).
+///  Truncate limbs from old_n to new_n (drop LSB limbs).
 fn fp_truncate(a: &[u32], new_n: usize) -> Vec<u32> {
     a[..new_n].to_vec()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Vulkan backend
-// ═══════════════════════════════════════════════════════════════════════════
+//  ═══════════════════════════════════════════════════════════════════════════
+//  Vulkan backend
+//  ═══════════════════════════════════════════════════════════════════════════
 
 mod vulkan {
     use super::*;
@@ -259,8 +259,8 @@ mod vulkan {
     use verus_vulkan::runtime::mapped_buffer::{RuntimeMappedBuffer, reclaim_buffer, release_buffer, write_mapped_buffer};
     use verus_vulkan::vk_context::VulkanContext;
 
-    // Push constants: only scalar parameters (28 bytes, N-independent).
-    // Coordinate data goes in SSBO.
+    //  Push constants: only scalar parameters (28 bytes, N-independent).
+    //  Coordinate data goes in SSBO.
     #[repr(C)]
     struct PushConstants {
         width: u32,
@@ -272,7 +272,7 @@ mod vulkan {
         pixel_scale: u32,
     }
 
-    // Push constants for perturbation shader (52 bytes).
+    //  Push constants for perturbation shader (52 bytes).
     #[repr(C)]
     struct PerturbPushConstants {
         width: u32,
@@ -283,14 +283,14 @@ mod vulkan {
         pixel_step_im: f32,
         color_mode: u32,
         pixel_scale: u32,
-        ref_offset_px_re: f32,  // offset from screen center to ref point, in pixels
+        ref_offset_px_re: f32,  //  offset from screen center to ref point, in pixels
         ref_offset_px_im: f32,
-        sa_re: f32,        // SA coefficient * pixel_step (real part)
-        sa_im: f32,        // SA coefficient * pixel_step (imag part)
-        skip_iters: u32,   // iterations to skip via SA
+        sa_re: f32,        //  SA coefficient * pixel_step (real part)
+        sa_im: f32,        //  SA coefficient * pixel_step (imag part)
+        skip_iters: u32,   //  iterations to skip via SA
     }
 
-    /// Per-N pipeline variant resources.
+    ///  Per-N pipeline variant resources.
     struct PipelineVariant {
         n_limbs: usize,
         shader_module: RuntimeShaderModule,
@@ -306,14 +306,14 @@ mod vulkan {
         swapchain: RuntimeSwapchain,
         swapchain_images: Vec<u64>,
         image_views: Vec<RuntimeImageView>,
-        // One pipeline per supported N
+        //  One pipeline per supported N
         pipelines: Vec<PipelineVariant>,
         current_n_index: usize,
         pipeline_layout_handle: u64,
         descriptor_set_layout: RuntimeDescriptorSetLayout,
         descriptor_pool: RuntimeDescriptorPool,
         descriptor_sets: Vec<RuntimeDescriptorSet>,
-        // SSBO for coordinate data (ownership-tracked)
+        //  SSBO for coordinate data (ownership-tracked)
         ssbo: RuntimeMappedBuffer,
         command_pool: RuntimeCommandPool,
         command_buffers: Vec<RuntimeCommandBuffer>,
@@ -323,7 +323,7 @@ mod vulkan {
         _format: vk::Format,
         width: u32,
         height: u32,
-        // Viewport state (sign-magnitude, Vec<u32> MSB-first)
+        //  Viewport state (sign-magnitude, Vec<u32> MSB-first)
         pub center_re: Vec<u32>,
         pub center_im: Vec<u32>,
         pub center_re_sign: bool,
@@ -334,21 +334,21 @@ mod vulkan {
         pub color_mode: u32,
         pub pixel_scale: u32,
         pub zoom_level: i32,
-        // Perturbation mode
+        //  Perturbation mode
         pub perturbation_mode: bool,
         perturb_pipeline_layout: u64,
         perturb_shader_module: RuntimeShaderModule,
         perturb_pipeline: RuntimeComputePipeline,
-        // Reference orbit SSBO (ownership-tracked)
+        //  Reference orbit SSBO (ownership-tracked)
         ref_orbit: RuntimeMappedBuffer,
         ref_orbit_len: u32,
-        ref_offset_re: f32,  // offset from screen center to reference point
+        ref_offset_re: f32,  //  offset from screen center to reference point
         ref_offset_im: f32,
-        sa_re: f32,          // SA coefficient * pixel_step (real part)
-        sa_im: f32,          // SA coefficient * pixel_step (imag part)
-        skip_iters: u32,     // iterations to skip via SA
+        sa_re: f32,          //  SA coefficient * pixel_step (real part)
+        sa_im: f32,          //  SA coefficient * pixel_step (imag part)
+        skip_iters: u32,     //  iterations to skip via SA
         pub ref_orbit_dirty: bool,
-        // Cached orbit data (computed outside render critical section)
+        //  Cached orbit data (computed outside render critical section)
         cached_orbit_data: Vec<f32>,
         cached_ref_orbit_len: u32,
         cached_ref_offset_re: f32,
@@ -357,16 +357,16 @@ mod vulkan {
         cached_sa_im: f32,
         cached_skip_iters: u32,
         cached_orbit_ready: bool,
-        // Perturbation descriptor sets (bind ref_orbit SSBO at binding 1)
+        //  Perturbation descriptor sets (bind ref_orbit SSBO at binding 1)
         perturb_descriptor_pool: RuntimeDescriptorPool,
         perturb_descriptor_sets: Vec<RuntimeDescriptorSet>,
-        // Input
+        //  Input
         pub keys_held: HashSet<KeyCode>,
         pub last_frame_time: Instant,
         pub cursor_pos: (f64, f64),
     }
 
-    /// Result of probing a candidate reference point.
+    ///  Result of probing a candidate reference point.
     #[derive(Clone, Debug)]
     enum ProbeResult {
         Escaped(usize),
@@ -387,14 +387,14 @@ mod vulkan {
         }
     }
 
-    /// Approximate equality for sign-magnitude fixed-point: checks that
-    /// |a - b| has its top N-2 limbs all zero (64 bits of slack).
-    /// Returns false when N <= 2 (period detection disabled at low precision).
+    ///  Approximate equality for sign-magnitude fixed-point: checks that
+    ///  |a - b| has its top N-2 limbs all zero (64 bits of slack).
+    ///  Returns false when N <= 2 (period detection disabled at low precision).
     fn fp_approx_eq(a: &[u32], a_sign: bool, b: &[u32], b_sign: bool) -> bool {
         let n = a.len();
         if n <= 2 { return false; }
         let (diff, _) = signed_add(a, a_sign, b, b_sign);
-        // Check that limbs 0..N-2 are all zero (only bottom 2 limbs may be nonzero)
+        //  Check that limbs 0..N-2 are all zero (only bottom 2 limbs may be nonzero)
         for i in 0..n - 2 {
             if diff[i] != 0 { return false; }
         }
@@ -402,7 +402,7 @@ mod vulkan {
     }
 
     impl VkState {
-        /// Initial view: center = (-0.5, 0.0), view width = 3.0 Mandelbrot units
+        ///  Initial view: center = (-0.5, 0.0), view width = 3.0 Mandelbrot units
         fn initial_view(width: u32, n: usize) -> (Vec<u32>, bool, Vec<u32>, bool, Vec<u32>) {
             let (cre, cre_sign) = f64_to_fp(-0.5, n);
             let (cim, _) = f64_to_fp(0.0, n);
@@ -410,25 +410,25 @@ mod vulkan {
             (cre, cre_sign, cim, false, step)
         }
 
-        /// Compute pixel_step at given zoom level with full precision in n limbs.
-        /// pixel_step = (3.0 / width) / 2^zoom_level
+        ///  Compute pixel_step at given zoom level with full precision in n limbs.
+        ///  pixel_step = (3.0 / width) / 2^zoom_level
         fn compute_pixel_step(width: u32, zoom_level: i32, n: usize) -> Vec<u32> {
             let (step, _) = f64_to_fp(3.0 / width as f64, n);
             if zoom_level <= 0 {
                 return step;
             }
-            // Bulk shift: zoom_level bits right = (zoom_level/32) full limbs + (zoom_level%32) bits
+            //  Bulk shift: zoom_level bits right = (zoom_level/32) full limbs + (zoom_level%32) bits
             let limb_shift = zoom_level as usize / 32;
             let bit_shift = zoom_level as u32 % 32;
             if limb_shift >= n {
                 return fp_zero(n);
             }
-            // Shift whole limbs first
+            //  Shift whole limbs first
             let mut shifted = fp_zero(n);
             for i in limb_shift..n {
                 shifted[i] = step[i - limb_shift];
             }
-            // Then shift remaining bits
+            //  Then shift remaining bits
             if bit_shift > 0 {
                 let mut carry = 0u32;
                 for i in 0..n {
@@ -513,7 +513,7 @@ mod vulkan {
                 image_views.push(view);
             }
 
-            // Descriptor set layout: binding 0 = storage image, binding 1 = storage buffer (SSBO)
+            //  Descriptor set layout: binding 0 = storage image, binding 1 = storage buffer (SSBO)
             let descriptor_set_layout = ffi::vk_create_descriptor_set_layout_typed(
                 &ctx,
                 Ghost::assume_new(),
@@ -533,7 +533,7 @@ mod vulkan {
                 ],
             );
 
-            // Pipeline layout with push constants (28 bytes for scalars)
+            //  Pipeline layout with push constants (28 bytes for scalars)
             let pipeline_layout_handle = ffi::vk_create_pipeline_layout_push(
                 &ctx,
                 &[descriptor_set_layout.handle],
@@ -542,7 +542,7 @@ mod vulkan {
                 std::mem::size_of::<PushConstants>() as u32,
             );
 
-            // Load all 6 shader variants
+            //  Load all 6 shader variants
             let shader_spvs: [&[u8]; 6] = [
                 include_bytes!("shaders/mandelbrot_n2.comp.spv"),
                 include_bytes!("shaders/mandelbrot_n4.comp.spv"),
@@ -570,7 +570,7 @@ mod vulkan {
                 });
             }
 
-            // Create SSBO (sized for max N=64)
+            //  Create SSBO (sized for max N=64)
             let max_n = *SUPPORTED_N.last().unwrap();
             let ssbo = ffi::vk_create_mapped_buffer(
                 &ctx,
@@ -579,7 +579,7 @@ mod vulkan {
                 vk::BufferUsageFlags::STORAGE_BUFFER.as_raw(),
             );
 
-            // Descriptor pool: STORAGE_IMAGE + STORAGE_BUFFER per swapchain image
+            //  Descriptor pool: STORAGE_IMAGE + STORAGE_BUFFER per swapchain image
             let mut descriptor_pool = ffi::vk_create_descriptor_pool_typed(
                 &ctx,
                 Ghost::assume_new(),
@@ -605,7 +605,7 @@ mod vulkan {
                     Ghost::assume_new(),
                     descriptor_set_layout.handle,
                 );
-                // Bind storage image (binding 0)
+                //  Bind storage image (binding 0)
                 ffi::vk_update_descriptor_sets_image(
                     &ctx,
                     &mut ds,
@@ -616,7 +616,7 @@ mod vulkan {
                     image_views[i].handle,
                     vk::ImageLayout::GENERAL.as_raw() as u32,
                 );
-                // Bind storage buffer (binding 1)
+                //  Bind storage buffer (binding 1)
                 let bi = [vk::DescriptorBufferInfo {
                     buffer: vk::Buffer::from_raw(ssbo.handle),
                     offset: 0,
@@ -649,8 +649,8 @@ mod vulkan {
             let initial_n = SUPPORTED_N[0];
             let (cre, cre_sign, cim, cim_sign, step) = Self::initial_view(width, initial_n);
 
-            // ── Perturbation pipeline ─────────────────────────────────
-            // Perturbation shader has different push constants (32 bytes)
+            //  ── Perturbation pipeline ─────────────────────────────────
+            //  Perturbation shader has different push constants (32 bytes)
             let perturb_pipeline_layout = ffi::vk_create_pipeline_layout_push(
                 &ctx,
                 &[descriptor_set_layout.handle],
@@ -670,7 +670,7 @@ mod vulkan {
                 perturb_shader_module.handle,
             );
 
-            // Reference orbit SSBO: max 10000 orbit points * 2 floats * 4 bytes = 80KB
+            //  Reference orbit SSBO: max 10000 orbit points * 2 floats * 4 bytes = 80KB
             let ref_orbit = ffi::vk_create_mapped_buffer(
                 &ctx,
                 Ghost::assume_new(),
@@ -678,7 +678,7 @@ mod vulkan {
                 vk::BufferUsageFlags::STORAGE_BUFFER.as_raw(),
             );
 
-            // Perturbation descriptor pool + sets (bind ref orbit SSBO)
+            //  Perturbation descriptor pool + sets (bind ref orbit SSBO)
             let mut perturb_descriptor_pool = ffi::vk_create_descriptor_pool_typed(
                 &ctx,
                 Ghost::assume_new(),
@@ -704,7 +704,7 @@ mod vulkan {
                     Ghost::assume_new(),
                     descriptor_set_layout.handle,
                 );
-                // Binding 0: storage image (same as bigint)
+                //  Binding 0: storage image (same as bigint)
                 ffi::vk_update_descriptor_sets_image(
                     &ctx,
                     &mut ds,
@@ -715,7 +715,7 @@ mod vulkan {
                     image_views[i].handle,
                     vk::ImageLayout::GENERAL.as_raw() as u32,
                 );
-                // Binding 1: ref orbit SSBO
+                //  Binding 1: ref orbit SSBO
                 let bi = [vk::DescriptorBufferInfo {
                     buffer: vk::Buffer::from_raw(ref_orbit.handle),
                     offset: 0,
@@ -801,7 +801,7 @@ mod vulkan {
             }
         }
 
-        /// Change N_LIMBS: extend or truncate coordinate vectors.
+        ///  Change N_LIMBS: extend or truncate coordinate vectors.
         fn change_n(&mut self, new_n: usize) {
             if new_n == self.current_n {
                 return;
@@ -813,7 +813,7 @@ mod vulkan {
                 self.center_re = fp_truncate(&self.center_re, new_n);
                 self.center_im = fp_truncate(&self.center_im, new_n);
             }
-            // Recompute pixel_step at new N with full f64 precision
+            //  Recompute pixel_step at new N with full f64 precision
             self.pixel_step = Self::compute_pixel_step(self.width, self.zoom_level, new_n);
             self.current_n = new_n;
             self.current_n_index = n_index(new_n);
@@ -821,7 +821,7 @@ mod vulkan {
                 "Precision: N={} ({}-bit, ~{} decimal digits)",
                 new_n,
                 new_n * 32,
-                (new_n - 1) * 32 * 3 / 10 // approximate decimal digits from fractional bits
+                (new_n - 1) * 32 * 3 / 10 //  approximate decimal digits from fractional bits
             );
         }
 
@@ -831,7 +831,7 @@ mod vulkan {
             }
             unsafe { let _ = self.ctx.device.device_wait_idle(); }
 
-            // Destroy old swapchain resources
+            //  Destroy old swapchain resources
             unsafe {
                 self.ctx.device.destroy_descriptor_pool(
                     vk::DescriptorPool::from_raw(self.descriptor_pool.handle),
@@ -924,7 +924,7 @@ mod vulkan {
                 self.descriptor_sets.push(ds);
             }
 
-            // Recreate perturbation descriptor sets (they reference image views)
+            //  Recreate perturbation descriptor sets (they reference image views)
             unsafe {
                 self.ctx.device.destroy_descriptor_pool(
                     vk::DescriptorPool::from_raw(self.perturb_descriptor_pool.handle),
@@ -1007,7 +1007,7 @@ mod vulkan {
             self.zoom_level += 1;
             self.ref_orbit_dirty = true;
 
-            // Auto-increase N and iterations
+            //  Auto-increase N and iterations
             let new_n = needed_n(self.zoom_level);
             self.change_n(new_n);
             self.max_iters = needed_iters(self.zoom_level);
@@ -1023,7 +1023,7 @@ mod vulkan {
             self.zoom_level -= 1;
             self.ref_orbit_dirty = true;
 
-            // Auto-decrease N and iterations
+            //  Auto-decrease N and iterations
             let new_n = needed_n(self.zoom_level);
             self.change_n(new_n);
             self.max_iters = needed_iters(self.zoom_level);
@@ -1108,7 +1108,7 @@ mod vulkan {
             }
         }
 
-        /// Convert sign-magnitude fixed-point limbs to f64.
+        ///  Convert sign-magnitude fixed-point limbs to f64.
         fn fp_to_f64(limbs: &[u32], sign: bool) -> f64 {
             let mut val = limbs[0] as f64;
             for i in 1..limbs.len() {
@@ -1119,8 +1119,8 @@ mod vulkan {
             if sign { -val } else { val }
         }
 
-        /// Probe a candidate point: returns ProbeResult indicating escape, survival,
-        /// or interior detection (via Brent's cycle-finding algorithm).
+        ///  Probe a candidate point: returns ProbeResult indicating escape, survival,
+        ///  or interior detection (via Brent's cycle-finding algorithm).
         fn probe_escape_fp(
             cr: &[u32], cr_sign: bool,
             ci: &[u32], ci_sign: bool,
@@ -1134,7 +1134,7 @@ mod vulkan {
             let mut zi_sign = false;
             let four = { let mut v = fp_zero(n); v[0] = 4; v };
 
-            // Brent's cycle detection state
+            //  Brent's cycle detection state
             let mut tort_zr = fp_zero(n);
             let mut tort_zr_sign = false;
             let mut tort_zi = fp_zero(n);
@@ -1160,13 +1160,13 @@ mod vulkan {
 
                 if detect_period && iter > 0 {
                     lambda += 1;
-                    // Check if z ≈ tortoise
+                    //  Check if z ≈ tortoise
                     if fp_approx_eq(&zr, zr_sign, &tort_zr, tort_zr_sign)
                         && fp_approx_eq(&zi, zi_sign, &tort_zi, tort_zi_sign)
                     {
                         return ProbeResult::Interior { iters_run: iter + 1, period: lambda };
                     }
-                    // Brent's: update tortoise at powers of 2
+                    //  Brent's: update tortoise at powers of 2
                     if lambda == power {
                         tort_zr = zr.clone();
                         tort_zr_sign = zr_sign;
@@ -1180,8 +1180,8 @@ mod vulkan {
             ProbeResult::Survived(probe_iters)
         }
 
-        /// Compute reference orbit data (pure computation, no Vulkan ops).
-        /// Stores results in cached fields for later upload during render.
+        ///  Compute reference orbit data (pure computation, no Vulkan ops).
+        ///  Stores results in cached fields for later upload during render.
         pub fn precompute_ref_orbit(&mut self) {
             if !self.ref_orbit_dirty { return; }
             eprintln!("Precomputing orbit (zoom=2^{}, N={}, iters={})...",
@@ -1191,7 +1191,7 @@ mod vulkan {
             let max_pts = (self.max_iters as usize).min(10000);
             let n = self.current_n;
 
-            // Helper: compute candidate c from pixel offset (px, py) in screen coords
+            //  Helper: compute candidate c from pixel offset (px, py) in screen coords
             let pixel_step = self.pixel_step.clone();
             let center_re = self.center_re.clone();
             let center_re_sign = self.center_re_sign;
@@ -1214,12 +1214,12 @@ mod vulkan {
                 (cr, cr_sign, ci, ci_sign)
             };
 
-            // Distance from viewport center in pixels (for tiebreaking)
+            //  Distance from viewport center in pixels (for tiebreaking)
             let center_dist = |px: f64, py: f64| -> f64 {
                 (px * px + py * py).sqrt()
             };
 
-            // ── Phase 1a: Coarse grid scan (fast filter, no period detection) ──
+            //  ── Phase 1a: Coarse grid scan (fast filter, no period detection) ──
             let grid_n = 9i32;
             let half = grid_n / 2;
             let coarse_step_x = self.width as i32 / grid_n;
@@ -1249,7 +1249,7 @@ mod vulkan {
                 }
             }
 
-            // ── Phase 1b: Re-probe top 10 with period detection ──
+            //  ── Phase 1b: Re-probe top 10 with period detection ──
             candidates.sort_by(|a, b| b.result.score().cmp(&a.result.score()));
             let fine_iters = if n >= 32 { max_pts.min(1000) } else { max_pts.min(2000) };
             let top_n = candidates.len().min(10);
@@ -1261,7 +1261,7 @@ mod vulkan {
                 candidates[i].result = result;
             }
 
-            // Best selection: interior beats non-interior; among similar scores, prefer center
+            //  Best selection: interior beats non-interior; among similar scores, prefer center
             candidates[..top_n].sort_by(|a, b| {
                 let sa = a.result.score();
                 let sb = b.result.score();
@@ -1269,12 +1269,12 @@ mod vulkan {
                     return b.result.is_interior().cmp(&a.result.is_interior());
                 }
                 if a.result.is_interior() {
-                    // Both interior: prefer closer to center
+                    //  Both interior: prefer closer to center
                     let da = center_dist(a.px, a.py);
                     let db = center_dist(b.px, b.py);
                     da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                 } else {
-                    // Non-interior: if within 10% of each other, prefer closer to center
+                    //  Non-interior: if within 10% of each other, prefer closer to center
                     let max_score = sa.max(sb);
                     let min_score = sa.min(sb);
                     if max_score > 0 && (max_score - min_score) * 10 <= max_score {
@@ -1296,9 +1296,9 @@ mod vulkan {
             let mut offset_re_px = best.px;
             let mut offset_im_px = best.py;
 
-            // Phase 1 done silently
+            //  Phase 1 done silently
 
-            // ── Phase 2: Fine grid around best point ──
+            //  ── Phase 2: Fine grid around best point ──
             let fine_grid_n = 5i32;
             let fine_half = fine_grid_n / 2;
             let fine_spacing_x = coarse_step_x / 5;
@@ -1307,12 +1307,12 @@ mod vulkan {
 
             if fine_spacing_x > 0 && fine_spacing_y > 0 {
                 let base_px = best.px as i32;
-                // Convert best.py back to screen coords (undo the Y flip)
+                //  Convert best.py back to screen coords (undo the Y flip)
                 let base_py = -(best.py as i32);
 
                 for fy in -fine_half..=fine_half {
                     for fx in -fine_half..=fine_half {
-                        if fx == 0 && fy == 0 { continue; } // already probed
+                        if fx == 0 && fy == 0 { continue; } //  already probed
                         let px = base_px + fx * fine_spacing_x;
                         let py = base_py + fy * fine_spacing_y;
                         let (cr, cr_sign, ci, ci_sign) = offset_to_c(px, py);
@@ -1322,8 +1322,8 @@ mod vulkan {
                         let cand_px = px as f64;
                         let cand_py = -(py as f64);
 
-                        // Compare: interior always wins; among same class, higher score wins;
-                        // tiebreak by center proximity
+                        //  Compare: interior always wins; among same class, higher score wins;
+                        //  tiebreak by center proximity
                         let dominated = if result.is_interior() && !cur_result.is_interior() {
                             true
                         } else if !result.is_interior() && cur_result.is_interior() {
@@ -1348,9 +1348,9 @@ mod vulkan {
                 }
             }
 
-            // Phase 2 done silently
+            //  Phase 2 done silently
 
-            // ── Phase 3: Hill climbing from best (8-direction) ──
+            //  ── Phase 3: Hill climbing from best (8-direction) ──
             let coarse_spacing = coarse_step_x.max(coarse_step_y) as f64;
             let mut step_pixels = coarse_spacing / 2.0;
             let dirs: [(f64, f64); 8] = [
@@ -1412,10 +1412,10 @@ mod vulkan {
 
             let sa_coeffs = compute_sa_coefficients(&orbit, precision_bits);
 
-            // Convert orbit to f32 pairs
+            //  Convert orbit to f32 pairs
             let mut best_orbit = orbit_to_f32(&orbit);
 
-            // Clamp to max SSBO size
+            //  Clamp to max SSBO size
             let max_floats = (self.ref_orbit.size / 4) as usize;
             let orbit_len = if best_orbit.len() > max_floats {
                 best_orbit.truncate(max_floats);
@@ -1424,7 +1424,7 @@ mod vulkan {
                 (best_orbit.len() / 2) as u32
             };
 
-            // Compute SA skip using verified SA coefficients
+            //  Compute SA skip using verified SA coefficients
             let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
             let needs_sa = pixel_step_f64 < f32::MIN_POSITIVE as f64;
             let sa_result = find_sa_skip(&sa_coeffs, pixel_step_f64, needs_sa);
@@ -1432,7 +1432,7 @@ mod vulkan {
                 eprintln!("  SA skip: {} iters, sa=({:e}, {:e})", sa_result.skip_iters, sa_result.sa_re, sa_result.sa_im);
             }
 
-            // Store in cache (no Vulkan ops)
+            //  Store in cache (no Vulkan ops)
             self.cached_orbit_data = best_orbit;
             self.cached_ref_orbit_len = orbit_len;
             self.cached_ref_offset_re = offset_re_px as f32;
@@ -1450,7 +1450,7 @@ mod vulkan {
             );
         }
 
-        /// Upload cached orbit data to the ref_orbit SSBO (fast, called inside render).
+        ///  Upload cached orbit data to the ref_orbit SSBO (fast, called inside render).
         fn upload_cached_orbit(&mut self) {
             if !self.cached_orbit_ready {
                 eprintln!("  [upload] skipped (not ready)");
@@ -1468,10 +1468,10 @@ mod vulkan {
             write_mapped_buffer(&self.ref_orbit, src, 0);
         }
 
-        /// Upload coordinate data to the SSBO.
+        ///  Upload coordinate data to the SSBO.
         fn upload_ssbo(&self) {
             let n = self.current_n;
-            let coord_bytes = n * 4; // bytes per coordinate array
+            let coord_bytes = n * 4; //  bytes per coordinate array
             let total = 3 * coord_bytes;
             debug_assert!(total as u64 <= self.ssbo.size);
 
@@ -1486,32 +1486,32 @@ mod vulkan {
         pub fn render(&mut self) {
             self.update_viewport();
 
-            // Precompute orbit data BEFORE fence wait (no Vulkan ops, safe to do anytime)
+            //  Precompute orbit data BEFORE fence wait (no Vulkan ops, safe to do anytime)
             if self.perturbation_mode && self.ref_orbit_dirty {
                 self.precompute_ref_orbit();
             }
 
-            // Wait for previous frame's GPU work to complete before touching resources
+            //  Wait for previous frame's GPU work to complete before touching resources
             ffi::vk_wait_for_fences(
                 &self.ctx,
                 &mut self.in_flight_fence,
                 Ghost::assume_new(),
                 u64::MAX,
             );
-            // Reclaim both SSBOs — fence@.signaled proved by vk_wait_for_fences
+            //  Reclaim both SSBOs — fence@.signaled proved by vk_wait_for_fences
             reclaim_buffer(&mut self.ssbo, &self.in_flight_fence);
             reclaim_buffer(&mut self.ref_orbit, &self.in_flight_fence);
 
             ffi::vk_reset_fences(&self.ctx, &mut self.in_flight_fence);
 
-            // Now safe to write SSBO data — HostOwned proved by reclaim_buffer
+            //  Now safe to write SSBO data — HostOwned proved by reclaim_buffer
             if self.perturbation_mode {
                 self.upload_cached_orbit();
             } else {
                 self.upload_ssbo();
             }
 
-            // Release both SSBOs before GPU submission
+            //  Release both SSBOs before GPU submission
             release_buffer(&mut self.ssbo);
             release_buffer(&mut self.ref_orbit);
 
@@ -1523,7 +1523,7 @@ mod vulkan {
                 u64::MAX,
             );
 
-            // Re-bind image view after acquire to ensure MoltenVK has current Metal drawable
+            //  Re-bind image view after acquire to ensure MoltenVK has current Metal drawable
             ffi::vk_update_descriptor_sets_image(
                 &self.ctx,
                 &mut self.descriptor_sets[idx as usize],
@@ -1550,7 +1550,7 @@ mod vulkan {
 
             ffi::vk_begin_command_buffer(&self.ctx, cb);
 
-            // UNDEFINED -> GENERAL
+            //  UNDEFINED -> GENERAL
             ffi::vk_cmd_pipeline_barrier_image(
                 &self.ctx,
                 cb,
@@ -1567,7 +1567,7 @@ mod vulkan {
             );
 
             if self.perturbation_mode {
-                // ── Perturbation render path ──
+                //  ── Perturbation render path ──
                 eprintln!("  [render] perturb idx={}, ds=0x{:x}, pipeline=0x{:x}, ref_orbit=0x{:x}",
                     idx,
                     self.perturb_descriptor_sets[idx as usize].handle,
@@ -1590,7 +1590,7 @@ mod vulkan {
                     &[self.perturb_descriptor_sets[idx as usize].handle],
                 );
 
-                // Compute pixel step as f32 from fixed-point
+                //  Compute pixel step as f32 from fixed-point
                 let pixel_step_f64 = Self::fp_to_f64(&self.pixel_step, false);
                 let ppc = PerturbPushConstants {
                     width: self.width,
@@ -1622,7 +1622,7 @@ mod vulkan {
                     pc_bytes,
                 );
             } else {
-                // ── Bigint render path ──
+                //  ── Bigint render path ──
                 let pipeline = &self.pipelines[self.current_n_index];
                 ffi::vk_cmd_bind_pipeline(
                     &self.ctx,
@@ -1671,7 +1671,7 @@ mod vulkan {
             let group_y = ((self.height + s - 1) / s + 15) / 16;
             ffi::vk_cmd_dispatch(&self.ctx, cb, group_x, group_y, 1);
 
-            // GENERAL -> PRESENT_SRC_KHR
+            //  GENERAL -> PRESENT_SRC_KHR
             ffi::vk_cmd_pipeline_barrier_image(
                 &self.ctx,
                 cb,
@@ -1716,8 +1716,8 @@ mod vulkan {
         pub fn destroy(&mut self) {
             unsafe { let _ = self.ctx.device.device_wait_idle(); }
 
-            // After device_wait_idle, fence is conceptually signaled.
-            // Wait on it to prove fence@.signaled for reclaim.
+            //  After device_wait_idle, fence is conceptually signaled.
+            //  Wait on it to prove fence@.signaled for reclaim.
             ffi::vk_wait_for_fences(
                 &self.ctx,
                 &mut self.in_flight_fence,
@@ -1725,11 +1725,11 @@ mod vulkan {
                 u64::MAX,
             );
 
-            // Reclaim SSBOs so they are HostOwned (required for destroy)
+            //  Reclaim SSBOs so they are HostOwned (required for destroy)
             reclaim_buffer(&mut self.ssbo, &self.in_flight_fence);
             reclaim_buffer(&mut self.ref_orbit, &self.in_flight_fence);
 
-            // Move SSBOs out and destroy via FFI
+            //  Move SSBOs out and destroy via FFI
             let ssbo = std::mem::replace(&mut self.ssbo, RuntimeMappedBuffer {
                 handle: 0, mem_handle: 0, mapped_ptr: 0, size: 0,
                 state: Ghost::assume_new(),
@@ -1766,7 +1766,7 @@ mod vulkan {
                     None,
                 );
 
-                // Destroy perturbation resources
+                //  Destroy perturbation resources
                 self.ctx.device.destroy_pipeline(
                     vk::Pipeline::from_raw(self.perturb_pipeline.handle),
                     None,
@@ -1823,9 +1823,9 @@ mod vulkan {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Application handler
-// ═══════════════════════════════════════════════════════════════════════════
+//  ═══════════════════════════════════════════════════════════════════════════
+//  Application handler
+//  ═══════════════════════════════════════════════════════════════════════════
 
 struct App {
     window: Option<std::sync::Arc<Window>>,

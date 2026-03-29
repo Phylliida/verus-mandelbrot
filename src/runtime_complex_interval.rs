@@ -24,7 +24,7 @@ pub struct RuntimeComplexInterval;
 #[cfg(verus_keep_ghost)]
 verus! {
 
-/// Runtime complex interval backed by RuntimeInterval components.
+///  Runtime complex interval backed by RuntimeInterval components.
 pub struct RuntimeComplexInterval {
     pub re: RuntimeInterval,
     pub im: RuntimeInterval,
@@ -40,7 +40,7 @@ impl RuntimeComplexInterval {
         &&& self@.wf_spec()
     }
 
-    /// Construct from a point (x, y).
+    ///  Construct from a point (x, y).
     pub fn from_point(x: &RuntimeRational, y: &RuntimeRational) -> (out: Self)
         requires
             x.wf_spec(),
@@ -61,7 +61,7 @@ impl RuntimeComplexInterval {
         RuntimeComplexInterval { re, im, model: Ghost(model) }
     }
 
-    /// Complex addition.
+    ///  Complex addition.
     pub fn add(&self, rhs: &Self) -> (out: Self)
         requires
             self.wf_spec(),
@@ -77,7 +77,7 @@ impl RuntimeComplexInterval {
         RuntimeComplexInterval { re, im, model: Ghost(model) }
     }
 
-    /// Complex squaring: (a + bi)² = (a² - b²) + (2ab)i.
+    ///  Complex squaring: (a + bi)² = (a² - b²) + (2ab)i.
     pub fn square(&self) -> (out: Self)
         requires
             self.wf_spec(),
@@ -96,7 +96,7 @@ impl RuntimeComplexInterval {
         RuntimeComplexInterval { re: re_out, im: im_out, model: Ghost(model) }
     }
 
-    /// |z|² = re² + im².
+    ///  |z|² = re² + im².
     pub fn magnitude_squared(&self) -> (out: RuntimeInterval)
         requires
             self.wf_spec(),
@@ -111,7 +111,7 @@ impl RuntimeComplexInterval {
         out
     }
 
-    /// Reduce both components.
+    ///  Reduce both components.
     pub fn reduce(&self, k: u32) -> (out: Self)
         requires
             self.wf_spec(),
@@ -126,7 +126,7 @@ impl RuntimeComplexInterval {
         RuntimeComplexInterval { re, im, model: Ghost(model) }
     }
 
-    /// Normalize both components (GCD reduction).
+    ///  Normalize both components (GCD reduction).
     pub fn normalize(&self) -> (out: Self)
         requires
             self.wf_spec(),
@@ -141,9 +141,9 @@ impl RuntimeComplexInterval {
         let im = self.im.normalize();
         let ghost model = ComplexInterval { re: re@, im: im@ };
         proof {
-            // wf for reduced: re@.wf from normalize, im@ same
-            // re@.lo eqv self@.re.lo, re@.hi eqv self@.re.hi (from normalize ensures)
-            // so re@.wf follows from re.wf_spec() which normalize guarantees
+            //  wf for reduced: re@.wf from normalize, im@ same
+            //  re@.lo eqv self@.re.lo, re@.hi eqv self@.re.hi (from normalize ensures)
+            //  so re@.wf follows from re.wf_spec() which normalize guarantees
         }
         RuntimeComplexInterval { re, im, model: Ghost(model) }
     }
@@ -157,4 +157,4 @@ impl View for RuntimeComplexInterval {
     }
 }
 
-} // verus!
+} //  verus!
