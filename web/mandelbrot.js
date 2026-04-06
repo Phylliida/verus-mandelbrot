@@ -466,8 +466,8 @@ async function render() {
   paramsData[4] = frac_limbs;
   paramsData.set(thresh_limbs, 5);
 
-  // Scratch buffer: ~8*n u32s per thread (z_re, z_im, signs, temps)
-  const wordsPerThread = 7 * n + 3;
+  // Scratch buffer: signed arithmetic needs more space for signs + intermediates
+  const wordsPerThread = 14 * n + 8;
   const scratchSize = totalPixels * wordsPerThread * 4; // bytes
   const iterCountsSize = totalPixels * 4;
 

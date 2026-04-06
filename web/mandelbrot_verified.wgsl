@@ -8,20 +8,23 @@ struct R2 {
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
-fn slice_vec_to_scratch_scratch(a: u32, start: u32, end: u32, out: u32, out_off: u32) -> u32 {
-  var len: u32;
-  var si: u32;
-  var di: u32;
-  var idx: u32;
+fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
   var _ret: u32;
-  len = (end - start);
-  si = start;
-  di = out_off;
-  for (var idx: u32 = 0u; idx < len; idx++) {
-    scratch[(out + di)] = clone_limb(scratch[(a + si)]);
-    si = (si + 1u);
-    di = (di + 1u);
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(scratch[(a + i)], scratch[(b + i)], carry);
+      digit = _td._0;
+      next_carry = _td._1;
+    }
+    scratch[(out + i)] = digit;
+    carry = next_carry;
   }
+  _ret = carry;
   return _ret;
 }
 
@@ -42,6 +45,256 @@ fn sub_limbs_to_scratch_params_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 
     borrow = next_borrow;
   }
   _ret = borrow;
+  return _ret;
+}
+
+fn signed_add_to_scratch_c_data_scratch(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, n: u32) -> u32 {
+  var sum: u32;
+  var _sum_carry: u32;
+  var a_minus_b: u32;
+  var borrow_ab: u32;
+  var b_minus_a: u32;
+  var _borrow_ba: u32;
+  var sign_diff: u32;
+  var sign_borrow: u32;
+  var diff_zero: u32;
+  var borrow_zero: u32;
+  var same_sign: u32;
+  var _unused_18: u32;
+  var diff_result: u32;
+  var diff_sign: u32;
+  var final_result: u32;
+  var result_sign: u32;
+  var i: u32;
+  var _ret: u32;
+  {
+    var _td = generic_add_limbs_scratch_c_data_scratch(a, b, n);
+    sum = _td._0;
+    _sum_carry = _td._1;
+  }
+  {
+    var _td = generic_sub_limbs_c_data_scratch_c_data(a, b, n);
+    a_minus_b = _td._0;
+    borrow_ab = _td._1;
+  }
+  {
+    var _td = generic_sub_limbs_c_data_scratch_c_data(b, a, n);
+    b_minus_a = _td._0;
+    _borrow_ba = _td._1;
+  }
+  {
+    var _td = sub_borrow(a_sign, b_sign, zero_val());
+    sign_diff = _td._0;
+    sign_borrow = _td._1;
+  }
+  diff_zero = is_zero_limb(sign_diff);
+  borrow_zero = is_zero_limb(sign_borrow);
+  {
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td._0;
+    _unused_18 = _td._1;
+  }
+  diff_result = generic_select_vec_scratch(borrow_ab, a_minus_b, b_minus_a, n);
+  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
+  final_result = generic_select_vec_scratch(same_sign, sum, diff_result, n);
+  result_sign = select_limb(same_sign, clone_limb(a_sign), diff_sign);
+  for (var i: u32 = 0u; i < n; i++) {
+    scratch[(out + i)] = clone_limb(final_result);
+  }
+  _ret = result_sign;
+  return _ret;
+}
+
+fn signed_sub_to_scratch_scratch_scratch(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, n: u32) -> u32 {
+  var neg_b_sign: u32;
+  var _ret: u32;
+  neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = signed_add_to_scratch_c_data_scratch(a, a_sign, b, neg_b_sign, out, n);
+  return _ret;
+}
+
+fn signed_mul_to_scratch_scratch_scratch_scratch(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, prod: u32, n: u32, frac_limbs: u32) -> u32 {
+  var _call_tmp: u32;
+  var sign_b_flipped: u32;
+  var _ret: u32;
+  _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(a, b, prod, n);
+  _call_tmp = slice_vec_to_scratch_scratch(prod, frac_limbs, (frac_limbs + n), out, 0u);
+  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
+  return _ret;
+}
+
+fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
+  var ab: u32;
+  var c1: u32;
+  var abc: u32;
+  var c2: u32;
+  var _ret: R2;
+  ab = (self_val + b);
+  c1 = select(0u, 1u, (ab < self_val));
+  abc = (ab + carry);
+  c2 = select(0u, 1u, (abc < ab));
+  _ret = R2(abc, (c1 + c2));
+  return _ret;
+}
+
+fn zero_val() -> u32 {
+  var _ret: u32;
+  _ret = 0u;
+  return _ret;
+}
+
+fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
+  var ab: u32;
+  var bw1: u32;
+  var result: u32;
+  var bw2: u32;
+  var _ret: R2;
+  ab = (self_val - b);
+  bw1 = select(0u, 1u, (self_val < b));
+  result = (ab - borrow);
+  bw2 = select(0u, 1u, (ab < borrow));
+  _ret = R2(result, (bw1 + bw2));
+  return _ret;
+}
+
+fn is_zero_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  if ((self_val == 0u)) {
+    _ret = 1u;
+  } else {
+    _ret = 0u;
+  }
+  return _ret;
+}
+
+fn generic_sub_limbs_c_data_scratch_c_data(a: u32, b: u32, n: u32, out: u32) -> u32 {
+  var out_len: u32;
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: u32;
+  out_len = 0u;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(c_data[(a + i)], scratch[(b + i)], borrow);
+      digit = _td._0;
+      next_borrow = _td._1;
+    }
+    c_data[(out + out_len)] = digit;
+    out_len = out_len + 1u;
+    borrow = next_borrow;
+  }
+  _ret = borrow;
+  return _ret;
+}
+
+fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
+  var _ret: u32;
+  if ((cond == 0u)) {
+    _ret = if_zero;
+  } else {
+    _ret = if_nonzero;
+  }
+  return _ret;
+}
+
+fn mul2(self_val: u32, b: u32) -> R2 {
+  var lo: u32;
+  var a_lo: u32;
+  var a_hi: u32;
+  var b_lo: u32;
+  var b_hi: u32;
+  var p0: u32;
+  var p1: u32;
+  var p2: u32;
+  var p3: u32;
+  var p0_hi: u32;
+  var mid: u32;
+  var hi: u32;
+  var _ret: R2;
+  lo = (self_val * b);
+  a_lo = (self_val & 0u);
+  a_hi = (self_val >> 16u);
+  b_lo = (b & 0u);
+  b_hi = (b >> 16u);
+  p0 = (a_lo * b_lo);
+  p1 = (a_lo * b_hi);
+  p2 = (a_hi * b_lo);
+  p3 = (a_hi * b_hi);
+  p0_hi = (p0 >> 16u);
+  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
+  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
+  _ret = R2(lo, hi);
+  return _ret;
+}
+
+fn clone_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  _ret = self_val;
+  return _ret;
+}
+
+fn generic_add_limbs_scratch_c_data_scratch(a: u32, b: u32, n: u32, out: u32) -> u32 {
+  var out_len: u32;
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  out_len = 0u;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(scratch[(a + i)], c_data[(b + i)], carry);
+      digit = _td._0;
+      next_carry = _td._1;
+    }
+    scratch[(out + out_len)] = digit;
+    out_len = out_len + 1u;
+    carry = next_carry;
+  }
+  _ret = carry;
+  return _ret;
+}
+
+fn generic_select_vec_scratch(cond: u32, if_zero: u32, if_nonzero: u32, n: u32, out: u32) -> u32 {
+  var out_len: u32;
+  var i: u32;
+  var selected: u32;
+  var _ret: u32;
+  out_len = 0u;
+  for (var i: u32 = 0u; i < n; i++) {
+    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
+    scratch[(out + out_len)] = selected;
+    out_len = out_len + 1u;
+  }
+  _ret = out;
+  return _ret;
+}
+
+fn const_u32(c: u32) -> u32 {
+  var _ret: u32;
+  _ret = c;
+  return _ret;
+}
+
+fn slice_vec_to_scratch_scratch(a: u32, start: u32, end: u32, out: u32, out_off: u32) -> u32 {
+  var len: u32;
+  var si: u32;
+  var di: u32;
+  var idx: u32;
+  var _ret: u32;
+  len = (end - start);
+  si = start;
+  di = out_off;
+  for (var idx: u32 = 0u; idx < len; idx++) {
+    scratch[(out + di)] = clone_limb(scratch[(a + si)]);
+    si = (si + 1u);
+    di = (di + 1u);
+  }
   return _ret;
 }
 
@@ -87,102 +340,94 @@ fn mul_schoolbook_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -
   return _ret;
 }
 
-fn add_limbs_to_scratch_c_data_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var carry: u32;
+fn signed_add_to_scratch_scratch_scratch(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, n: u32) -> u32 {
+  var sum: u32;
+  var _sum_carry: u32;
+  var a_minus_b: u32;
+  var borrow_ab: u32;
+  var b_minus_a: u32;
+  var _borrow_ba: u32;
+  var sign_diff: u32;
+  var sign_borrow: u32;
+  var diff_zero: u32;
+  var borrow_zero: u32;
+  var same_sign: u32;
+  var _unused_18: u32;
+  var diff_result: u32;
+  var diff_sign: u32;
+  var final_result: u32;
+  var result_sign: u32;
   var i: u32;
-  var digit: u32;
-  var next_carry: u32;
   var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3(scratch[(a + i)], c_data[(b + i)], carry);
-      digit = _td._0;
-      next_carry = _td._1;
-    }
-    scratch[(out + i)] = digit;
-    carry = next_carry;
+  {
+    var _td = generic_add_limbs_scratch_c_data_scratch(a, b, n);
+    sum = _td._0;
+    _sum_carry = _td._1;
   }
-  _ret = carry;
+  {
+    var _td = generic_sub_limbs_c_data_scratch_c_data(a, b, n);
+    a_minus_b = _td._0;
+    borrow_ab = _td._1;
+  }
+  {
+    var _td = generic_sub_limbs_c_data_scratch_c_data(b, a, n);
+    b_minus_a = _td._0;
+    _borrow_ba = _td._1;
+  }
+  {
+    var _td = sub_borrow(a_sign, b_sign, zero_val());
+    sign_diff = _td._0;
+    sign_borrow = _td._1;
+  }
+  diff_zero = is_zero_limb(sign_diff);
+  borrow_zero = is_zero_limb(sign_borrow);
+  {
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td._0;
+    _unused_18 = _td._1;
+  }
+  diff_result = generic_select_vec_scratch(borrow_ab, a_minus_b, b_minus_a, n);
+  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
+  final_result = generic_select_vec_scratch(same_sign, sum, diff_result, n);
+  result_sign = select_limb(same_sign, clone_limb(a_sign), diff_sign);
+  for (var i: u32 = 0u; i < n; i++) {
+    scratch[(out + i)] = clone_limb(final_result);
+  }
+  _ret = result_sign;
   return _ret;
 }
 
-fn clone_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  _ret = self_val;
-  return _ret;
-}
-
-fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
-  var ab: u32;
-  var bw1: u32;
-  var result: u32;
-  var bw2: u32;
-  var _ret: R2;
-  ab = (self_val - b);
-  bw1 = select(0u, 1u, (self_val < b));
-  result = (ab - borrow);
-  bw2 = select(0u, 1u, (ab < borrow));
-  _ret = R2(result, (bw1 + bw2));
-  return _ret;
-}
-
-fn zero_val() -> u32 {
-  var _ret: u32;
-  _ret = 0u;
-  return _ret;
-}
-
-fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
-  var ab: u32;
-  var c1: u32;
-  var abc: u32;
-  var c2: u32;
-  var _ret: R2;
-  ab = (self_val + b);
-  c1 = select(0u, 1u, (ab < self_val));
-  abc = (ab + carry);
-  c2 = select(0u, 1u, (abc < ab));
-  _ret = R2(abc, (c1 + c2));
-  return _ret;
-}
-
-fn mul2(self_val: u32, b: u32) -> R2 {
-  var lo: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var p0: u32;
-  var p1: u32;
-  var p2: u32;
-  var p3: u32;
-  var p0_hi: u32;
-  var mid: u32;
-  var hi: u32;
-  var _ret: R2;
-  lo = (self_val * b);
-  a_lo = (self_val & 0u);
-  a_hi = (self_val >> 16u);
-  b_lo = (b & 0u);
-  b_hi = (b >> 16u);
-  p0 = (a_lo * b_lo);
-  p1 = (a_lo * b_hi);
-  p2 = (a_hi * b_lo);
-  p3 = (a_hi * b_hi);
-  p0_hi = (p0 >> 16u);
-  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
-  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
-  _ret = R2(lo, hi);
-  return _ret;
-}
-
-fn sub_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
+fn generic_sub_limbs_scratch_c_data_scratch(a: u32, b: u32, n: u32, out: u32) -> u32 {
+  var out_len: u32;
   var borrow: u32;
   var i: u32;
   var digit: u32;
   var next_borrow: u32;
   var _ret: u32;
+  out_len = 0u;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(scratch[(a + i)], c_data[(b + i)], borrow);
+      digit = _td._0;
+      next_borrow = _td._1;
+    }
+    scratch[(out + out_len)] = digit;
+    out_len = out_len + 1u;
+    borrow = next_borrow;
+  }
+  _ret = borrow;
+  return _ret;
+}
+
+fn generic_sub_limbs_scratch_scratch_scratch(a: u32, b: u32, n: u32, out: u32) -> u32 {
+  var out_len: u32;
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: u32;
+  out_len = 0u;
   borrow = zero_val();
   for (var i: u32 = 0u; i < n; i++) {
     {
@@ -190,19 +435,22 @@ fn sub_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32
       digit = _td._0;
       next_borrow = _td._1;
     }
-    scratch[(out + i)] = digit;
+    scratch[(out + out_len)] = digit;
+    out_len = out_len + 1u;
     borrow = next_borrow;
   }
   _ret = borrow;
   return _ret;
 }
 
-fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
+fn generic_add_limbs_scratch_scratch_scratch(a: u32, b: u32, n: u32, out: u32) -> u32 {
+  var out_len: u32;
   var carry: u32;
   var i: u32;
   var digit: u32;
   var next_carry: u32;
   var _ret: u32;
+  out_len = 0u;
   carry = zero_val();
   for (var i: u32 = 0u; i < n; i++) {
     {
@@ -210,7 +458,8 @@ fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32
       digit = _td._0;
       next_carry = _td._1;
     }
-    scratch[(out + i)] = digit;
+    scratch[(out + out_len)] = digit;
+    out_len = out_len + 1u;
     carry = next_carry;
   }
   _ret = carry;
@@ -229,23 +478,44 @@ fn mandelbrot_fixedpoint(
   var n: u32;
   var frac_limbs: u32;
   var tid: u32;
-  var words_per_thread: u32;
+  var spt: u32;
   var sb: u32;
-  var s0: u32;
-  var s1: u32;
-  var s2: u32;
-  var s4: u32;
-  var s5: u32;
-  var s6: u32;
-  var s7: u32;
-  var s8: u32;
-  var s9: u32;
-  var s10: u32;
+  var zr: u32;
+  var zr_sign: u32;
+  var zi: u32;
+  var zi_sign: u32;
+  var prod: u32;
+  var re2: u32;
+  var re2_sign: u32;
+  var im2: u32;
+  var im2_sign: u32;
+  var sum2: u32;
+  var sum2_sign: u32;
+  var rpi: u32;
+  var rpi_sign: u32;
+  var tmp: u32;
+  var tmp_sign: u32;
+  var tmp2: u32;
+  var tmp2_sign: u32;
+  var c_stride: u32;
   var c_re: u32;
+  var c_re_sign: u32;
   var c_im: u32;
+  var c_im_sign: u32;
   var i: u32;
   var escaped_iter: u32;
   var iter: u32;
+  var re2_s: u32;
+  var im2_s: u32;
+  var rpi_s: u32;
+  var sum2_s: u32;
+  var tmp_s: u32;
+  var new_re_s: u32;
+  var t1_s: u32;
+  var t2_s: u32;
+  var new_im_s: u32;
+  var mag_re2_s: u32;
+  var mag_im2_s: u32;
   var _call_tmp: u32;
   var thresh_off: u32;
   var borrow: u32;
@@ -263,49 +533,61 @@ fn mandelbrot_fixedpoint(
   } else {
   }
   tid = ((gid_y * width) + gid_x);
-  words_per_thread = (12u * n);
-  sb = (tid * words_per_thread);
-  s0 = sb;
-  s1 = (sb + n);
-  s2 = (sb + (2u * n));
-  s4 = (sb + (4u * n));
-  s5 = (sb + (5u * n));
-  s6 = (sb + (6u * n));
-  s7 = (sb + (7u * n));
-  s8 = (sb + (8u * n));
-  s9 = (sb + (9u * n));
-  s10 = (sb + (10u * n));
-  c_re = ((tid * 2u) * n);
-  c_im = (c_re + n);
+  spt = ((14u * n) + 8u);
+  sb = (tid * spt);
+  zr = sb;
+  zr_sign = (sb + n);
+  zi = ((sb + n) + 1u);
+  zi_sign = ((sb + (2u * n)) + 1u);
+  prod = ((sb + (2u * n)) + 2u);
+  re2 = ((sb + (4u * n)) + 2u);
+  re2_sign = (re2 + n);
+  im2 = (re2_sign + 1u);
+  im2_sign = (im2 + n);
+  sum2 = (im2_sign + 1u);
+  sum2_sign = (sum2 + n);
+  rpi = (sum2_sign + 1u);
+  rpi_sign = (rpi + n);
+  tmp = (rpi_sign + 1u);
+  tmp_sign = (tmp + n);
+  tmp2 = (tmp_sign + 1u);
+  tmp2_sign = (tmp2 + n);
+  c_stride = ((2u * n) + 2u);
+  c_re = (tid * c_stride);
+  c_re_sign = (c_re + n);
+  c_im = (c_re_sign + 1u);
+  c_im_sign = (c_im + n);
   for (var i: u32 = 0u; i < n; i++) {
-    scratch[(s0 + i)] = 0u;
-    scratch[(s1 + i)] = 0u;
+    scratch[(zr + i)] = 0u;
+    scratch[(zi + i)] = 0u;
   }
+  scratch[zr_sign] = 0u;
+  scratch[zi_sign] = 0u;
   escaped_iter = max_iters;
   for (var iter: u32 = 0u; iter < max_iters; iter++) {
-    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s0, s0, s2, n);
-    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s4, 0u);
-    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s1, s1, s2, n);
-    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s5, 0u);
-    _call_tmp = add_limbs_to_scratch_c_data_scratch(s0, s1, s7, n);
-    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s7, s7, s2, n);
-    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s6, 0u);
-    _call_tmp = sub_limbs_to_scratch_params_scratch(s4, s5, s9, n);
-    _call_tmp = add_limbs_to_scratch_c_data_scratch(s9, c_re, s9, n);
-    _call_tmp = sub_limbs_to_scratch_params_scratch(s6, s4, s10, n);
-    _call_tmp = sub_limbs_to_scratch_params_scratch(s10, s5, s10, n);
-    _call_tmp = add_limbs_to_scratch_c_data_scratch(s10, c_im, s10, n);
-    for (var i: u32 = 0u; i < n; i++) {
-      scratch[(s0 + i)] = scratch[(s9 + i)];
-      scratch[(s1 + i)] = scratch[(s10 + i)];
-    }
-    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s0, s0, s2, n);
-    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s4, 0u);
-    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s1, s1, s2, n);
-    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s5, 0u);
-    _call_tmp = add_limbs_to_scratch_c_data_scratch(s4, s5, s8, n);
+    re2_s = signed_mul_to_scratch_scratch_scratch_scratch(zr, scratch[zr_sign], zr, scratch[zr_sign], re2, prod, n, frac_limbs);
+    scratch[re2_sign] = re2_s;
+    im2_s = signed_mul_to_scratch_scratch_scratch_scratch(zi, scratch[zi_sign], zi, scratch[zi_sign], im2, prod, n, frac_limbs);
+    scratch[im2_sign] = im2_s;
+    rpi_s = signed_add_to_scratch_c_data_scratch(zr, scratch[zr_sign], zi, scratch[zi_sign], rpi, n);
+    scratch[rpi_sign] = rpi_s;
+    sum2_s = signed_mul_to_scratch_scratch_scratch_scratch(rpi, scratch[rpi_sign], rpi, scratch[rpi_sign], sum2, prod, n, frac_limbs);
+    scratch[sum2_sign] = sum2_s;
+    tmp_s = signed_sub_to_scratch_scratch_scratch(re2, scratch[re2_sign], im2, scratch[im2_sign], tmp, n);
+    scratch[tmp_sign] = tmp_s;
+    new_re_s = signed_add_to_scratch_c_data_scratch(tmp, scratch[tmp_sign], c_re, c_data[c_re_sign], zr, n);
+    scratch[zr_sign] = new_re_s;
+    t1_s = signed_sub_to_scratch_scratch_scratch(sum2, scratch[sum2_sign], re2, scratch[re2_sign], tmp, n);
+    scratch[tmp_sign] = t1_s;
+    t2_s = signed_sub_to_scratch_scratch_scratch(tmp, scratch[tmp_sign], im2, scratch[im2_sign], tmp2, n);
+    scratch[tmp2_sign] = t2_s;
+    new_im_s = signed_add_to_scratch_c_data_scratch(tmp2, scratch[tmp2_sign], c_im, c_data[c_im_sign], zi, n);
+    scratch[zi_sign] = new_im_s;
+    mag_re2_s = signed_mul_to_scratch_scratch_scratch_scratch(zr, scratch[zr_sign], zr, scratch[zr_sign], re2, prod, n, frac_limbs);
+    mag_im2_s = signed_mul_to_scratch_scratch_scratch_scratch(zi, scratch[zi_sign], zi, scratch[zi_sign], im2, prod, n, frac_limbs);
+    _call_tmp = add_limbs_to_scratch_scratch_scratch(re2, im2, tmp, n);
     thresh_off = 5u;
-    borrow = sub_limbs_to_scratch_params_scratch(s8, thresh_off, s9, n);
+    borrow = sub_limbs_to_scratch_params_scratch(tmp, thresh_off, tmp2, n);
     if ((borrow == 0u)) {
       if ((escaped_iter == max_iters)) {
         escaped_iter = iter;

@@ -1,7 +1,6 @@
-/// GPU Mandelbrot kernel using output-parameter functions (no Vec::new).
-/// All operations write to caller-provided buffers.
-/// Uses add_limbs_to, sub_limbs_to, mul_schoolbook_to, slice_vec_to
-/// from verus-fixed-point (940 verified, 0 errors).
+/// GPU Mandelbrot kernel with proper signed fixed-point arithmetic.
+/// Uses verified signed_add_to, signed_sub_to, signed_mul_to from verus-fixed-point.
+/// 944 verified, 0 errors.
 
 use verus_fixed_point::fixed_point::limb_ops::*;
 
@@ -24,87 +23,139 @@ fn mandelbrot_fixedpoint(
     if gid_y >= height { return; }
     let tid = gid_y * width + gid_x;
 
-    // Scratch layout per thread (all regions are n limbs unless noted):
-    //   [0]:   z_re        (n)
-    //   [1]:   z_im        (n)
-    //   [2]:   prod        (2n)  — multiply product
-    //   [4]:   re2         (n)   — re^2 reduced
-    //   [5]:   im2         (n)   — im^2 reduced
-    //   [6]:   sum2        (n)   — (re+im)^2 reduced
-    //   [7]:   re_plus_im  (n)   — re + im
-    //   [8]:   tmp         (n)   — temp for sub/add results
-    //   [9]:   new_re      (n)
-    //   [10]:  new_im      (n)
-    // Total: 12n words per thread (slot 2 is 2n, rest are n)
-    let words_per_thread = 12u32 * n;
-    let sb = tid * words_per_thread;
-    let s0 = sb;                    // z_re
-    let s1 = sb + n;                // z_im
-    let s2 = sb + 2u32 * n;         // prod (2n)
-    let s4 = sb + 4u32 * n;         // re2
-    let s5 = sb + 5u32 * n;         // im2
-    let s6 = sb + 6u32 * n;         // sum2
-    let s7 = sb + 7u32 * n;         // re_plus_im
-    let s8 = sb + 8u32 * n;         // tmp
-    let s9 = sb + 9u32 * n;         // new_re
-    let s10 = sb + 10u32 * n;       // new_im
+    // Scratch layout per thread (each slot is n limbs unless noted):
+    //   [0]:  z_re         (n)
+    //   [1]:  z_re_sign    (1)   — at offset n
+    //   [2]:  z_im         (n)   — at offset n+1
+    //   [3]:  z_im_sign    (1)   — at offset 2n+1
+    //   [4]:  prod         (2n)  — at offset 2n+2
+    //   [6]:  re2          (n)   — at offset 4n+2
+    //   [7]:  re2_sign     (1)
+    //   [8]:  im2          (n)
+    //   [9]:  im2_sign     (1)
+    //   [10]: sum2         (n)
+    //   [11]: sum2_sign    (1)
+    //   [12]: rpi          (n)   — re+im
+    //   [13]: rpi_sign     (1)
+    //   [14]: tmp          (n)
+    //   [15]: tmp_sign     (1)
+    //   [16]: tmp2         (n)
+    //   [17]: tmp2_sign    (1)
+    // Total: ~14n + 8 per thread
+    let spt = 14u32 * n + 8u32;
+    let sb = tid * spt;
 
-    // c layout: [c_re(n), c_im(n)] per pixel
-    let c_re = tid * 2u32 * n;
-    let c_im = c_re + n;
+    let zr       = sb;
+    let zr_sign  = sb + n;
+    let zi       = sb + n + 1u32;
+    let zi_sign  = sb + 2u32 * n + 1u32;
+    let prod     = sb + 2u32 * n + 2u32;
+    let re2      = sb + 4u32 * n + 2u32;
+    let re2_sign = re2 + n;
+    let im2      = re2_sign + 1u32;
+    let im2_sign = im2 + n;
+    let sum2     = im2_sign + 1u32;
+    let sum2_sign = sum2 + n;
+    let rpi      = sum2_sign + 1u32;
+    let rpi_sign = rpi + n;
+    let tmp      = rpi_sign + 1u32;
+    let tmp_sign = tmp + n;
+    let tmp2     = tmp_sign + 1u32;
+    let tmp2_sign = tmp2 + n;
 
-    // Z_0 = 0
+    // c layout per pixel: [c_re(n), c_re_sign(1), c_im(n), c_im_sign(1)]
+    let c_stride = 2u32 * n + 2u32;
+    let c_re      = tid * c_stride;
+    let c_re_sign = c_re + n;
+    let c_im      = c_re_sign + 1u32;
+    let c_im_sign = c_im + n;
+
+    // Z_0 = 0 (positive zero)
     for i in 0u32..n {
-        scratch[s0 + i] = 0u32;
-        scratch[s1 + i] = 0u32;
+        scratch[zr + i] = 0u32;
+        scratch[zi + i] = 0u32;
     }
+    scratch[zr_sign] = 0u32;
+    scratch[zi_sign] = 0u32;
 
     let mut escaped_iter = max_iters;
 
     for iter in 0u32..max_iters {
-        // ── Complex squaring: Z^2 = (re^2 - im^2, (re+im)^2 - re^2 - im^2) ──
+        // ── Complex squaring Z^2 using 3 signed multiplies ──
+        // re^2 = signed_mul(z_re, z_re)
+        let re2_s = signed_mul_to(
+            &scratch[zr..], &scratch[zr_sign],
+            &scratch[zr..], &scratch[zr_sign],
+            &mut scratch[re2..], &mut scratch[prod..], n, frac_limbs);
+        scratch[re2_sign] = re2_s;
 
-        // re^2: mul_schoolbook_to(z_re, z_re) → prod[0..2n], then slice → re2
-        mul_schoolbook_to(&scratch[s0..], &scratch[s0..], &mut scratch[s2..], n);
-        slice_vec_to(&scratch[s2..], frac_limbs, frac_limbs + n, &mut scratch[s4..], 0);
+        // im^2 = signed_mul(z_im, z_im)
+        let im2_s = signed_mul_to(
+            &scratch[zi..], &scratch[zi_sign],
+            &scratch[zi..], &scratch[zi_sign],
+            &mut scratch[im2..], &mut scratch[prod..], n, frac_limbs);
+        scratch[im2_sign] = im2_s;
 
-        // im^2: mul_schoolbook_to(z_im, z_im) → prod, then slice → im2
-        mul_schoolbook_to(&scratch[s1..], &scratch[s1..], &mut scratch[s2..], n);
-        slice_vec_to(&scratch[s2..], frac_limbs, frac_limbs + n, &mut scratch[s5..], 0);
+        // re + im (signed add)
+        let rpi_s = signed_add_to(
+            &scratch[zr..], &scratch[zr_sign],
+            &scratch[zi..], &scratch[zi_sign],
+            &mut scratch[rpi..], n);
+        scratch[rpi_sign] = rpi_s;
 
-        // re + im → re_plus_im
-        add_limbs_to(&scratch[s0..], &scratch[s1..], &mut scratch[s7..], n);
-
-        // (re+im)^2: mul → prod, slice → sum2
-        mul_schoolbook_to(&scratch[s7..], &scratch[s7..], &mut scratch[s2..], n);
-        slice_vec_to(&scratch[s2..], frac_limbs, frac_limbs + n, &mut scratch[s6..], 0);
+        // (re+im)^2
+        let sum2_s = signed_mul_to(
+            &scratch[rpi..], &scratch[rpi_sign],
+            &scratch[rpi..], &scratch[rpi_sign],
+            &mut scratch[sum2..], &mut scratch[prod..], n, frac_limbs);
+        scratch[sum2_sign] = sum2_s;
 
         // new_re = re^2 - im^2 + c_re
-        sub_limbs_to(&scratch[s4..], &scratch[s5..], &mut scratch[s9..], n);
-        add_limbs_to(&scratch[s9..], &c_data[c_re..], &mut scratch[s9..], n);
+        let tmp_s = signed_sub_to(
+            &scratch[re2..], &scratch[re2_sign],
+            &scratch[im2..], &scratch[im2_sign],
+            &mut scratch[tmp..], n);
+        scratch[tmp_sign] = tmp_s;
+        let new_re_s = signed_add_to(
+            &scratch[tmp..], &scratch[tmp_sign],
+            &c_data[c_re..], &c_data[c_re_sign],
+            &mut scratch[zr..], n);
+        scratch[zr_sign] = new_re_s;
 
         // new_im = (re+im)^2 - re^2 - im^2 + c_im
-        sub_limbs_to(&scratch[s6..], &scratch[s4..], &mut scratch[s10..], n);
-        sub_limbs_to(&scratch[s10..], &scratch[s5..], &mut scratch[s10..], n);
-        add_limbs_to(&scratch[s10..], &c_data[c_im..], &mut scratch[s10..], n);
-
-        // Copy new values to z_re, z_im
-        for i in 0u32..n {
-            scratch[s0 + i] = scratch[s9 + i];
-            scratch[s1 + i] = scratch[s10 + i];
-        }
+        let t1_s = signed_sub_to(
+            &scratch[sum2..], &scratch[sum2_sign],
+            &scratch[re2..], &scratch[re2_sign],
+            &mut scratch[tmp..], n);
+        scratch[tmp_sign] = t1_s;
+        let t2_s = signed_sub_to(
+            &scratch[tmp..], &scratch[tmp_sign],
+            &scratch[im2..], &scratch[im2_sign],
+            &mut scratch[tmp2..], n);
+        scratch[tmp2_sign] = t2_s;
+        let new_im_s = signed_add_to(
+            &scratch[tmp2..], &scratch[tmp2_sign],
+            &c_data[c_im..], &c_data[c_im_sign],
+            &mut scratch[zi..], n);
+        scratch[zi_sign] = new_im_s;
 
         // ── Escape check: |Z|^2 > 4 ──
-        // Re-use re2, im2 slots for magnitude
-        mul_schoolbook_to(&scratch[s0..], &scratch[s0..], &mut scratch[s2..], n);
-        slice_vec_to(&scratch[s2..], frac_limbs, frac_limbs + n, &mut scratch[s4..], 0);
-        mul_schoolbook_to(&scratch[s1..], &scratch[s1..], &mut scratch[s2..], n);
-        slice_vec_to(&scratch[s2..], frac_limbs, frac_limbs + n, &mut scratch[s5..], 0);
-        add_limbs_to(&scratch[s4..], &scratch[s5..], &mut scratch[s8..], n);
+        // |Z|^2 = re^2 + im^2 (both non-negative after squaring)
+        // Re-compute re^2 + im^2 using unsigned add (both magnitudes)
+        let mag_re2_s = signed_mul_to(
+            &scratch[zr..], &scratch[zr_sign],
+            &scratch[zr..], &scratch[zr_sign],
+            &mut scratch[re2..], &mut scratch[prod..], n, frac_limbs);
+        let mag_im2_s = signed_mul_to(
+            &scratch[zi..], &scratch[zi_sign],
+            &scratch[zi..], &scratch[zi_sign],
+            &mut scratch[im2..], &mut scratch[prod..], n, frac_limbs);
+        // re^2 and im^2 are always positive (square of real), so unsigned add is fine
+        add_limbs_to(&scratch[re2..], &scratch[im2..], &mut scratch[tmp..], n);
 
-        // Compare magnitude against threshold (params[5..5+n])
+        // Compare against threshold at params[5..5+n]
         let thresh_off = 5u32;
-        let borrow = sub_limbs_to(&scratch[s8..], &params[thresh_off..], &mut scratch[s9..], n);
+        let borrow = sub_limbs_to(&scratch[tmp..], &params[thresh_off..], &mut scratch[tmp2..], n);
         // borrow == 0 → |Z|^2 >= threshold → escaped
         if borrow == 0u32 {
             if escaped_iter == max_iters {
