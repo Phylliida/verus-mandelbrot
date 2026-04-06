@@ -8,6 +8,14 @@ struct R2 {
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
+fn fp_signed_sub(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
+  var neg_b_sign: u32;
+  var _ret: R2;
+  neg_b_sign = select_limb(b_sign, 1u, 0u);
+  _ret = fp_signed_add_c_data(a_limbs, a_sign, b_limbs, neg_b_sign, n);
+  return _ret;
+}
+
 fn fp_mag_squared(re_limbs: u32, re_sign: u32, im_limbs: u32, im_sign: u32, n: u32, frac_limbs: u32) -> R2 {
   var re2: u32;
   var _re2_sign: u32;
@@ -32,6 +40,25 @@ fn fp_mag_squared(re_limbs: u32, re_sign: u32, im_limbs: u32, im_sign: u32, n: u
     _carry = _td._1;
   }
   _ret = R2(mag, 0u);
+  return _ret;
+}
+
+fn fp_mul_scratch_scratch(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32, frac_limbs: u32) -> R2 {
+  var product: u32;
+  var _gc: u32;
+  var truncated: u32;
+  var sign_b_flip: u32;
+  var result_sign: u32;
+  var _ret: R2;
+  {
+    var _td = generic_mul_karatsuba_d6(a_limbs, b_limbs, n);
+    product = _td._0;
+    _gc = _td._1;
+  }
+  truncated = generic_slice_vec(product, frac_limbs, (frac_limbs + n));
+  sign_b_flip = select_limb(b_sign, 1u, 0u);
+  result_sign = select_limb(a_sign, b_sign, sign_b_flip);
+  _ret = R2(truncated, result_sign);
   return _ret;
 }
 
@@ -88,33 +115,6 @@ fn fp_signed_add_c_data(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n:
   return _ret;
 }
 
-fn fp_mul_scratch_scratch(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32, frac_limbs: u32) -> R2 {
-  var product: u32;
-  var _gc: u32;
-  var truncated: u32;
-  var sign_b_flip: u32;
-  var result_sign: u32;
-  var _ret: R2;
-  {
-    var _td = generic_mul_karatsuba_d6(a_limbs, b_limbs, n);
-    product = _td._0;
-    _gc = _td._1;
-  }
-  truncated = generic_slice_vec(product, frac_limbs, (frac_limbs + n));
-  sign_b_flip = select_limb(b_sign, 1u, 0u);
-  result_sign = select_limb(a_sign, b_sign, sign_b_flip);
-  _ret = R2(truncated, result_sign);
-  return _ret;
-}
-
-fn fp_signed_sub(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
-  var neg_b_sign: u32;
-  var _ret: R2;
-  neg_b_sign = select_limb(b_sign, 1u, 0u);
-  _ret = fp_signed_add_c_data(a_limbs, a_sign, b_limbs, neg_b_sign, n);
-  return _ret;
-}
-
 fn generic_sub_limbs_params(a: u32, b: u32, n: u32) -> R2 {
   var out_len: u32;
   var borrow: u32;
@@ -135,6 +135,16 @@ fn generic_sub_limbs_params(a: u32, b: u32, n: u32) -> R2 {
     borrow = next_borrow;
   }
   _ret = R2(out, borrow);
+  return _ret;
+}
+
+fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
+  var _ret: u32;
+  if ((cond == 0u)) {
+    _ret = if_zero;
+  } else {
+    _ret = if_nonzero;
+  }
   return _ret;
 }
 
@@ -161,82 +171,16 @@ fn generic_add_limbs(a: u32, b: u32, n: u32) -> R2 {
   return _ret;
 }
 
-fn mul2(self_val: u32, b: u32) -> R2 {
-  var lo: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var p0: u32;
-  var p1: u32;
-  var p2: u32;
-  var p3: u32;
-  var p0_hi: u32;
-  var mid: u32;
-  var hi: u32;
-  var _ret: R2;
-  lo = (self_val * b);
-  a_lo = (self_val & 0u);
-  a_hi = (self_val >> 16u);
-  b_lo = (b & 0u);
-  b_hi = (b >> 16u);
-  p0 = (a_lo * b_lo);
-  p1 = (a_lo * b_hi);
-  p2 = (a_hi * b_lo);
-  p3 = (a_hi * b_hi);
-  p0_hi = (p0 >> 16u);
-  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
-  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
-  _ret = R2(lo, hi);
-  return _ret;
-}
-
-fn is_zero_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  if ((self_val == 0u)) {
-    _ret = 1u;
-  } else {
-    _ret = 0u;
-  }
-  return _ret;
-}
-
-fn generic_select_vec(cond: u32, if_zero: u32, if_nonzero: u32, n: u32) -> u32 {
+fn generic_slice_vec(a: u32, start: u32, end: u32) -> u32 {
   var out_len: u32;
   var i: u32;
-  var selected: u32;
   var _ret: u32;
   out_len = 0u;
-  for (var i: u32 = 0u; i < n; i++) {
-    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
-    scratch[(out + out_len)] = selected;
+  for (var i: u32 = start; i < end; i++) {
+    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
     out_len = out_len + 1u;
   }
   _ret = out;
-  return _ret;
-}
-
-fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
-  var ab: u32;
-  var bw1: u32;
-  var result: u32;
-  var bw2: u32;
-  var _ret: R2;
-  ab = (self_val - b);
-  bw1 = select(0u, 1u, (self_val < b));
-  result = (ab - borrow);
-  bw2 = select(0u, 1u, (ab < borrow));
-  _ret = R2(result, (bw1 + bw2));
-  return _ret;
-}
-
-fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
-  var _ret: u32;
-  if ((cond == 0u)) {
-    _ret = if_zero;
-  } else {
-    _ret = if_nonzero;
-  }
   return _ret;
 }
 
@@ -292,12 +236,12 @@ fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var _td = generic_mul_karatsuba_d0(a_lo_p, b_lo_p, upper);
+    var _td = generic_mul_schoolbook(a_lo_p, b_lo_p, upper);
     z0 = _td._0;
     gz0 = _td._1;
   }
   {
-    var _td = generic_mul_karatsuba_d0(a_hi, b_hi, upper);
+    var _td = generic_mul_schoolbook(a_hi, b_hi, upper);
     z2 = _td._0;
     gz2 = _td._1;
   }
@@ -312,11 +256,11 @@ fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
     b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  _call_tmp = fn_18(a_carry);
+  _call_tmp = fn_21(a_carry);
   b_sum = b_sum_body;
-  _call_tmp = fn_19(b_carry);
+  _call_tmp = fn_22(b_carry);
   {
-    var _td = generic_mul_karatsuba_d0(a_sum, b_sum, (upper + 1u));
+    var _td = generic_mul_schoolbook(a_sum, b_sum, (upper + 1u));
     z1_full = _td._0;
     gz1f = _td._1;
   }
@@ -349,7 +293,7 @@ fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
     s2 = _td._0;
     c2 = _td._1;
   }
-  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
   return _ret;
 }
 
@@ -425,9 +369,9 @@ fn generic_mul_karatsuba_d1(a: u32, b: u32, n: u32) -> R2 {
     b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  _call_tmp = fn_18(a_carry);
+  _call_tmp = fn_21(a_carry);
   b_sum = b_sum_body;
-  _call_tmp = fn_19(b_carry);
+  _call_tmp = fn_22(b_carry);
   {
     var _td = generic_mul_karatsuba_d0(a_sum, b_sum, (upper + 1u));
     z1_full = _td._0;
@@ -462,7 +406,7 @@ fn generic_mul_karatsuba_d1(a: u32, b: u32, n: u32) -> R2 {
     s2 = _td._0;
     c2 = _td._1;
   }
-  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
   return _ret;
 }
 
@@ -538,9 +482,9 @@ fn generic_mul_karatsuba_d2(a: u32, b: u32, n: u32) -> R2 {
     b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  _call_tmp = fn_18(a_carry);
+  _call_tmp = fn_21(a_carry);
   b_sum = b_sum_body;
-  _call_tmp = fn_19(b_carry);
+  _call_tmp = fn_22(b_carry);
   {
     var _td = generic_mul_karatsuba_d1(a_sum, b_sum, (upper + 1u));
     z1_full = _td._0;
@@ -575,7 +519,7 @@ fn generic_mul_karatsuba_d2(a: u32, b: u32, n: u32) -> R2 {
     s2 = _td._0;
     c2 = _td._1;
   }
-  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
   return _ret;
 }
 
@@ -651,9 +595,9 @@ fn generic_mul_karatsuba_d3(a: u32, b: u32, n: u32) -> R2 {
     b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  _call_tmp = fn_18(a_carry);
+  _call_tmp = fn_21(a_carry);
   b_sum = b_sum_body;
-  _call_tmp = fn_19(b_carry);
+  _call_tmp = fn_22(b_carry);
   {
     var _td = generic_mul_karatsuba_d2(a_sum, b_sum, (upper + 1u));
     z1_full = _td._0;
@@ -688,7 +632,7 @@ fn generic_mul_karatsuba_d3(a: u32, b: u32, n: u32) -> R2 {
     s2 = _td._0;
     c2 = _td._1;
   }
-  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
   return _ret;
 }
 
@@ -764,9 +708,9 @@ fn generic_mul_karatsuba_d4(a: u32, b: u32, n: u32) -> R2 {
     b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  _call_tmp = fn_18(a_carry);
+  _call_tmp = fn_21(a_carry);
   b_sum = b_sum_body;
-  _call_tmp = fn_19(b_carry);
+  _call_tmp = fn_22(b_carry);
   {
     var _td = generic_mul_karatsuba_d3(a_sum, b_sum, (upper + 1u));
     z1_full = _td._0;
@@ -801,7 +745,7 @@ fn generic_mul_karatsuba_d4(a: u32, b: u32, n: u32) -> R2 {
     s2 = _td._0;
     c2 = _td._1;
   }
-  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
   return _ret;
 }
 
@@ -877,9 +821,9 @@ fn generic_mul_karatsuba_d5(a: u32, b: u32, n: u32) -> R2 {
     b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  _call_tmp = fn_18(a_carry);
+  _call_tmp = fn_21(a_carry);
   b_sum = b_sum_body;
-  _call_tmp = fn_19(b_carry);
+  _call_tmp = fn_22(b_carry);
   {
     var _td = generic_mul_karatsuba_d4(a_sum, b_sum, (upper + 1u));
     z1_full = _td._0;
@@ -914,7 +858,7 @@ fn generic_mul_karatsuba_d5(a: u32, b: u32, n: u32) -> R2 {
     s2 = _td._0;
     c2 = _td._1;
   }
-  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
   return _ret;
 }
 
@@ -990,9 +934,9 @@ fn generic_mul_karatsuba_d6(a: u32, b: u32, n: u32) -> R2 {
     b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  _call_tmp = fn_18(a_carry);
+  _call_tmp = fn_21(a_carry);
   b_sum = b_sum_body;
-  _call_tmp = fn_19(b_carry);
+  _call_tmp = fn_22(b_carry);
   {
     var _td = generic_mul_karatsuba_d5(a_sum, b_sum, (upper + 1u));
     z1_full = _td._0;
@@ -1027,20 +971,106 @@ fn generic_mul_karatsuba_d6(a: u32, b: u32, n: u32) -> R2 {
     s2 = _td._0;
     c2 = _td._1;
   }
-  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
   return _ret;
 }
 
-fn generic_slice_vec(a: u32, start: u32, end: u32) -> u32 {
+fn generic_mul_schoolbook(a: u32, b: u32, n: u32) -> R2 {
+  var nn: u32;
+  var acc: u32;
+  var i: u32;
+  var bi: u32;
+  var partial: u32;
+  var shifted: u32;
+  var shifted_p: u32;
+  var new_acc: u32;
+  var carry: u32;
+  var ghost_carry: u32;
+  var _ret: R2;
+  nn = (2u * n);
+  acc = fn_21(nn);
+  for (var i: u32 = 0u; i < n; i++) {
+    bi = clone_limb(scratch[(b + i)]);
+    partial = generic_mul_by_limb(a, bi, n);
+    shifted = generic_shift_left(partial, i);
+    shifted_p = generic_pad_to_length(shifted, nn);
+    {
+      var _td = generic_add_limbs(acc, shifted_p, nn);
+      new_acc = _td._0;
+      carry = _td._1;
+    }
+    acc = new_acc;
+  }
+  _ret = R2(acc, fn_22(ghost_carry));
+  return _ret;
+}
+
+fn is_zero_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  if ((self_val == 0u)) {
+    _ret = 1u;
+  } else {
+    _ret = 0u;
+  }
+  return _ret;
+}
+
+fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
+  var ab: u32;
+  var bw1: u32;
+  var result: u32;
+  var bw2: u32;
+  var _ret: R2;
+  ab = (self_val - b);
+  bw1 = select(0u, 1u, (self_val < b));
+  result = (ab - borrow);
+  bw2 = select(0u, 1u, (ab < borrow));
+  _ret = R2(result, (bw1 + bw2));
+  return _ret;
+}
+
+fn generic_select_vec(cond: u32, if_zero: u32, if_nonzero: u32, n: u32) -> u32 {
   var out_len: u32;
   var i: u32;
+  var selected: u32;
   var _ret: u32;
   out_len = 0u;
-  for (var i: u32 = start; i < end; i++) {
-    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
+  for (var i: u32 = 0u; i < n; i++) {
+    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
+    scratch[(out + out_len)] = selected;
     out_len = out_len + 1u;
   }
   _ret = out;
+  return _ret;
+}
+
+fn mul2(self_val: u32, b: u32) -> R2 {
+  var lo: u32;
+  var a_lo: u32;
+  var a_hi: u32;
+  var b_lo: u32;
+  var b_hi: u32;
+  var p0: u32;
+  var p1: u32;
+  var p2: u32;
+  var p3: u32;
+  var p0_hi: u32;
+  var mid: u32;
+  var hi: u32;
+  var _ret: R2;
+  lo = (self_val * b);
+  a_lo = (self_val & 0u);
+  a_hi = (self_val >> 16u);
+  b_lo = (b & 0u);
+  b_hi = (b >> 16u);
+  p0 = (a_lo * b_lo);
+  p1 = (a_lo * b_hi);
+  p2 = (a_hi * b_lo);
+  p3 = (a_hi * b_hi);
+  p0_hi = (p0 >> 16u);
+  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
+  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
+  _ret = R2(lo, hi);
   return _ret;
 }
 
@@ -1070,23 +1100,6 @@ fn clone_limb(self_val: u32) -> u32 {
   return _ret;
 }
 
-fn generic_pad_to_length(a: u32, target_v: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var _ret: u32;
-  out_len = 0u;
-  for (var i: u32 = 0u; i < fn_18(a); i++) {
-    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
-    out_len = out_len + 1u;
-  }
-  for (var i: u32 = fn_18(a); i < target_v; i++) {
-    scratch[(out + out_len)] = zero_val();
-    out_len = out_len + 1u;
-  }
-  _ret = out;
-  return _ret;
-}
-
 fn generic_shift_left(a: u32, offset: u32) -> u32 {
   var out_len: u32;
   var i: u32;
@@ -1097,11 +1110,76 @@ fn generic_shift_left(a: u32, offset: u32) -> u32 {
     scratch[(out + out_len)] = zero_val();
     out_len = out_len + 1u;
   }
-  for (var k: u32 = 0u; k < fn_18(a); k++) {
+  for (var k: u32 = 0u; k < fn_21(a); k++) {
     scratch[(out + out_len)] = clone_limb(scratch[(a + k)]);
     out_len = out_len + 1u;
   }
   _ret = out;
+  return _ret;
+}
+
+fn generic_pad_to_length(a: u32, target_v: u32) -> u32 {
+  var out_len: u32;
+  var i: u32;
+  var _ret: u32;
+  out_len = 0u;
+  for (var i: u32 = 0u; i < fn_21(a); i++) {
+    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
+    out_len = out_len + 1u;
+  }
+  for (var i: u32 = fn_21(a); i < target_v; i++) {
+    scratch[(out + out_len)] = zero_val();
+    out_len = out_len + 1u;
+  }
+  _ret = out;
+  return _ret;
+}
+
+fn generic_mul_by_limb(a: u32, scalar: u32, n: u32) -> u32 {
+  var out_len: u32;
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  out_len = 0u;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = mul_add_carry(scratch[(a + i)], scalar, zero_val(), carry);
+      digit = _td._0;
+      next_carry = _td._1;
+    }
+    scratch[(out + out_len)] = digit;
+    out_len = out_len + 1u;
+    carry = next_carry;
+  }
+  scratch[(out + out_len)] = carry;
+  out_len = out_len + 1u;
+  _ret = out;
+  return _ret;
+}
+
+fn mul_add_carry(self_val: u32, b: u32, accum: u32, carry: u32) -> R2 {
+  var mul_lo: u32;
+  var mul_hi: u32;
+  var sum1: u32;
+  var c1: u32;
+  var sum2: u32;
+  var c2: u32;
+  var carry_out: u32;
+  var _ret: R2;
+  {
+    var _td = mul2(self_val, b);
+    mul_lo = _td._0;
+    mul_hi = _td._1;
+  }
+  sum1 = (mul_lo + accum);
+  c1 = select(0u, 1u, (sum1 < mul_lo));
+  sum2 = (sum1 + carry);
+  c2 = select(0u, 1u, (sum2 < sum1));
+  carry_out = ((mul_hi + c1) + c2);
+  _ret = R2(sum2, carry_out);
   return _ret;
 }
 
