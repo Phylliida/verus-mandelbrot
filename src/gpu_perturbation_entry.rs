@@ -47,8 +47,8 @@ fn mandelbrot_perturbation(
     let z_stride = 2u32 * n + 2u32;
 
     // Shared memory regions
-    let orbit_base = 0u32;                          // Z_0..Z_{max_iters}: max_iters * z_stride
-    let ref_c_base = max_iters * z_stride;          // c_ref: z_stride words
+    let orbit_base = 0u32;                          // Z_0..Z_{max_iters}: (max_iters+1) * z_stride
+    let ref_c_base = (max_iters + 1u32) * z_stride; // c_ref: z_stride words
     let t0_tmp_base = ref_c_base + z_stride;        // thread-0 temporaries
 
     // Thread-0 temporary offsets (for reference orbit computation)
