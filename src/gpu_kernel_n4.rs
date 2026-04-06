@@ -325,3 +325,93 @@ fn perturb_step4(
 
     (out_r0, out_r1, out_r2, out_r3, out_i0, out_i1, out_i2, out_i3)
 }
+
+///  GPU kernel: compute reference orbit for one point.
+///  Buffer layout (all u32):
+///    c_data[0..4]:  c_re limbs,  c_data[4..8]:  c_im limbs
+///    orbit_re[iter*4 .. iter*4+4]: Z_re at iteration iter
+///    orbit_im[iter*4 .. iter*4+4]: Z_im at iteration iter
+///    params[0]: max_iters, params[1]: c_val (Mersenne constant)
+///    params[2..6]: p limbs (the prime)
+///    iter_counts[tid]: output iteration count (escape iter or max_iters)
+#[gpu_kernel(workgroup_size(16, 16, 1))]
+fn mandelbrot_ref_orbit(
+    #[gpu_builtin(thread_id_x)] gid_x: u32,
+    #[gpu_builtin(thread_id_y)] gid_y: u32,
+    #[gpu_buffer(0, read)] c_data: &[u32],
+    #[gpu_buffer(1, read_write)] orbit_re: &mut [u32],
+    #[gpu_buffer(2, read_write)] orbit_im: &mut [u32],
+    #[gpu_buffer(3, read)] params: &[u32],
+    #[gpu_buffer(4, read_write)] iter_counts: &mut [u32],
+) {
+    let width = params[0u32];
+    let max_iters = params[1u32];
+    let c_val = params[2u32];
+    let p0 = params[3u32];
+    let p1 = params[4u32];
+    let p2 = params[5u32];
+    let p3 = params[6u32];
+
+    let tid = gid_y * width + gid_x;
+
+    //  Load c for this pixel (tid indexes into c_data)
+    let base = tid * 8u32;
+    let cr0 = c_data[base + 0u32];
+    let cr1 = c_data[base + 1u32];
+    let cr2 = c_data[base + 2u32];
+    let cr3 = c_data[base + 3u32];
+    let ci0 = c_data[base + 4u32];
+    let ci1 = c_data[base + 5u32];
+    let ci2 = c_data[base + 6u32];
+    let ci3 = c_data[base + 7u32];
+
+    //  Z_0 = 0
+    let mut zr0 = 0u32;
+    let mut zr1 = 0u32;
+    let mut zr2 = 0u32;
+    let mut zr3 = 0u32;
+    let mut zi0 = 0u32;
+    let mut zi1 = 0u32;
+    let mut zi2 = 0u32;
+    let mut zi3 = 0u32;
+
+    let mut escaped_iter = max_iters;
+
+    for iter in 0u32..max_iters {
+        //  Store Z_n in orbit buffers
+        let orbit_base = (tid * max_iters + iter) * 4u32;
+        orbit_re[orbit_base + 0u32] = zr0;
+        orbit_re[orbit_base + 1u32] = zr1;
+        orbit_re[orbit_base + 2u32] = zr2;
+        orbit_re[orbit_base + 3u32] = zr3;
+        orbit_im[orbit_base + 0u32] = zi0;
+        orbit_im[orbit_base + 1u32] = zi1;
+        orbit_im[orbit_base + 2u32] = zi2;
+        orbit_im[orbit_base + 3u32] = zi3;
+
+        //  Z_{n+1} = Z_n^2 + c
+        let (nr0, nr1, nr2, nr3, ni0, ni1, ni2, ni3) =
+            ref_step4(zr0, zr1, zr2, zr3, zi0, zi1, zi2, zi3,
+                      cr0, cr1, cr2, cr3, ci0, ci1, ci2, ci3,
+                      p0, p1, p2, p3, c_val);
+        zr0 = nr0; zr1 = nr1; zr2 = nr2; zr3 = nr3;
+        zi0 = ni0; zi1 = ni1; zi2 = ni2; zi3 = ni3;
+
+        //  Escape check: |Z|^2 > 4 (simplified: check if top limb > 4)
+        //  For proper escape detection, we'd use magnitude_squared + centered comparison.
+        //  For now: if zr3 > 4 || zi3 > 4, likely escaped (rough check on MSB limb).
+        let (mag_0, mag_1, mag_2, mag_3) = add_mod4(
+            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).0,
+            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).1,
+            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).2,
+            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).3,
+            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).0,
+            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).1,
+            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).2,
+            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).3,
+            p0, p1, p2, p3, c_val);
+        //  TODO: proper escape detection via centered comparison
+    }
+
+    iter_counts[tid] = escaped_iter;
+}
