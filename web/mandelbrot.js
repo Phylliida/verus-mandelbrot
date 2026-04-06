@@ -467,7 +467,7 @@ async function render() {
   paramsData.set(thresh_limbs, 5);
 
   // Scratch buffer: signed arithmetic needs more space for signs + intermediates
-  const wordsPerThread = 14 * n + 8;
+  const wordsPerThread = 16 * n + 8;
   const scratchSize = totalPixels * wordsPerThread * 4; // bytes
   const iterCountsSize = totalPixels * 4;
 
@@ -509,25 +509,10 @@ async function render() {
   const elapsed = performance.now() - t0;
   statusEl.textContent = `Done in ${elapsed.toFixed(0)}ms (${n} limbs, ${maxIters} iters)`;
 
-  // Render to canvas
+  // Render to canvas — GPU outputs packed RGBA directly
   const imageData = ctx2d.createImageData(width, height);
-  for (let i = 0; i < totalPixels; i++) {
-    const iter = iterCounts[i];
-    const px = i * 4;
-    if (iter >= maxIters) {
-      imageData.data[px] = 0;
-      imageData.data[px + 1] = 0;
-      imageData.data[px + 2] = 0;
-      imageData.data[px + 3] = 255;
-    } else {
-      const t = iter / maxIters;
-      const [r, g, b] = hsvToRgb(0.66 + t * 3.0, 0.8, 0.3 + 0.7 * (1 - t));
-      imageData.data[px] = r;
-      imageData.data[px + 1] = g;
-      imageData.data[px + 2] = b;
-      imageData.data[px + 3] = 255;
-    }
-  }
+  const pixels = new Uint8Array(iterCounts.buffer);
+  imageData.data.set(pixels);
   ctx2d.putImageData(imageData, 0, 0);
 
   // Clean up

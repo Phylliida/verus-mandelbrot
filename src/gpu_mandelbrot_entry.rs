@@ -104,7 +104,7 @@ fn mandelbrot_fixedpoint(
         let rpi_s = signed_add_to(
             &scratch[zr..], &scratch[zr_sign],
             &scratch[zi..], &scratch[zi_sign],
-            &mut scratch[rpi..], n);
+            &mut scratch[rpi..], &mut scratch[stmp1..], &mut scratch[stmp2..], n);
         scratch[rpi_sign] = rpi_s;
 
         // (re+im)^2
@@ -118,29 +118,29 @@ fn mandelbrot_fixedpoint(
         let tmp_s = signed_sub_to(
             &scratch[re2..], &scratch[re2_sign],
             &scratch[im2..], &scratch[im2_sign],
-            &mut scratch[tmp..], n);
+            &mut scratch[tmp..], &mut scratch[stmp1..], &mut scratch[stmp2..], n);
         scratch[tmp_sign] = tmp_s;
         let new_re_s = signed_add_to(
             &scratch[tmp..], &scratch[tmp_sign],
             &c_data[c_re..], &c_data[c_re_sign],
-            &mut scratch[zr..], n);
+            &mut scratch[zr..], &mut scratch[stmp1..], &mut scratch[stmp2..], n);
         scratch[zr_sign] = new_re_s;
 
         // new_im = (re+im)^2 - re^2 - im^2 + c_im
         let t1_s = signed_sub_to(
             &scratch[sum2..], &scratch[sum2_sign],
             &scratch[re2..], &scratch[re2_sign],
-            &mut scratch[tmp..], n);
+            &mut scratch[tmp..], &mut scratch[stmp1..], &mut scratch[stmp2..], n);
         scratch[tmp_sign] = t1_s;
         let t2_s = signed_sub_to(
             &scratch[tmp..], &scratch[tmp_sign],
             &scratch[im2..], &scratch[im2_sign],
-            &mut scratch[tmp2..], n);
+            &mut scratch[tmp2..], &mut scratch[stmp1..], &mut scratch[stmp2..], n);
         scratch[tmp2_sign] = t2_s;
         let new_im_s = signed_add_to(
             &scratch[tmp2..], &scratch[tmp2_sign],
             &c_data[c_im..], &c_data[c_im_sign],
-            &mut scratch[zi..], n);
+            &mut scratch[zi..], &mut scratch[stmp1..], &mut scratch[stmp2..], n);
         scratch[zi_sign] = new_im_s;
 
         // ── Escape check: |Z|^2 > 4 ──
@@ -168,5 +168,16 @@ fn mandelbrot_fixedpoint(
         }
     }
 
-    iter_counts[tid] = escaped_iter;
+    // ── Colorize: write RGBA directly ──
+    // Pack as 0xAABBGGRR (little-endian RGBA for ImageData)
+    let alpha = 4278190080u32;
+    if escaped_iter >= max_iters {
+        iter_counts[tid] = alpha;
+    } else {
+        let t = escaped_iter * 255u32 / max_iters;
+        let r = t;
+        let g = t / 3u32;
+        let b = 255u32 - t / 2u32;
+        iter_counts[tid] = alpha | (b << 16u32) | (g << 8u32) | r;
+    }
 }
