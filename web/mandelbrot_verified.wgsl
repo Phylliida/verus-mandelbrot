@@ -8,23 +8,20 @@ struct R2 {
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
-fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
+fn slice_vec_to_scratch_scratch(a: u32, start: u32, end: u32, out: u32, out_off: u32) -> u32 {
+  var len: u32;
+  var si: u32;
+  var di: u32;
+  var idx: u32;
   var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3(scratch[(a + i)], scratch[(b + i)], carry);
-      digit = _td._0;
-      next_carry = _td._1;
-    }
-    _call_tmp = fn_9(i, digit);
-    carry = next_carry;
+  len = (end - start);
+  si = start;
+  di = out_off;
+  for (var idx: u32 = 0u; idx < len; idx++) {
+    scratch[(out + di)] = clone_limb(scratch[(a + si)]);
+    si = (si + 1u);
+    di = (di + 1u);
   }
-  _ret = carry;
   return _ret;
 }
 
@@ -42,7 +39,7 @@ fn mul_schoolbook_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -
   var _ret: u32;
   nn = (2u * n);
   for (var i: u32 = 0u; i < nn; i++) {
-    _call_tmp = fn_9(i, zero_val());
+    scratch[(out + i)] = zero_val();
   }
   for (var i: u32 = 0u; i < n; i++) {
     carry = zero_val();
@@ -62,28 +59,31 @@ fn mul_schoolbook_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -
         new_carry = _td._0;
         _c2 = _td._1;
       }
-      _call_tmp = fn_9((i + j), sum1);
+      scratch[(out + (i + j))] = sum1;
       carry = new_carry;
     }
-    _call_tmp = fn_9((i + n), carry);
+    scratch[(out + (i + n))] = carry;
   }
   return _ret;
 }
 
-fn slice_vec_to_scratch_scratch(a: u32, start: u32, end: u32, out: u32, out_off: u32) -> u32 {
-  var len: u32;
-  var si: u32;
-  var di: u32;
-  var idx: u32;
+fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
   var _ret: u32;
-  len = (end - start);
-  si = start;
-  di = out_off;
-  for (var idx: u32 = 0u; idx < len; idx++) {
-    _call_tmp = fn_9(di, clone_limb(scratch[(a + si)]));
-    si = (si + 1u);
-    di = (di + 1u);
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(scratch[(a + i)], scratch[(b + i)], carry);
+      digit = _td._0;
+      next_carry = _td._1;
+    }
+    scratch[(out + i)] = digit;
+    carry = next_carry;
   }
+  _ret = carry;
   return _ret;
 }
 
@@ -100,10 +100,16 @@ fn sub_limbs_to_scratch_params_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 
       digit = _td._0;
       next_borrow = _td._1;
     }
-    _call_tmp = fn_9(i, digit);
+    scratch[(out + i)] = digit;
     borrow = next_borrow;
   }
   _ret = borrow;
+  return _ret;
+}
+
+fn clone_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  _ret = self_val;
   return _ret;
 }
 
@@ -157,12 +163,6 @@ fn mul2(self_val: u32, b: u32) -> R2 {
   return _ret;
 }
 
-fn clone_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  _ret = self_val;
-  return _ret;
-}
-
 fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
   var ab: u32;
   var bw1: u32;
@@ -206,6 +206,7 @@ fn mandelbrot_fixedpoint(
   var i: u32;
   var escaped_iter: u32;
   var iter: u32;
+  var _call_tmp: u32;
   var thresh_off: u32;
   var borrow: u32;
   width = params[0u];
