@@ -10,10 +10,18 @@
 // transpiled from the verified Verus source. For the web demo, we inline
 // a clean version that mirrors the verified code structure exactly.
 
-const SHADER_CODE = `
-// ── Tuple return structs ──
+// Load the auto-generated WGSL from verified Verus code
+let SHADER_CODE = null;
+
+async function loadShader() {
+  const resp = await fetch('mandelbrot_verified.wgsl');
+  SHADER_CODE = await resp.text();
+  console.log(`Loaded ${SHADER_CODE.split('\\n').length} lines of verified WGSL`);
+}
+
+const SHADER_CODE_FALLBACK = `
+// Fallback (should not be used — load mandelbrot_verified.wgsl instead)
 struct R2 { _0: u32, _1: u32, }
-struct R3 { _0: u32, _1: u32, _2: u32, }
 
 // ── Verified LimbOps (from verus-fixed-point/limb_ops.rs) ──
 
@@ -369,60 +377,29 @@ async function initWebGPU() {
 
   pipeline = device.createComputePipeline({
     layout: 'auto',
-    compute: { module: shaderModule, entryPoint: 'main' },
+    compute: { module: shaderModule, entryPoint: 'mandelbrot_fixedpoint' },
   });
 
   statusEl.textContent = 'Ready';
   return true;
 }
 
-// Convert a double to N-limb prime field representation.
-// p = 2^(32*N) - c. Value must be in [0, p).
-// We represent the fractional part: val * 2^(32*(N-1))
-function doubleToLimbs(val, n, p_limbs) {
+// Convert a double to sign-magnitude fixed-point limbs.
+// Returns { limbs: Uint32Array(n), sign: 0 or 1 }.
+// Limb 0 is LSB (fractional), limb n-1 is MSB (integer part).
+// frac_limbs fractional limbs, rest is integer.
+function doubleToFixedPoint(val, n) {
   const limbs = new Uint32Array(n);
-  // Scale: val is in roughly [-2, 2]. Map to [0, p) via centered representation.
-  // For simplicity: store |val| * 2^(32*(n-1)), use sign bit separately.
   const sign = val < 0 ? 1 : 0;
   let absVal = Math.abs(val);
 
-  // Integer part in top limb, fractional in lower limbs
+  // Fill from MSB (integer part) down to LSB (finest fractional)
   for (let i = n - 1; i >= 0; i--) {
     const limb = Math.floor(absVal) >>> 0;
     limbs[i] = limb;
     absVal = (absVal - limb) * 4294967296; // * 2^32
   }
-
-  // If negative, compute p - limbs (modular negation)
-  if (sign && (limbs.some(l => l !== 0))) {
-    let borrow = 0;
-    for (let i = 0; i < n; i++) {
-      const diff = p_limbs[i] - limbs[i] - borrow;
-      if (diff < 0) {
-        limbs[i] = (diff + 4294967296) >>> 0;
-        borrow = 1;
-      } else {
-        limbs[i] = diff >>> 0;
-        borrow = 0;
-      }
-    }
-  }
-  return limbs;
-}
-
-// Build p = 2^(32*n) - c as limb array
-function buildPrimeLimbs(n, c) {
-  const p = new Uint32Array(n);
-  p[0] = (0x100000000 - c) >>> 0; // BASE - c
-  for (let i = 1; i < n; i++) p[i] = 0xFFFFFFFF;
-  return p;
-}
-
-// Build escape threshold (e.g., 4.0) as limb array
-function buildThresholdLimbs(n) {
-  const t = new Uint32Array(n);
-  t[n - 1] = 4; // 4 in the integer part (top limb)
-  return t;
+  return { limbs, sign };
 }
 
 // HSV to RGB for coloring
@@ -453,41 +430,45 @@ async function render() {
 
   const n = 1 << parseInt(refNSlider.value); // limbs per value
   const maxIters = parseInt(maxItersSlider.value);
-  const c_val = 1; // p = 2^(32*n) - 1 (Mersenne prime for simplicity)
-  const p_limbs = buildPrimeLimbs(n, c_val);
-  const thresh_limbs = buildThresholdLimbs(n);
+  const frac_limbs = n - 1; // n-1 fractional limbs, 1 integer limb
 
   statusEl.textContent = `Computing ${width}x${height}, N=${n} limbs, ${maxIters} iters...`;
 
   const totalPixels = width * height;
 
-  // Build c_data: for each pixel, compute c_re and c_im as N-limb values
-  const c_data = new Uint32Array(totalPixels * 2 * n);
-  const pixelStep = 3.0 / (zoom * width); // 3.0 covers [-2, 1] range
+  // Build c_data: per pixel [re_limbs(n), re_sign(1), im_limbs(n), im_sign(1)]
+  const stride = 2 * n + 2; // words per pixel
+  const c_data = new Uint32Array(totalPixels * stride);
+  const pixelStep = 3.0 / (zoom * width);
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {
       const cr = centerRe + (px - width / 2 + 0.5) * pixelStep;
       const ci = centerIm + (py - height / 2 + 0.5) * pixelStep;
-      const idx = (py * width + px) * 2 * n;
-      const reLimbs = doubleToLimbs(cr, n, p_limbs);
-      const imLimbs = doubleToLimbs(ci, n, p_limbs);
-      c_data.set(reLimbs, idx);
-      c_data.set(imLimbs, idx + n);
+      const idx = (py * width + px) * stride;
+      const re = doubleToFixedPoint(cr, n);
+      const im = doubleToFixedPoint(ci, n);
+      c_data.set(re.limbs, idx);
+      c_data[idx + n] = re.sign;
+      c_data.set(im.limbs, idx + n + 1);
+      c_data[idx + 2 * n + 1] = im.sign;
     }
   }
 
-  // Build params: [width, height, max_iters, n, c_val, p0..p_{n-1}, thresh0..thresh_{n-1}]
-  const paramsData = new Uint32Array(5 + n + n);
+  // Build params: [width, height, max_iters, n_limbs, frac_limbs, thresh_limbs(n)]
+  // Escape threshold = 4.0 in fixed-point: integer part = 4 in top limb
+  const thresh_limbs = new Uint32Array(n);
+  thresh_limbs[n - 1] = 4;
+  const paramsData = new Uint32Array(5 + n);
   paramsData[0] = width;
   paramsData[1] = height;
   paramsData[2] = maxIters;
   paramsData[3] = n;
-  paramsData[4] = c_val;
-  paramsData.set(p_limbs, 5);
-  paramsData.set(thresh_limbs, 5 + n);
+  paramsData[4] = frac_limbs;
+  paramsData.set(thresh_limbs, 5);
 
-  // Scratch buffer: 12*n u32s per thread
-  const scratchSize = totalPixels * 12 * n * 4; // bytes
+  // Scratch buffer: ~8*n u32s per thread (z_re, z_im, signs, temps)
+  const wordsPerThread = 7 * n + 3;
+  const scratchSize = totalPixels * wordsPerThread * 4; // bytes
   const iterCountsSize = totalPixels * 4;
 
   // Create GPU buffers
@@ -579,6 +560,7 @@ renderBtn.onclick = render;
 
 // Init
 (async () => {
+  await loadShader();
   if (await initWebGPU()) {
     render();
   }
