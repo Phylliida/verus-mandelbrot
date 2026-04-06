@@ -8,14 +8,6 @@ struct R2 {
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
-fn fp_signed_sub(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
-  var neg_b_sign: u32;
-  var _ret: R2;
-  neg_b_sign = select_limb(b_sign, 1u, 0u);
-  _ret = fp_signed_add_c_data(a_limbs, a_sign, b_limbs, neg_b_sign, n);
-  return _ret;
-}
-
 fn fp_mag_squared(re_limbs: u32, re_sign: u32, im_limbs: u32, im_sign: u32, n: u32, frac_limbs: u32) -> R2 {
   var re2: u32;
   var _re2_sign: u32;
@@ -40,48 +32,6 @@ fn fp_mag_squared(re_limbs: u32, re_sign: u32, im_limbs: u32, im_sign: u32, n: u
     _carry = _td._1;
   }
   _ret = R2(mag, 0u);
-  return _ret;
-}
-
-fn generic_sub_limbs_params(a: u32, b: u32, n: u32) -> R2 {
-  var out_len: u32;
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
-  var _ret: R2;
-  out_len = 0u;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow(params[(a + i)], scratch[(b + i)], borrow);
-      digit = _td._0;
-      next_borrow = _td._1;
-    }
-    scratch[(out + out_len)] = digit;
-    out_len = out_len + 1u;
-    borrow = next_borrow;
-  }
-  _ret = R2(out, borrow);
-  return _ret;
-}
-
-fn fp_mul_scratch_scratch(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32, frac_limbs: u32) -> R2 {
-  var product: u32;
-  var _gc: u32;
-  var truncated: u32;
-  var sign_b_flip: u32;
-  var result_sign: u32;
-  var _ret: R2;
-  {
-    var _td = generic_mul_karatsuba_d6(a_limbs, b_limbs, n);
-    product = _td._0;
-    _gc = _td._1;
-  }
-  truncated = generic_slice_vec(product, frac_limbs, (frac_limbs + n));
-  sign_b_flip = select_limb(b_sign, 1u, 0u);
-  result_sign = select_limb(a_sign, b_sign, sign_b_flip);
-  _ret = R2(truncated, result_sign);
   return _ret;
 }
 
@@ -138,13 +88,53 @@ fn fp_signed_add_c_data(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n:
   return _ret;
 }
 
-fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
-  var _ret: u32;
-  if ((cond == 0u)) {
-    _ret = if_zero;
-  } else {
-    _ret = if_nonzero;
+fn fp_mul_scratch_scratch(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32, frac_limbs: u32) -> R2 {
+  var product: u32;
+  var _gc: u32;
+  var truncated: u32;
+  var sign_b_flip: u32;
+  var result_sign: u32;
+  var _ret: R2;
+  {
+    var _td = generic_mul_karatsuba_d6(a_limbs, b_limbs, n);
+    product = _td._0;
+    _gc = _td._1;
   }
+  truncated = generic_slice_vec(product, frac_limbs, (frac_limbs + n));
+  sign_b_flip = select_limb(b_sign, 1u, 0u);
+  result_sign = select_limb(a_sign, b_sign, sign_b_flip);
+  _ret = R2(truncated, result_sign);
+  return _ret;
+}
+
+fn fp_signed_sub(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
+  var neg_b_sign: u32;
+  var _ret: R2;
+  neg_b_sign = select_limb(b_sign, 1u, 0u);
+  _ret = fp_signed_add_c_data(a_limbs, a_sign, b_limbs, neg_b_sign, n);
+  return _ret;
+}
+
+fn generic_sub_limbs_params(a: u32, b: u32, n: u32) -> R2 {
+  var out_len: u32;
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: R2;
+  out_len = 0u;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(params[(a + i)], scratch[(b + i)], borrow);
+      digit = _td._0;
+      next_borrow = _td._1;
+    }
+    scratch[(out + out_len)] = digit;
+    out_len = out_len + 1u;
+    borrow = next_borrow;
+  }
+  _ret = R2(out, borrow);
   return _ret;
 }
 
@@ -171,9 +161,58 @@ fn generic_add_limbs(a: u32, b: u32, n: u32) -> R2 {
   return _ret;
 }
 
-fn zero_val() -> u32 {
+fn mul2(self_val: u32, b: u32) -> R2 {
+  var lo: u32;
+  var a_lo: u32;
+  var a_hi: u32;
+  var b_lo: u32;
+  var b_hi: u32;
+  var p0: u32;
+  var p1: u32;
+  var p2: u32;
+  var p3: u32;
+  var p0_hi: u32;
+  var mid: u32;
+  var hi: u32;
+  var _ret: R2;
+  lo = (self_val * b);
+  a_lo = (self_val & 0u);
+  a_hi = (self_val >> 16u);
+  b_lo = (b & 0u);
+  b_hi = (b >> 16u);
+  p0 = (a_lo * b_lo);
+  p1 = (a_lo * b_hi);
+  p2 = (a_hi * b_lo);
+  p3 = (a_hi * b_hi);
+  p0_hi = (p0 >> 16u);
+  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
+  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
+  _ret = R2(lo, hi);
+  return _ret;
+}
+
+fn is_zero_limb(self_val: u32) -> u32 {
   var _ret: u32;
-  _ret = 0u;
+  if ((self_val == 0u)) {
+    _ret = 1u;
+  } else {
+    _ret = 0u;
+  }
+  return _ret;
+}
+
+fn generic_select_vec(cond: u32, if_zero: u32, if_nonzero: u32, n: u32) -> u32 {
+  var out_len: u32;
+  var i: u32;
+  var selected: u32;
+  var _ret: u32;
+  out_len = 0u;
+  for (var i: u32 = 0u; i < n; i++) {
+    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
+    scratch[(out + out_len)] = selected;
+    out_len = out_len + 1u;
+  }
+  _ret = out;
   return _ret;
 }
 
@@ -188,6 +227,16 @@ fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
   result = (ab - borrow);
   bw2 = select(0u, 1u, (ab < borrow));
   _ret = R2(result, (bw1 + bw2));
+  return _ret;
+}
+
+fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
+  var _ret: u32;
+  if ((cond == 0u)) {
+    _ret = if_zero;
+  } else {
+    _ret = if_nonzero;
+  }
   return _ret;
 }
 
@@ -995,58 +1044,9 @@ fn generic_slice_vec(a: u32, start: u32, end: u32) -> u32 {
   return _ret;
 }
 
-fn mul2(self_val: u32, b: u32) -> R2 {
-  var lo: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var p0: u32;
-  var p1: u32;
-  var p2: u32;
-  var p3: u32;
-  var p0_hi: u32;
-  var mid: u32;
-  var hi: u32;
-  var _ret: R2;
-  lo = (self_val * b);
-  a_lo = (self_val & 0u);
-  a_hi = (self_val >> 16u);
-  b_lo = (b & 0u);
-  b_hi = (b >> 16u);
-  p0 = (a_lo * b_lo);
-  p1 = (a_lo * b_hi);
-  p2 = (a_hi * b_lo);
-  p3 = (a_hi * b_hi);
-  p0_hi = (p0 >> 16u);
-  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
-  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
-  _ret = R2(lo, hi);
-  return _ret;
-}
-
-fn generic_select_vec(cond: u32, if_zero: u32, if_nonzero: u32, n: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var selected: u32;
+fn zero_val() -> u32 {
   var _ret: u32;
-  out_len = 0u;
-  for (var i: u32 = 0u; i < n; i++) {
-    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
-    scratch[(out + out_len)] = selected;
-    out_len = out_len + 1u;
-  }
-  _ret = out;
-  return _ret;
-}
-
-fn is_zero_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  if ((self_val == 0u)) {
-    _ret = 1u;
-  } else {
-    _ret = 0u;
-  }
+  _ret = 0u;
   return _ret;
 }
 
@@ -1061,6 +1061,29 @@ fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
   abc = (ab + carry);
   c2 = select(0u, 1u, (abc < ab));
   _ret = R2(abc, (c1 + c2));
+  return _ret;
+}
+
+fn clone_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  _ret = self_val;
+  return _ret;
+}
+
+fn generic_pad_to_length(a: u32, target_v: u32) -> u32 {
+  var out_len: u32;
+  var i: u32;
+  var _ret: u32;
+  out_len = 0u;
+  for (var i: u32 = 0u; i < fn_18(a); i++) {
+    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
+    out_len = out_len + 1u;
+  }
+  for (var i: u32 = fn_18(a); i < target_v; i++) {
+    scratch[(out + out_len)] = zero_val();
+    out_len = out_len + 1u;
+  }
+  _ret = out;
   return _ret;
 }
 
@@ -1079,29 +1102,6 @@ fn generic_shift_left(a: u32, offset: u32) -> u32 {
     out_len = out_len + 1u;
   }
   _ret = out;
-  return _ret;
-}
-
-fn generic_pad_to_length(a: u32, target: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var _ret: u32;
-  out_len = 0u;
-  for (var i: u32 = 0u; i < fn_18(a); i++) {
-    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
-    out_len = out_len + 1u;
-  }
-  for (var i: u32 = fn_18(a); i < target; i++) {
-    scratch[(out + out_len)] = zero_val();
-    out_len = out_len + 1u;
-  }
-  _ret = out;
-  return _ret;
-}
-
-fn clone_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  _ret = self_val;
   return _ret;
 }
 
