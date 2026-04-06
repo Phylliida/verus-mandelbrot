@@ -47,24 +47,43 @@ fn mandelbrot_fixedpoint(
     let spt = 16u32 * n + 8u32;
     let sb = tid * spt;
 
+    // #[gpu_local(4)]
     let zr       = sb;
+    // #[gpu_skip]
     let zr_sign  = sb + n;
+    // #[gpu_local(4)]
     let zi       = sb + n + 1u32;
+    // #[gpu_skip]
     let zi_sign  = sb + 2u32 * n + 1u32;
+    // #[gpu_local(8)]
     let prod     = sb + 2u32 * n + 2u32;
+    // #[gpu_local(4)]
     let re2      = sb + 4u32 * n + 2u32;
+    // #[gpu_skip]
     let re2_sign = re2 + n;
+    // #[gpu_local(4)]
     let im2      = re2_sign + 1u32;
+    // #[gpu_skip]
     let im2_sign = im2 + n;
+    // #[gpu_local(4)]
     let sum2     = im2_sign + 1u32;
+    // #[gpu_skip]
     let sum2_sign = sum2 + n;
+    // #[gpu_local(4)]
     let rpi      = sum2_sign + 1u32;
+    // #[gpu_skip]
     let rpi_sign = rpi + n;
+    // #[gpu_local(4)]
     let tmp      = rpi_sign + 1u32;
+    // #[gpu_skip]
     let tmp_sign = tmp + n;
+    // #[gpu_local(4)]
     let tmp2     = tmp_sign + 1u32;
+    // #[gpu_skip]
     let tmp2_sign = tmp2 + n;
+    // #[gpu_local(4)]
     let stmp1    = tmp2_sign + 1u32;
+    // #[gpu_local(4)]
     let stmp2    = stmp1 + n;
 
     // c layout per pixel: [c_re(n), c_re_sign(1), c_im(n), c_im_sign(1)]

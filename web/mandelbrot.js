@@ -356,12 +356,7 @@ async function initWebGPU() {
     statusEl.textContent = 'No GPU adapter found';
     return false;
   }
-  device = await adapter.requestDevice({
-    requiredLimits: {
-      maxStorageBufferBindingSize: 512 * 1024 * 1024, // 512MB
-      maxBufferSize: 512 * 1024 * 1024,
-    }
-  });
+  device = await adapter.requestDevice();
 
   const shaderModule = device.createShaderModule({ code: SHADER_CODE });
 
@@ -466,14 +461,11 @@ async function render() {
   paramsData[4] = frac_limbs;
   paramsData.set(thresh_limbs, 5);
 
-  // Scratch buffer: signed arithmetic needs more space for signs + intermediates
-  const wordsPerThread = 16 * n + 8;
-  const scratchSize = totalPixels * wordsPerThread * 4; // bytes
+  // No scratch buffer needed — all intermediates are thread-local arrays
   const iterCountsSize = totalPixels * 4;
 
   // Create GPU buffers
   const cDataBuf = device.createBuffer({ size: c_data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const scratchBuf = device.createBuffer({ size: scratchSize, usage: GPUBufferUsage.STORAGE });
   const iterCountsBuf = device.createBuffer({ size: iterCountsSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const paramsBuf = device.createBuffer({ size: paramsData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const readbackBuf = device.createBuffer({ size: iterCountsSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -485,7 +477,6 @@ async function render() {
     layout: pipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: cDataBuf } },
-      { binding: 1, resource: { buffer: scratchBuf } },
       { binding: 2, resource: { buffer: iterCountsBuf } },
       { binding: 3, resource: { buffer: paramsBuf } },
     ],
@@ -517,7 +508,6 @@ async function render() {
 
   // Clean up
   cDataBuf.destroy();
-  scratchBuf.destroy();
   iterCountsBuf.destroy();
   paramsBuf.destroy();
   readbackBuf.destroy();
