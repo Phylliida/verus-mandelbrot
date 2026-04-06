@@ -221,6 +221,43 @@ proof fn theorem_perturbation_correctness(
         by(nonlinear_arith) requires w_im == z_im + d_im;
     assert(w_re * w_im == z_re * z_im + z_re * d_im + d_re * z_im + d_re * d_im)
         by(nonlinear_arith) requires w_re == z_re + d_re, w_im == z_im + d_im;
+
+    // Connect to spec functions: unfold the definitions
+    let z_next = spec_ref_step(z, c_ref);
+    let delta_next = spec_pert_step(z, delta, delta_c);
+    let w = spec_full_orbit(z, delta);
+    let c_pixel = spec_complex_add(c_ref, delta_c);
+    let w_next = spec_ref_step(w, c_pixel);
+    let pert_result = spec_complex_add(z_next, delta_next);
+
+    // Real part: (z_re^2 - z_im^2 + c_re) + (2*z_re*d_re - 2*z_im*d_im + d_re^2 - d_im^2 + dc_re)
+    //          = w_re^2 - w_im^2 + c_re + dc_re
+    assert(pert_result.re == z_next.re + delta_next.re);
+    assert(z_next.re == z_re * z_re - z_im * z_im + c_re);
+    assert(delta_next.re == 2 * z_re * d_re - 2 * z_im * d_im + d_re * d_re - d_im * d_im + dc_re);
+    assert(w_next.re == w_re * w_re - w_im * w_im + c_re + dc_re);
+
+    // Imaginary part: (2*z_re*z_im + c_im) + (2*z_re*d_im + 2*z_im*d_re + 2*d_re*d_im + dc_im)
+    //               = 2*w_re*w_im + c_im + dc_im
+    assert(pert_result.im == z_next.im + delta_next.im);
+    assert(z_next.im == 2 * z_re * z_im + c_im);
+    assert(delta_next.im == 2 * z_re * d_im + 2 * z_im * d_re + 2 * d_re * d_im + dc_im);
+    assert(w_next.im == 2 * w_re * w_im + c_im + dc_im);
+
+    // Chain: substitute the product expansions into the postcondition
+    assert(pert_result.re == w_next.re) by(nonlinear_arith)
+        requires
+            pert_result.re == z_re * z_re - z_im * z_im + c_re
+                + 2 * z_re * d_re - 2 * z_im * d_im + d_re * d_re - d_im * d_im + dc_re,
+            w_next.re == w_re * w_re - w_im * w_im + c_re + dc_re,
+            w_re * w_re == z_re * z_re + 2 * z_re * d_re + d_re * d_re,
+            w_im * w_im == z_im * z_im + 2 * z_im * d_im + d_im * d_im;
+    assert(pert_result.im == w_next.im) by(nonlinear_arith)
+        requires
+            pert_result.im == 2 * z_re * z_im + c_im
+                + 2 * z_re * d_im + 2 * z_im * d_re + 2 * d_re * d_im + dc_im,
+            w_next.im == 2 * w_re * w_im + c_im + dc_im,
+            w_re * w_im == z_re * z_im + z_re * d_im + d_re * z_im + d_re * d_im;
 }
 
 /// Step-correctness predicate: Z_k + delta_k steps to (Z_k + delta_k)^2 + c_pixel
