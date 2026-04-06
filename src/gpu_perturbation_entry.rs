@@ -196,7 +196,7 @@ fn mandelbrot_perturbation(
         }
     }
 
-    workgroup_barrier();
+    gpu_workgroup_barrier();
 
     // ═══════════════════════════════════════════════════
     // Phase 2: All threads compute Δc and perturbation
