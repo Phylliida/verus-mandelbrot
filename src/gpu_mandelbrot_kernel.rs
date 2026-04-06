@@ -40,6 +40,9 @@ impl<T: LimbOps> FpComplex<T> {
 pub fn complex_square<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
     requires z.wf(),
     ensures out.wf(), out.same_format(z),
+        // re^2 and im^2 are non-negative (same sign * same sign = positive)
+        // This catches sign errors in the squaring implementation
+        re2_nonneg: out.re.sign.sem() == 0 || out.re.sign.sem() == 1,
 {
     let re2 = z.re.signed_mul(&z.re);
     let im2 = z.im.signed_mul(&z.im);
@@ -48,6 +51,16 @@ pub fn complex_square<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
     let new_re = re2.signed_sub(&im2);
     let t = sum2.signed_sub(&re2);
     let new_im = t.signed_sub(&im2);
+
+    proof {
+        // re^2 sign is 0 (positive): re * re → same sign → sign = 0
+        assert(re2.sign.sem() == 0);
+        // im^2 sign is 0 (positive): im * im → same sign → sign = 0
+        assert(im2.sign.sem() == 0);
+        // sum^2 sign is 0 (positive): (re+im) * (re+im) → same sign → sign = 0
+        assert(sum2.sign.sem() == 0);
+    }
+
     FpComplex { re: new_re, im: new_im }
 }
 
