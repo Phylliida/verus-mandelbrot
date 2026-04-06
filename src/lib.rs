@@ -21,3 +21,6 @@ pub mod series_approximation;
 pub mod runtime_series_approximation;
 
 pub mod sa_compute;
+
+#[cfg(verus_keep_ghost)]
+pub mod gpu_kernel;

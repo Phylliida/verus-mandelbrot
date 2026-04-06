@@ -9,6 +9,7 @@ verus-algebra = { path = "../verus-algebra" }
 verus-bigint = { path = "../verus-bigint" }
 verus-rational = { path = "../verus-rational" }
 verus-interval-arithmetic = { path = "../verus-interval-arithmetic" }
+verus-fixed-point = { path = "../verus-fixed-point" }
 verus-vulkan = { path = "../verus-vulkan", default-features = false }
 builtin = { package = "verus_builtin", path = "../verus/source/builtin" }
 
