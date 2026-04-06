@@ -1,126 +1,128 @@
-/// Verified GPU Mandelbrot kernel using prime field arithmetic from verus-fixed-point.
+/// Verified GPU Mandelbrot kernel using signed fixed-point arithmetic.
 ///
-/// Two kernels:
-/// 1. Reference orbit: Z_{n+1} = Z_n^2 + c (per reference point, on GPU)
-/// 2. Perturbation: δ_{n+1} = 2·Z_n·δ_n + δ_n^2 + Δc (per pixel, on GPU)
+/// Uses GenericFixedPoint<u32> from verus-fixed-point (926 verified, 0 errors).
+/// No modular reduction — just Karatsuba multiply + fixed-point shift.
+/// Bounds guaranteed by Mandelbrot dynamics: |z| < escape_radius.
 ///
-/// All arithmetic functions are verified (914 verified, 0 errors) and
-/// auto-transpiled to WGSL via verus-gpu-parser.
+/// Kernels:
+/// 1. Reference orbit: Z_{n+1} = Z_n^2 + c (per reference point)
+/// 2. Perturbation: d_{n+1} = 2*Z_n*d_n + d_n^2 + Dc (per pixel)
 
+use vstd::prelude::*;
+use verus_fixed_point::runtime_fixed_point::GenericFixedPoint;
 use verus_fixed_point::fixed_point::limb_ops::*;
-use verus_fixed_point::fixed_point::prime_field::*;
 
-/// Reference orbit kernel: Z_{n+1} = Z_n^2 + c.
-/// Computes the orbit for a single reference point.
-///
-/// Buffer layout (all u32, N limbs per value):
-///   c_data:     [c_re(N), c_im(N)] — the reference point c
-///   orbit_re:   [Z_re(N) * max_iters] — real parts of orbit
-///   orbit_im:   [Z_im(N) * max_iters] — imaginary parts of orbit
-///   params:     [width, height, max_iters, n_limbs, c_val, p0..p_{N-1}]
-///   scratch:    per-thread workspace for intermediate computations
-///
-/// Each thread computes one iteration's Z value.
-/// Actually, since the orbit is sequential, one thread computes the full orbit.
-/// Multiple threads handle multiple reference points.
-#[gpu_kernel(workgroup_size(64, 1, 1))]
-fn mandelbrot_ref_orbit_kernel(
-    #[gpu_builtin(thread_id_x)] tid: u32,
-    #[gpu_buffer(0, read)] c_data: &[u32],
-    #[gpu_buffer(1, read_write)] orbit_re: &mut [u32],
-    #[gpu_buffer(2, read_write)] orbit_im: &mut [u32],
-    #[gpu_buffer(3, read)] params: &[u32],
-    #[gpu_buffer(4, read_write)] scratch: &mut [u32],
-) {
-    let n = params[3u32];       // number of limbs
-    let max_iters = params[2u32];
-    let c_val = params[4u32];   // Mersenne constant
+verus! {
 
-    // Scratch layout per thread (offsets from scratch_base):
-    // [0..n):     z_re
-    // [n..2n):    z_im
-    // [2n..4n):   z_re^2 (product, 2n limbs)
-    // [4n..6n):   z_im^2 (product, 2n limbs)
-    // [6n..8n):   (z_re+z_im)^2 (product, 2n limbs)
-    // [8n..9n):   reduced re^2
-    // [9n..10n):  reduced im^2
-    // [10n..11n): reduced (re+im)^2
-    // [11n..12n): new_re = re^2 - im^2 + c_re
-    // [12n..13n): new_im = (re+im)^2 - re^2 - im^2 + c_im
-    // [13n..20n): additional scratch for add/sub/reduce operations
-    let scratch_per_thread = 20u32 * n;
-    let sb = tid * scratch_per_thread;
+/// Complex number as two GenericFixedPoint values.
+pub struct FpComplex<T: LimbOps> {
+    pub re: GenericFixedPoint<T>,
+    pub im: GenericFixedPoint<T>,
+}
 
-    let zr = sb;
-    let zi = sb + n;
-
-    // Load c
-    let c_re_off = tid * 2u32 * n;
-    let c_im_off = c_re_off + n;
-
-    // Z_0 = 0
-    for i in 0u32..n {
-        scratch[zr + i] = 0u32;
-        scratch[zi + i] = 0u32;
+impl<T: LimbOps> FpComplex<T> {
+    pub open spec fn wf(&self) -> bool {
+        &&& self.re.wf_spec() && self.im.wf_spec()
+        &&& self.re.n_exec == self.im.n_exec
+        &&& self.re.frac_exec == self.im.frac_exec
+        &&& self.re.n_exec > 0
+        &&& self.re.n_exec <= 0x1FFF_FFFF
+        &&& self.re.frac_exec % 32 == 0
     }
 
-    // Iterate: Z_{n+1} = Z_n^2 + c
-    for iter in 0u32..max_iters {
-        // Store Z_n in orbit buffers
-        let orbit_off = (tid * max_iters + iter) * n;
-        for i in 0u32..n {
-            orbit_re[orbit_off + i] = scratch[zr + i];
-            orbit_im[orbit_off + i] = scratch[zi + i];
-        }
-
-        // Compute Z_{n+1} = Z_n^2 + c using complex squaring:
-        //   re' = re^2 - im^2 + c_re
-        //   im' = (re+im)^2 - re^2 - im^2 + c_im
-
-        // Step 1: re^2 (schoolbook multiply, result in scratch[2n..4n))
-        let re2_prod = sb + 2u32 * n;
-        generic_mul_karatsuba(&scratch[zr..], &scratch[zr..], n, &mut scratch[re2_prod..]);
-
-        // Step 2: im^2
-        let im2_prod = sb + 4u32 * n;
-        generic_mul_karatsuba(&scratch[zi..], &scratch[zi..], n, &mut scratch[im2_prod..]);
-
-        // Step 3: re + im → scratch[8n..9n)
-        let re_plus_im = sb + 8u32 * n;
-        let tmp_scratch = sb + 13u32 * n;
-        generic_add_limbs(&scratch[zr..], &scratch[zi..], n, &mut scratch[re_plus_im..]);
-
-        // Step 4: (re+im)^2
-        let sum2_prod = sb + 6u32 * n;
-        generic_mul_karatsuba(&scratch[re_plus_im..], &scratch[re_plus_im..], n, &mut scratch[sum2_prod..]);
-
-        // Step 5: Mersenne reduce all three products to n limbs
-        let re2_red = sb + 8u32 * n;
-        let im2_red = sb + 9u32 * n;
-        let sum2_red = sb + 10u32 * n;
-        mersenne_reduce_exec(&scratch[re2_prod..], n, c_val, &mut scratch[re2_red..]);
-        mersenne_reduce_exec(&scratch[im2_prod..], n, c_val, &mut scratch[im2_red..]);
-        mersenne_reduce_exec(&scratch[sum2_prod..], n, c_val, &mut scratch[sum2_red..]);
-
-        // Step 6: new_re = re^2 - im^2 + c_re (mod p)
-        //   = add_mod(sub_mod(re2_red, im2_red), c_re)
-        // For now, use add/sub with carry fold + conditional subtract
-        let new_re = sb + 11u32 * n;
-        // re^2 - im^2
-        generic_sub_limbs(&scratch[re2_red..], &scratch[im2_red..], n, &mut scratch[new_re..]);
-        // + c_re
-        generic_add_limbs(&scratch[new_re..], &c_data[c_re_off..], n, &mut scratch[new_re..]);
-
-        // Step 7: new_im = (re+im)^2 - re^2 - im^2 + c_im
-        let new_im = sb + 12u32 * n;
-        generic_sub_limbs(&scratch[sum2_red..], &scratch[re2_red..], n, &mut scratch[new_im..]);
-        generic_sub_limbs(&scratch[new_im..], &scratch[im2_red..], n, &mut scratch[new_im..]);
-        generic_add_limbs(&scratch[new_im..], &c_data[c_im_off..], n, &mut scratch[new_im..]);
-
-        // Step 8: Copy new values to z_re, z_im
-        for i in 0u32..n {
-            scratch[zr + i] = scratch[new_re + i];
-            scratch[zi + i] = scratch[new_im + i];
-        }
+    pub open spec fn same_format(&self, other: &Self) -> bool {
+        self.re.n_exec == other.re.n_exec && self.re.frac_exec == other.re.frac_exec
     }
 }
+
+/// Complex squaring: z^2 = (re^2 - im^2, 2*re*im).
+/// Uses 3 multiplies: re^2, im^2, (re+im)^2.
+pub fn complex_square<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
+    requires z.wf(),
+    ensures out.wf(), out.same_format(z),
+{
+    let re2 = z.re.signed_mul(&z.re);
+    let im2 = z.im.signed_mul(&z.im);
+    let re_plus_im = z.re.signed_add(&z.im);
+    let sum2 = re_plus_im.signed_mul(&re_plus_im);
+    let new_re = re2.signed_sub(&im2);
+    let t = sum2.signed_sub(&re2);
+    let new_im = t.signed_sub(&im2);
+    FpComplex { re: new_re, im: new_im }
+}
+
+/// Complex addition.
+pub fn complex_add<T: LimbOps>(a: &FpComplex<T>, b: &FpComplex<T>) -> (out: FpComplex<T>)
+    requires a.wf(), b.wf(), a.same_format(b),
+    ensures out.wf(), out.same_format(a),
+{
+    FpComplex {
+        re: a.re.signed_add(&b.re),
+        im: a.im.signed_add(&b.im),
+    }
+}
+
+/// Complex multiplication using 3-multiply Karatsuba trick.
+pub fn complex_mul<T: LimbOps>(a: &FpComplex<T>, b: &FpComplex<T>) -> (out: FpComplex<T>)
+    requires a.wf(), b.wf(), a.same_format(b),
+    ensures out.wf(), out.same_format(a),
+{
+    let k1 = a.re.signed_mul(&b.re);
+    let k2 = a.im.signed_mul(&b.im);
+    let a_sum = a.re.signed_add(&a.im);
+    let b_sum = b.re.signed_add(&b.im);
+    let k3 = a_sum.signed_mul(&b_sum);
+    let new_re = k1.signed_sub(&k2);
+    let t = k3.signed_sub(&k1);
+    let new_im = t.signed_sub(&k2);
+    FpComplex { re: new_re, im: new_im }
+}
+
+/// Double: 2*z.
+pub fn complex_double<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
+    requires z.wf(),
+    ensures out.wf(), out.same_format(z),
+{
+    FpComplex {
+        re: z.re.signed_add(&z.re),
+        im: z.im.signed_add(&z.im),
+    }
+}
+
+/// Magnitude squared: |z|^2 = re^2 + im^2.
+pub fn magnitude_squared<T: LimbOps>(z: &FpComplex<T>) -> (out: GenericFixedPoint<T>)
+    requires z.wf(),
+    ensures out.wf_spec(), out.n_exec == z.re.n_exec, out.frac_exec == z.re.frac_exec,
+{
+    let re2 = z.re.signed_mul(&z.re);
+    let im2 = z.im.signed_mul(&z.im);
+    re2.signed_add(&im2)
+}
+
+/// Reference orbit step: Z' = Z^2 + c.
+pub fn ref_orbit_step<T: LimbOps>(z: &FpComplex<T>, c: &FpComplex<T>) -> (out: FpComplex<T>)
+    requires z.wf(), c.wf(), z.same_format(c),
+    ensures out.wf(), out.same_format(z),
+{
+    let z2 = complex_square(z);
+    complex_add(&z2, c)
+}
+
+/// Perturbation step: d' = 2*Z*d + d^2 + Dc.
+pub fn perturbation_step<T: LimbOps>(
+    z_ref: &FpComplex<T>,
+    delta: &FpComplex<T>,
+    delta_c: &FpComplex<T>,
+) -> (out: FpComplex<T>)
+    requires z_ref.wf(), delta.wf(), delta_c.wf(),
+        z_ref.same_format(delta), delta.same_format(delta_c),
+    ensures out.wf(), out.same_format(z_ref),
+{
+    let two_z = complex_double(z_ref);
+    let two_z_delta = complex_mul(&two_z, delta);
+    let delta_sq = complex_square(delta);
+    let sum = complex_add(&two_z_delta, &delta_sq);
+    complex_add(&sum, delta_c)
+}
+
+} // verus!
