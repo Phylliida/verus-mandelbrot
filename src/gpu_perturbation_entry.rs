@@ -27,7 +27,7 @@ fn mandelbrot_perturbation(
     #[gpu_builtin(local_id_x)] lid_x: u32,
     #[gpu_builtin(local_id_y)] lid_y: u32,
     #[gpu_buffer(0, read)] c_data: &[u32],
-    #[gpu_shared(4096)] wg_mem: &mut [u32],
+    #[gpu_shared(8192)] wg_mem: &mut [u32],
     #[gpu_buffer(1, read_write)] iter_counts: &mut [u32],
     #[gpu_buffer(2, read)] params: &[u32],
 ) {
@@ -61,6 +61,12 @@ fn mandelbrot_perturbation(
     let t0_stmp1   = t0_prod + 2u32 * n;
     let t0_stmp2   = t0_stmp1 + n;
     let t0_stmp3   = t0_stmp2 + n;
+
+    // Refinement shared slots (after thread-0 temporaries)
+    let ref_escape_addr = t0_stmp3 + n;             // iteration where reference orbit escaped
+    let vote_base = ref_escape_addr + 1u32;          // 256 words for glitch voting
+    let glitch_count_addr = vote_base + 256u32;      // count of glitched pixels
+    let best_ref_addr = glitch_count_addr + 1u32;    // local_id of best new reference
 
     // Per-pixel c from c_data buffer (absolute coordinates)
     let c_stride_px = 2u32 * n + 2u32;
