@@ -24,3 +24,5 @@ pub mod sa_compute;
 
 #[cfg(verus_keep_ghost)]
 pub mod gpu_kernel;
+
+pub mod gpu_kernel_n4;
