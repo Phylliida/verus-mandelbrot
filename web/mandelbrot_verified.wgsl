@@ -19,6 +19,26 @@ fn signed_mul_to_scratch_scratch_scratch_scratch(a: u32, a_sign: u32, b: u32, b_
   return _ret;
 }
 
+fn add_limbs_to_scratch_c_data_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(scratch[(a + i)], c_data[(b + i)], carry);
+      digit = _td.f0;
+      next_carry = _td.f1;
+    }
+    scratch[(out + i)] = digit;
+    carry = next_carry;
+  }
+  _ret = carry;
+  return _ret;
+}
+
 fn sub_limbs_to_c_data_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
   var borrow: u32;
   var i: u32;
@@ -44,26 +64,6 @@ fn signed_sub_to_scratch_scratch_scratch_scratch_scratch(a: u32, a_sign: u32, b:
   var _ret: u32;
   neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
   _ret = signed_add_to_scratch_c_data_scratch_scratch_scratch(a, a_sign, b, neg_b_sign, out, tmp1, tmp2, n);
-  return _ret;
-}
-
-fn add_limbs_to_scratch_c_data_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3(scratch[(a + i)], c_data[(b + i)], carry);
-      digit = _td.f0;
-      next_carry = _td.f1;
-    }
-    scratch[(out + i)] = digit;
-    carry = next_carry;
-  }
-  _ret = carry;
   return _ret;
 }
 
@@ -99,19 +99,35 @@ fn signed_add_to_scratch_c_data_scratch_scratch_scratch(a: u32, a_sign: u32, b: 
     _unused_17 = _td.f1;
   }
   diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
-  result_sign = select_limb(same_sign, clone_limb(a_sign), diff_sign);
+  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
   for (var i: u32 = 0u; i < n; i++) {
     diff_val = select_limb(borrow_ab, clone_limb(scratch[(tmp2 + i)]), clone_limb(scratch[(out + i)]));
-    final_val = select_limb(same_sign, clone_limb(scratch[(tmp1 + i)]), diff_val);
+    final_val = select_limb(same_sign, diff_val, clone_limb(scratch[(tmp1 + i)]));
     scratch[(out + i)] = final_val;
   }
   _ret = result_sign;
   return _ret;
 }
 
+fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
+  var _ret: u32;
+  if ((cond == 0u)) {
+    _ret = if_zero;
+  } else {
+    _ret = if_nonzero;
+  }
+  return _ret;
+}
+
 fn zero_val() -> u32 {
   var _ret: u32;
   _ret = 0u;
+  return _ret;
+}
+
+fn clone_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  _ret = self_val;
   return _ret;
 }
 
@@ -129,6 +145,12 @@ fn slice_vec_to_scratch_scratch(a: u32, start: u32, end: u32, out: u32, out_off:
     si = (si + 1u);
     di = (di + 1u);
   }
+  return _ret;
+}
+
+fn const_u32(c: u32) -> u32 {
+  var _ret: u32;
+  _ret = c;
   return _ret;
 }
 
@@ -174,42 +196,6 @@ fn mul_schoolbook_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -
   return _ret;
 }
 
-fn const_u32(c: u32) -> u32 {
-  var _ret: u32;
-  _ret = c;
-  return _ret;
-}
-
-fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
-  var _ret: u32;
-  if ((cond == 0u)) {
-    _ret = if_zero;
-  } else {
-    _ret = if_nonzero;
-  }
-  return _ret;
-}
-
-fn clone_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  _ret = self_val;
-  return _ret;
-}
-
-fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
-  var ab: u32;
-  var bw1: u32;
-  var result: u32;
-  var bw2: u32;
-  var _ret: R2;
-  ab = (self_val - b);
-  bw1 = select(0u, 1u, (self_val < b));
-  result = (ab - borrow);
-  bw2 = select(0u, 1u, (ab < borrow));
-  _ret = R2(result, (bw1 + bw2));
-  return _ret;
-}
-
 fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
   var ab: u32;
   var c1: u32;
@@ -224,13 +210,17 @@ fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
   return _ret;
 }
 
-fn is_zero_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  if ((self_val == 0u)) {
-    _ret = 1u;
-  } else {
-    _ret = 0u;
-  }
+fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
+  var ab: u32;
+  var bw1: u32;
+  var result: u32;
+  var bw2: u32;
+  var _ret: R2;
+  ab = (self_val - b);
+  bw1 = select(0u, 1u, (self_val < b));
+  result = (ab - borrow);
+  bw2 = select(0u, 1u, (ab < borrow));
+  _ret = R2(result, (bw1 + bw2));
   return _ret;
 }
 
@@ -261,6 +251,36 @@ fn mul2(self_val: u32, b: u32) -> R2 {
   mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
   hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
   _ret = R2(lo, hi);
+  return _ret;
+}
+
+fn is_zero_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  if ((self_val == 0u)) {
+    _ret = 1u;
+  } else {
+    _ret = 0u;
+  }
+  return _ret;
+}
+
+fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(scratch[(a + i)], scratch[(b + i)], carry);
+      digit = _td.f0;
+      next_carry = _td.f1;
+    }
+    scratch[(out + i)] = digit;
+    carry = next_carry;
+  }
+  _ret = carry;
   return _ret;
 }
 
@@ -324,26 +344,6 @@ fn sub_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32
   return _ret;
 }
 
-fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3(scratch[(a + i)], scratch[(b + i)], carry);
-      digit = _td.f0;
-      next_carry = _td.f1;
-    }
-    scratch[(out + i)] = digit;
-    carry = next_carry;
-  }
-  _ret = carry;
-  return _ret;
-}
-
 fn signed_add_to_scratch_scratch_scratch_scratch_scratch(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, tmp1: u32, tmp2: u32, n: u32) -> u32 {
   var _sum_carry: u32;
   var borrow_ab: u32;
@@ -376,10 +376,10 @@ fn signed_add_to_scratch_scratch_scratch_scratch_scratch(a: u32, a_sign: u32, b:
     _unused_17 = _td.f1;
   }
   diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
-  result_sign = select_limb(same_sign, clone_limb(a_sign), diff_sign);
+  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
   for (var i: u32 = 0u; i < n; i++) {
     diff_val = select_limb(borrow_ab, clone_limb(scratch[(tmp2 + i)]), clone_limb(scratch[(out + i)]));
-    final_val = select_limb(same_sign, clone_limb(scratch[(tmp1 + i)]), diff_val);
+    final_val = select_limb(same_sign, diff_val, clone_limb(scratch[(tmp1 + i)]));
     scratch[(out + i)] = final_val;
   }
   _ret = result_sign;
