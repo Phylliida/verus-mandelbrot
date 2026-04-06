@@ -284,17 +284,11 @@ fn mandelbrot_perturbation(
                 let new_di_s = signed_add_to(&t4, &p2_s, &dc_im, &dc_im_sign, &mut delta_im, &mut ls1, &mut ls2, n);
                 delta_im_sign = new_di_s;
 
-                // ── Glitch check: |δ| > |Z_n| (approximate) ──
-                // Compare magnitude using max of component top limbs.
-                // Integer limb (n-1) compared first, then top fractional (n-2).
-                let d_int = if delta_re[n - 1u32] > delta_im[n - 1u32] { delta_re[n - 1u32] } else { delta_im[n - 1u32] };
-                let d_frac = if delta_re[n - 2u32] > delta_im[n - 2u32] { delta_re[n - 2u32] } else { delta_im[n - 2u32] };
-                let z_int = if wg_mem[zn_re + n - 1u32] > wg_mem[zn_im + n - 1u32] { wg_mem[zn_re + n - 1u32] } else { wg_mem[zn_im + n - 1u32] };
-                let z_frac = if wg_mem[zn_re + n - 2u32] > wg_mem[zn_im + n - 2u32] { wg_mem[zn_re + n - 2u32] } else { wg_mem[zn_im + n - 2u32] };
-                let is_glitch = if d_int > z_int { 1u32 }
-                    else if d_int == z_int && d_frac > z_frac { 1u32 }
-                    else { 0u32 };
-                if is_glitch == 1u32 && iter > 0u32 {
+                // ── Glitch check: fixed-point overflow detection ──
+                // With multi-precision fixed-point, perturbation stays accurate even
+                // when |δ| > |Z| (unlike float). Only detect actual overflow:
+                // if integer limb exceeds escape radius (~4), δ has blown up.
+                if delta_re[n - 1u32] > 3u32 || delta_im[n - 1u32] > 3u32 {
                     is_glitched = 1u32;
                     glitch_iter = iter;
                     break;
