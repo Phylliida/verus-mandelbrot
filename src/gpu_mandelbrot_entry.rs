@@ -41,8 +41,10 @@ fn mandelbrot_fixedpoint(
     //   [15]: tmp_sign     (1)
     //   [16]: tmp2         (n)
     //   [17]: tmp2_sign    (1)
-    // Total: ~14n + 8 per thread
-    let spt = 14u32 * n + 8u32;
+    //   [18]: stmp1        (n)   — scratch for signed_add_to
+    //   [19]: stmp2        (n)   — scratch for signed_add_to
+    // Total: ~16n + 8 per thread
+    let spt = 16u32 * n + 8u32;
     let sb = tid * spt;
 
     let zr       = sb;
@@ -62,6 +64,8 @@ fn mandelbrot_fixedpoint(
     let tmp_sign = tmp + n;
     let tmp2     = tmp_sign + 1u32;
     let tmp2_sign = tmp2 + n;
+    let stmp1    = tmp2_sign + 1u32;
+    let stmp2    = stmp1 + n;
 
     // c layout per pixel: [c_re(n), c_re_sign(1), c_im(n), c_im_sign(1)]
     let c_stride = 2u32 * n + 2u32;
