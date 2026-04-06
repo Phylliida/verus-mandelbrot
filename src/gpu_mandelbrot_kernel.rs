@@ -307,4 +307,113 @@ proof fn theorem_perturbation_n_steps(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// THEOREM: Glitch detection soundness
+// ═══════════════════════════════════════════════════════════════
+
+/// Bound on the next perturbation step given bounded inputs.
+/// If |Z_re|,|Z_im| <= R and |delta_re|,|delta_im| <= T and |Dc| <= eps,
+/// then |delta'_re|,|delta'_im| <= 4*R*T + 2*T*T + eps.
+///
+/// For our Mandelbrot renderer: R=2, T=3, eps=1 gives bound=43.
+/// Since 43 << 2^32 (u32 max), no fixed-point overflow occurs even
+/// if glitch detection is one iteration late.
+proof fn theorem_glitch_detection_soundness(
+    z_re: int, z_im: int,
+    d_re: int, d_im: int,
+    dc_re: int, dc_im: int,
+    r: int,
+    t: int,
+    eps: int,
+)
+    requires
+        // Reference orbit bounded by escape radius
+        -r <= z_re && z_re <= r,
+        -r <= z_im && z_im <= r,
+        // Perturbation passed glitch check (bounded by threshold)
+        -t <= d_re && d_re <= t,
+        -t <= d_im && d_im <= t,
+        // Pixel spacing bounded
+        -eps <= dc_re && dc_re <= eps,
+        -eps <= dc_im && dc_im <= eps,
+        r > 0, t > 0, eps >= 0,
+    ensures ({
+        let dp_re = 2 * z_re * d_re - 2 * z_im * d_im + d_re * d_re - d_im * d_im + dc_re;
+        let dp_im = 2 * z_re * d_im + 2 * z_im * d_re + 2 * d_re * d_im + dc_im;
+        let bound: int = 4 * r * t + 2 * t * t + eps;
+        // Next perturbation step is bounded — no overflow
+        &&& -bound <= dp_re && dp_re <= bound
+        &&& -bound <= dp_im && dp_im <= bound
+    })
+{
+    // Real part: dp_re = 2*z_re*d_re - 2*z_im*d_im + d_re^2 - d_im^2 + dc_re
+    // |2*z_re*d_re| <= 2*r*t, |2*z_im*d_im| <= 2*r*t
+    // |d_re^2| <= t^2, |d_im^2| <= t^2, |dc_re| <= eps
+    // |dp_re| <= 2*r*t + 2*r*t + t^2 + t^2 + eps = 4*r*t + 2*t^2 + eps
+    assert(-2 * r * t <= 2 * z_re * d_re && 2 * z_re * d_re <= 2 * r * t)
+        by(nonlinear_arith) requires -r <= z_re <= r, -t <= d_re <= t, r > 0, t > 0;
+    assert(-2 * r * t <= 2 * z_im * d_im && 2 * z_im * d_im <= 2 * r * t)
+        by(nonlinear_arith) requires -r <= z_im <= r, -t <= d_im <= t, r > 0, t > 0;
+    assert(0 <= d_re * d_re && d_re * d_re <= t * t)
+        by(nonlinear_arith) requires -t <= d_re <= t, t > 0;
+    assert(0 <= d_im * d_im && d_im * d_im <= t * t)
+        by(nonlinear_arith) requires -t <= d_im <= t, t > 0;
+
+    // Imaginary part: dp_im = 2*z_re*d_im + 2*z_im*d_re + 2*d_re*d_im + dc_im
+    assert(-2 * r * t <= 2 * z_re * d_im && 2 * z_re * d_im <= 2 * r * t)
+        by(nonlinear_arith) requires -r <= z_re <= r, -t <= d_im <= t, r > 0, t > 0;
+    assert(-2 * r * t <= 2 * z_im * d_re && 2 * z_im * d_re <= 2 * r * t)
+        by(nonlinear_arith) requires -r <= z_im <= r, -t <= d_re <= t, r > 0, t > 0;
+    assert(-2 * t * t <= 2 * d_re * d_im && 2 * d_re * d_im <= 2 * t * t)
+        by(nonlinear_arith) requires -t <= d_re <= t, -t <= d_im <= t, t > 0;
+
+    // Combine: give the solver all bounds + definitions in one block
+    let dp_re = 2 * z_re * d_re - 2 * z_im * d_im + d_re * d_re - d_im * d_im + dc_re;
+    let dp_im = 2 * z_re * d_im + 2 * z_im * d_re + 2 * d_re * d_im + dc_im;
+    let bound: int = 4 * r * t + 2 * t * t + eps;
+
+    assert(-bound <= dp_re && dp_re <= bound) by(nonlinear_arith)
+        requires
+            dp_re == 2 * z_re * d_re - 2 * z_im * d_im + d_re * d_re - d_im * d_im + dc_re,
+            bound == 4 * r * t + 2 * t * t + eps,
+            -r <= z_re <= r, -r <= z_im <= r,
+            -t <= d_re <= t, -t <= d_im <= t,
+            -eps <= dc_re <= eps,
+            r > 0, t > 0, eps >= 0;
+
+    assert(-bound <= dp_im && dp_im <= bound) by(nonlinear_arith)
+        requires
+            dp_im == 2 * z_re * d_im + 2 * z_im * d_re + 2 * d_re * d_im + dc_im,
+            bound == 4 * r * t + 2 * t * t + eps,
+            -r <= z_re <= r, -r <= z_im <= r,
+            -t <= d_re <= t, -t <= d_im <= t,
+            -eps <= dc_im <= eps,
+            r > 0, t > 0, eps >= 0;
+}
+
+/// Concrete instantiation: R=2, T=3, eps=1 gives bound=43.
+/// 43 fits in a single u32 limb (43 << 2^32), so no overflow.
+proof fn corollary_mandelbrot_no_overflow(
+    z_re: int, z_im: int,
+    d_re: int, d_im: int,
+    dc_re: int, dc_im: int,
+)
+    requires
+        -2 <= z_re && z_re <= 2,
+        -2 <= z_im && z_im <= 2,
+        -3 <= d_re && d_re <= 3,
+        -3 <= d_im && d_im <= 3,
+        -1 <= dc_re && dc_re <= 1,
+        -1 <= dc_im && dc_im <= 1,
+    ensures ({
+        let dp_re = 2 * z_re * d_re - 2 * z_im * d_im + d_re * d_re - d_im * d_im + dc_re;
+        let dp_im = 2 * z_re * d_im + 2 * z_im * d_re + 2 * d_re * d_im + dc_im;
+        // Result fits in integer limb of u32 (bound = 43 << 2^32)
+        &&& -43 <= dp_re && dp_re <= 43
+        &&& -43 <= dp_im && dp_im <= 43
+    })
+{
+    theorem_glitch_detection_soundness(z_re, z_im, d_re, d_im, dc_re, dc_im, 2, 3, 1);
+}
+
 } // verus!
