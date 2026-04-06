@@ -125,4 +125,149 @@ pub fn perturbation_step<T: LimbOps>(
     complex_add(&sum, delta_c)
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Spec-level complex arithmetic (over int, exact, no overflow)
+// ═══════════════════════════════════════════════════════════════
+
+/// Complex number as (re, im) pair of ints.
+pub struct SpecComplex {
+    pub re: int,
+    pub im: int,
+}
+
+/// Complex squaring: (a+bi)² = (a²-b², 2ab)
+pub open spec fn spec_complex_square(z: SpecComplex) -> SpecComplex {
+    SpecComplex {
+        re: z.re * z.re - z.im * z.im,
+        im: 2 * z.re * z.im,
+    }
+}
+
+/// Complex addition
+pub open spec fn spec_complex_add(a: SpecComplex, b: SpecComplex) -> SpecComplex {
+    SpecComplex { re: a.re + b.re, im: a.im + b.im }
+}
+
+/// Reference orbit step: Z' = Z² + c
+pub open spec fn spec_ref_step(z: SpecComplex, c: SpecComplex) -> SpecComplex {
+    spec_complex_add(spec_complex_square(z), c)
+}
+
+/// Perturbation step: δ' = 2Zδ + δ² + Δc
+pub open spec fn spec_pert_step(z: SpecComplex, delta: SpecComplex, dc: SpecComplex) -> SpecComplex {
+    SpecComplex {
+        re: 2 * z.re * delta.re - 2 * z.im * delta.im
+            + delta.re * delta.re - delta.im * delta.im
+            + dc.re,
+        im: 2 * z.re * delta.im + 2 * z.im * delta.re
+            + 2 * delta.re * delta.im
+            + dc.im,
+    }
+}
+
+/// Full orbit value: W = Z + δ
+pub open spec fn spec_full_orbit(z: SpecComplex, delta: SpecComplex) -> SpecComplex {
+    spec_complex_add(z, delta)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// THE MAIN THEOREM: Perturbation theory is correct
+// ═══════════════════════════════════════════════════════════════
+
+/// Proof that perturbation correctly tracks the actual orbit.
+///
+/// If Z' = Z² + c_ref (reference step)
+/// and δ' = 2Zδ + δ² + Δc (perturbation step)
+/// then (Z' + δ') = (Z + δ)² + (c_ref + Δc) (actual orbit step)
+///
+/// This means: tracking δ relative to the reference orbit Z
+/// gives the exact same result as computing the actual orbit W = Z + δ
+/// directly via W' = W² + c_pixel.
+proof fn theorem_perturbation_correctness(
+    z: SpecComplex,
+    delta: SpecComplex,
+    c_ref: SpecComplex,
+    delta_c: SpecComplex,
+)
+    ensures ({
+        let z_next = spec_ref_step(z, c_ref);
+        let delta_next = spec_pert_step(z, delta, delta_c);
+        let w = spec_full_orbit(z, delta);
+        let c_pixel = spec_complex_add(c_ref, delta_c);
+        let w_next = spec_ref_step(w, c_pixel);
+        let pert_result = spec_complex_add(z_next, delta_next);
+        // The perturbation result (Z' + delta') equals the actual orbit step (W^2 + c_pixel)
+        &&& pert_result.re == w_next.re
+        &&& pert_result.im == w_next.im
+    })
+{
+    let z_re = z.re;
+    let z_im = z.im;
+    let d_re = delta.re;
+    let d_im = delta.im;
+    let c_re = c_ref.re;
+    let c_im = c_ref.im;
+    let dc_re = delta_c.re;
+    let dc_im = delta_c.im;
+
+    // W = Z + delta
+    let w_re = z_re + d_re;
+    let w_im = z_im + d_im;
+
+    // Expand (Z+delta)^2 components — pass definitions via requires
+    assert(w_re * w_re == z_re * z_re + 2 * z_re * d_re + d_re * d_re)
+        by(nonlinear_arith) requires w_re == z_re + d_re;
+    assert(w_im * w_im == z_im * z_im + 2 * z_im * d_im + d_im * d_im)
+        by(nonlinear_arith) requires w_im == z_im + d_im;
+    assert(w_re * w_im == z_re * z_im + z_re * d_im + d_re * z_im + d_re * d_im)
+        by(nonlinear_arith) requires w_re == z_re + d_re, w_im == z_im + d_im;
+}
+
+/// Step-correctness predicate: Z_k + delta_k steps to (Z_k + delta_k)^2 + c_pixel
+pub open spec fn perturbation_step_correct(
+    z_orbit: Seq<SpecComplex>,
+    delta_orbit: Seq<SpecComplex>,
+    c_ref: SpecComplex,
+    delta_c: SpecComplex,
+    k: int,
+) -> bool {
+    let w_k = spec_full_orbit(z_orbit[k], delta_orbit[k]);
+    let c_pixel = spec_complex_add(c_ref, delta_c);
+    let w_k_next = spec_ref_step(w_k, c_pixel);
+    let pert_result = spec_full_orbit(z_orbit[k + 1], delta_orbit[k + 1]);
+    pert_result.re == w_k_next.re && pert_result.im == w_k_next.im
+}
+
+/// Corollary: perturbation is correct for N iterations.
+/// If delta_0 = W_0 - Z_0, then delta_n = W_n - Z_n for all n.
+proof fn theorem_perturbation_n_steps(
+    z_orbit: Seq<SpecComplex>,     // Z_0, Z_1, ..., Z_n
+    delta_orbit: Seq<SpecComplex>, // δ_0, δ_1, ..., δ_n
+    c_ref: SpecComplex,
+    delta_c: SpecComplex,
+    n: nat,
+)
+    requires
+        z_orbit.len() >= n + 1,
+        delta_orbit.len() >= n + 1,
+        // Reference orbit: Z_{k+1} = Z_k² + c_ref
+        forall|k: int| 0 <= k < n as int ==> z_orbit[k + 1] == #[trigger] spec_ref_step(z_orbit[k], c_ref),
+        // Perturbation orbit: delta_{k+1} = 2*Z_k*delta_k + delta_k^2 + Dc
+        forall|k: int| 0 <= k < n as int ==> delta_orbit[k + 1] == #[trigger] spec_pert_step(z_orbit[k], delta_orbit[k], delta_c),
+    ensures
+        forall|k: int| 0 <= k < n as int ==>
+            #[trigger] perturbation_step_correct(z_orbit, delta_orbit, c_ref, delta_c, k)
+    decreases n
+{
+    if n > 0 {
+        // Prove for k = n-1 using the single-step theorem
+        let k = (n - 1) as int;
+        theorem_perturbation_correctness(z_orbit[k], delta_orbit[k], c_ref, delta_c);
+        // Induction: prove for all k < n-1
+        if n > 1 {
+            theorem_perturbation_n_steps(z_orbit, delta_orbit, c_ref, delta_c, (n - 1) as nat);
+        }
+    }
+}
+
 } // verus!
