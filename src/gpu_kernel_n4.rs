@@ -134,91 +134,121 @@ fn mul_limb(a: u32, b: u32) -> (u32, u32)
     (lo, hi)
 }
 
+///  Add a u32 value to a 2-word accumulator (lo, hi). Returns (new_lo, new_hi).
+fn acc_add(lo: u32, hi: u32, val: u32) -> (u32, u32) {
+    let new_lo = lo.wrapping_add(val);
+    let carry = if new_lo < lo { 1u32 } else { 0u32 };
+    (new_lo, hi + carry)
+}
+
 ///  Schoolbook 4x4 multiply → 8-limb product.
 ///  Returns (r0..r7) where r0 is LSB.
+///  Uses only u32 arithmetic (no u64) — GPU compatible.
 fn mul4x4(a0: u32, a1: u32, a2: u32, a3: u32,
           b0: u32, b1: u32, b2: u32, b3: u32) -> (u32, u32, u32, u32, u32, u32, u32, u32)
 {
-    //  Column-by-column schoolbook multiply with 3-word accumulator
-    //  For clarity, compute each column's partial products and accumulate
+    //  Column-by-column schoolbook multiply.
+    //  Each column accumulates into (acc_lo, acc_hi) using add_acc.
+    //  After each column: result limb = acc_lo, carry to next = acc_hi.
 
     //  Column 0: a0*b0
-    let (c0_lo, c0_hi) = mul_limb(a0, b0);
-    let r0 = c0_lo;
+    let (p_lo, p_hi) = mul_limb(a0, b0);
+    let r0 = p_lo;
+    let mut cy_lo = p_hi;
+    let mut cy_hi = 0u32;
 
     //  Column 1: a0*b1 + a1*b0 + carry
-    let (p10_lo, p10_hi) = mul_limb(a0, b1);
-    let (p11_lo, p11_hi) = mul_limb(a1, b0);
-    let acc1 = c0_hi as u64 + p10_lo as u64 + p11_lo as u64;
-    let r1 = acc1 as u32;
-    let carry1 = (acc1 >> 32u64) as u32 + p10_hi + p11_hi;
+    let (p_lo, p_hi) = mul_limb(a0, b1);
+    let (acc_lo, acc_hi) = acc_add(cy_lo, cy_hi, p_lo);
+    let cy_hi2 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a1, b0);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi2, p_lo);
+    let r1 = acc_lo;
+    cy_lo = acc_hi + p_hi;
+    cy_hi = 0u32;
 
     //  Column 2: a0*b2 + a1*b1 + a2*b0 + carry
-    let (p20_lo, p20_hi) = mul_limb(a0, b2);
-    let (p21_lo, p21_hi) = mul_limb(a1, b1);
-    let (p22_lo, p22_hi) = mul_limb(a2, b0);
-    let acc2 = carry1 as u64 + p20_lo as u64 + p21_lo as u64 + p22_lo as u64;
-    let r2 = acc2 as u32;
-    let carry2 = (acc2 >> 32u64) as u32 + p20_hi + p21_hi + p22_hi;
+    let (p_lo, p_hi) = mul_limb(a0, b2);
+    let (acc_lo, acc_hi) = acc_add(cy_lo, cy_hi, p_lo);
+    let cy_hi2 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a1, b1);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi2, p_lo);
+    let cy_hi3 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a2, b0);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi3, p_lo);
+    let r2 = acc_lo;
+    cy_lo = acc_hi + p_hi;
+    cy_hi = 0u32;
 
     //  Column 3: a0*b3 + a1*b2 + a2*b1 + a3*b0 + carry
-    let (p30_lo, p30_hi) = mul_limb(a0, b3);
-    let (p31_lo, p31_hi) = mul_limb(a1, b2);
-    let (p32_lo, p32_hi) = mul_limb(a2, b1);
-    let (p33_lo, p33_hi) = mul_limb(a3, b0);
-    let acc3 = carry2 as u64 + p30_lo as u64 + p31_lo as u64 + p32_lo as u64 + p33_lo as u64;
-    let r3 = acc3 as u32;
-    let carry3 = (acc3 >> 32u64) as u32 + p30_hi + p31_hi + p32_hi + p33_hi;
+    let (p_lo, p_hi) = mul_limb(a0, b3);
+    let (acc_lo, acc_hi) = acc_add(cy_lo, cy_hi, p_lo);
+    let cy_hi2 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a1, b2);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi2, p_lo);
+    let cy_hi3 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a2, b1);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi3, p_lo);
+    let cy_hi4 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a3, b0);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi4, p_lo);
+    let r3 = acc_lo;
+    cy_lo = acc_hi + p_hi;
+    cy_hi = 0u32;
 
     //  Column 4: a1*b3 + a2*b2 + a3*b1 + carry
-    let (p40_lo, p40_hi) = mul_limb(a1, b3);
-    let (p41_lo, p41_hi) = mul_limb(a2, b2);
-    let (p42_lo, p42_hi) = mul_limb(a3, b1);
-    let acc4 = carry3 as u64 + p40_lo as u64 + p41_lo as u64 + p42_lo as u64;
-    let r4 = acc4 as u32;
-    let carry4 = (acc4 >> 32u64) as u32 + p40_hi + p41_hi + p42_hi;
+    let (p_lo, p_hi) = mul_limb(a1, b3);
+    let (acc_lo, acc_hi) = acc_add(cy_lo, cy_hi, p_lo);
+    let cy_hi2 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a2, b2);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi2, p_lo);
+    let cy_hi3 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a3, b1);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi3, p_lo);
+    let r4 = acc_lo;
+    cy_lo = acc_hi + p_hi;
+    cy_hi = 0u32;
 
     //  Column 5: a2*b3 + a3*b2 + carry
-    let (p50_lo, p50_hi) = mul_limb(a2, b3);
-    let (p51_lo, p51_hi) = mul_limb(a3, b2);
-    let acc5 = carry4 as u64 + p50_lo as u64 + p51_lo as u64;
-    let r5 = acc5 as u32;
-    let carry5 = (acc5 >> 32u64) as u32 + p50_hi + p51_hi;
+    let (p_lo, p_hi) = mul_limb(a2, b3);
+    let (acc_lo, acc_hi) = acc_add(cy_lo, cy_hi, p_lo);
+    let cy_hi2 = acc_hi + p_hi;
+    let (p_lo, p_hi) = mul_limb(a3, b2);
+    let (acc_lo, acc_hi) = acc_add(acc_lo, cy_hi2, p_lo);
+    let r5 = acc_lo;
+    cy_lo = acc_hi + p_hi;
+    cy_hi = 0u32;
 
     //  Column 6: a3*b3 + carry
-    let (p60_lo, p60_hi) = mul_limb(a3, b3);
-    let acc6 = carry5 as u64 + p60_lo as u64;
-    let r6 = acc6 as u32;
-    let r7 = (acc6 >> 32u64) as u32 + p60_hi;
+    let (p_lo, p_hi) = mul_limb(a3, b3);
+    let (acc_lo, acc_hi) = acc_add(cy_lo, cy_hi, p_lo);
+    let r6 = acc_lo;
+    let r7 = acc_hi + p_hi;
 
     (r0, r1, r2, r3, r4, r5, r6, r7)
 }
 
 ///  Mersenne reduction of 8-limb product to 4-limb result mod p = 2^128 - c.
 ///  Uses: hi * 2^128 ≡ hi * c (mod p).
+///  No u64 — uses acc_add for carry propagation.
 fn reduce4(r0: u32, r1: u32, r2: u32, r3: u32,
            r4: u32, r5: u32, r6: u32, r7: u32,
            p0: u32, p1: u32, p2: u32, p3: u32,
            c_val: u32) -> (u32, u32, u32, u32)
 {
     //  hi = (r4, r5, r6, r7), lo = (r0, r1, r2, r3)
-    //  hi * c: multiply 4-limb hi by scalar c
+    //  hi * c: multiply 4-limb hi by scalar c, producing 5-limb result
     let (h0_lo, h0_hi) = mul_limb(r4, c_val);
     let (h1_lo, h1_hi) = mul_limb(r5, c_val);
     let (h2_lo, h2_hi) = mul_limb(r6, c_val);
     let (h3_lo, h3_hi) = mul_limb(r7, c_val);
 
-    //  Accumulate hi*c as a 5-limb value
+    //  Accumulate hi*c as a 5-limb value using acc_add
     let hc0 = h0_lo;
-    let acc1 = h0_hi as u64 + h1_lo as u64;
-    let hc1 = acc1 as u32;
-    let c1 = (acc1 >> 32u64) as u32;
-    let acc2 = c1 as u64 + h1_hi as u64 + h2_lo as u64;
-    let hc2 = acc2 as u32;
-    let c2 = (acc2 >> 32u64) as u32;
-    let acc3 = c2 as u64 + h2_hi as u64 + h3_lo as u64;
-    let hc3 = acc3 as u32;
-    let hc4 = (acc3 >> 32u64) as u32 + h3_hi;
+    let (hc1, cy1) = acc_add(h1_lo, 0u32, h0_hi);
+    let (hc2, cy2) = acc_add(h2_lo, 0u32, h1_hi + cy1);
+    let (hc3, cy3) = acc_add(h3_lo, 0u32, h2_hi + cy2);
+    let hc4 = h3_hi + cy3;
 
     //  lo + hi*c
     let (s0, s1, s2, s3, carry) = add4(r0, r1, r2, r3, hc0, hc1, hc2, hc3);
@@ -397,20 +427,22 @@ fn mandelbrot_ref_orbit(
         zr0 = nr0; zr1 = nr1; zr2 = nr2; zr3 = nr3;
         zi0 = ni0; zi1 = ni1; zi2 = ni2; zi3 = ni3;
 
-        //  Escape check: |Z|^2 > 4 (simplified: check if top limb > 4)
-        //  For proper escape detection, we'd use magnitude_squared + centered comparison.
-        //  For now: if zr3 > 4 || zi3 > 4, likely escaped (rough check on MSB limb).
-        let (mag_0, mag_1, mag_2, mag_3) = add_mod4(
-            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).0,
-            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).1,
-            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).2,
-            mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val).3,
-            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).0,
-            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).1,
-            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).2,
-            mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val).3,
-            p0, p1, p2, p3, c_val);
-        //  TODO: proper escape detection via centered comparison
+        //  Escape check: |Z|^2 > escape_radius (typically 4).
+        //  Compute re^2 + im^2 mod p. If the result is "large" in centered
+        //  representation (> half_p), the point has escaped.
+        //  For the integer part: if the MSB limb (limb 3) of the magnitude
+        //  is >= escape_threshold (stored in params), we've escaped.
+        //  This works because values near 0 and small positives have MSB ≈ 0,
+        //  while values > p/2 (negative in centered view) have MSB near max.
+        let (re2_0, re2_1, re2_2, re2_3) = mul_mod4(zr0, zr1, zr2, zr3, zr0, zr1, zr2, zr3, p0, p1, p2, p3, c_val);
+        let (im2_0, im2_1, im2_2, im2_3) = mul_mod4(zi0, zi1, zi2, zi3, zi0, zi1, zi2, zi3, p0, p1, p2, p3, c_val);
+        let (mag_0, mag_1, mag_2, mag_3) = add_mod4(re2_0, re2_1, re2_2, re2_3, im2_0, im2_1, im2_2, im2_3, p0, p1, p2, p3, c_val);
+        //  Simple escape: check if magnitude > threshold via MSB comparison.
+        //  escape_threshold is the prime field encoding of the bailout radius.
+        let escape_thresh = params[7u32];
+        if mag_3 >= escape_thresh {
+            escaped_iter = iter;
+        }
     }
 
     iter_counts[tid] = escaped_iter;
