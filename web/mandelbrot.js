@@ -14,10 +14,20 @@
 let SHADER_CODE = null;
 
 async function loadShader() {
-  const resp = await fetch('mandelbrot_verified.wgsl');
-  SHADER_CODE = await resp.text();
-  console.log(`Loaded ${SHADER_CODE.split('\\n').length} lines of verified WGSL`);
+  // Try perturbation shader first (supports deep zoom), fall back to direct
+  let resp = await fetch('mandelbrot_perturbation.wgsl');
+  if (resp.ok) {
+    SHADER_CODE = await resp.text();
+    ENTRY_POINT = 'mandelbrot_perturbation';
+    console.log(`Loaded ${SHADER_CODE.split('\\n').length} lines of perturbation WGSL`);
+  } else {
+    resp = await fetch('mandelbrot_verified.wgsl');
+    SHADER_CODE = await resp.text();
+    ENTRY_POINT = 'mandelbrot_fixedpoint';
+    console.log(`Loaded ${SHADER_CODE.split('\\n').length} lines of verified WGSL`);
+  }
 }
+let ENTRY_POINT = 'mandelbrot_fixedpoint';
 
 const SHADER_CODE_FALLBACK = `
 // Fallback (should not be used — load mandelbrot_verified.wgsl instead)
@@ -324,7 +334,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ═══════════════════════════════════════════════════════════════
 
 let device, pipeline, bindGroupLayout;
+// Center coordinates as BigInt fixed-point (scaled by 2^(32*frac_limbs))
+// and zoom as BigInt (pixel spacing = 3 / (zoom * width), represented as BigInt ratio)
 let centerRe = -0.5, centerIm = 0.0, zoom = 1.0;
+// BigInt versions for deep zoom (initialized lazily)
+let centerReBig = null, centerImBig = null, zoomBig = 1n;
 
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('canvas');
@@ -372,7 +386,7 @@ async function initWebGPU() {
 
   pipeline = device.createComputePipeline({
     layout: 'auto',
-    compute: { module: shaderModule, entryPoint: 'mandelbrot_fixedpoint' },
+    compute: { module: shaderModule, entryPoint: ENTRY_POINT },
   });
 
   statusEl.textContent = 'Ready';
@@ -382,19 +396,50 @@ async function initWebGPU() {
 // Convert a double to sign-magnitude fixed-point limbs.
 // Returns { limbs: Uint32Array(n), sign: 0 or 1 }.
 // Limb 0 is LSB (fractional), limb n-1 is MSB (integer part).
-// frac_limbs fractional limbs, rest is integer.
 function doubleToFixedPoint(val, n) {
   const limbs = new Uint32Array(n);
   const sign = val < 0 ? 1 : 0;
   let absVal = Math.abs(val);
-
-  // Fill from MSB (integer part) down to LSB (finest fractional)
   for (let i = n - 1; i >= 0; i--) {
     const limb = Math.floor(absVal) >>> 0;
     limbs[i] = limb;
-    absVal = (absVal - limb) * 4294967296; // * 2^32
+    absVal = (absVal - limb) * 4294967296;
   }
   return { limbs, sign };
+}
+
+// Convert a BigInt (scaled by 2^(32*fracLimbs)) to sign-magnitude fixed-point limbs.
+// Full precision — no f64 rounding.
+function bigintToFixedPoint(val, n) {
+  const limbs = new Uint32Array(n);
+  const sign = val < 0n ? 1 : 0;
+  let abs = val < 0n ? -val : val;
+  const mask = (1n << 32n) - 1n;
+  for (let i = 0; i < n; i++) {
+    limbs[i] = Number(abs & mask);
+    abs >>= 32n;
+  }
+  return { limbs, sign };
+}
+
+// Convert f64 to BigInt fixed-point (scaled by 2^(32*fracLimbs))
+function doubleToBigFixed(val, fracLimbs) {
+  const scale = 1n << BigInt(32 * fracLimbs);
+  // Use enough precision: multiply by scale, round
+  const sign = val < 0 ? -1n : 1n;
+  const abs = Math.abs(val);
+  const intPart = BigInt(Math.floor(abs));
+  const fracPart = abs - Number(intPart);
+  // fracPart * scale — do in steps to avoid f64 overflow
+  let frac = 0n;
+  let remaining = fracPart;
+  for (let i = 0; i < fracLimbs; i++) {
+    remaining *= 4294967296;
+    const limb = BigInt(Math.floor(remaining) >>> 0);
+    frac += limb << BigInt(32 * i);
+    remaining -= Number(limb);
+  }
+  return sign * (intPart * scale + frac);
 }
 
 // HSV to RGB for coloring
@@ -432,16 +477,29 @@ async function render() {
   const totalPixels = width * height;
 
   // Build c_data: per pixel [re_limbs(n), re_sign(1), im_limbs(n), im_sign(1)]
+  // Use BigInt arithmetic for full precision at any zoom level.
   const stride = 2 * n + 2; // words per pixel
   const c_data = new Uint32Array(totalPixels * stride);
-  const pixelStep = 3.0 / (zoom * width);
+
+  // Convert center to BigInt fixed-point if not already
+  const centerReBig_ = centerReBig !== null ? centerReBig : doubleToBigFixed(centerRe, frac_limbs);
+  const centerImBig_ = centerImBig !== null ? centerImBig : doubleToBigFixed(centerIm, frac_limbs);
+
+  // Pixel step in BigInt: 3 * 2^(32*frac_limbs) / (zoom * width)
+  // = 3 * scale / (zoom * width)
+  const scale = 1n << BigInt(32 * frac_limbs);
+  const zoomBig_ = zoomBig > 1n ? zoomBig : BigInt(Math.round(zoom));
+  const pixelStepBig = (3n * scale) / (zoomBig_ * BigInt(width));
+
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {
-      const cr = centerRe + (px - width / 2 + 0.5) * pixelStep;
-      const ci = centerIm + (py - height / 2 + 0.5) * pixelStep;
+      const dx = BigInt(px - Math.floor(width / 2));
+      const dy = BigInt(py - Math.floor(height / 2));
+      const cr = centerReBig_ + dx * pixelStepBig;
+      const ci = centerImBig_ + dy * pixelStepBig;
       const idx = (py * width + px) * stride;
-      const re = doubleToFixedPoint(cr, n);
-      const im = doubleToFixedPoint(ci, n);
+      const re = bigintToFixedPoint(cr, n);
+      const im = bigintToFixedPoint(ci, n);
       c_data.set(re.limbs, idx);
       c_data[idx + n] = re.sign;
       c_data.set(im.limbs, idx + n + 1);
@@ -498,7 +556,8 @@ async function render() {
   readbackBuf.unmap();
 
   const elapsed = performance.now() - t0;
-  statusEl.textContent = `Done in ${elapsed.toFixed(0)}ms (${n} limbs, ${maxIters} iters)`;
+  const zoomStr = zoomBig > 1n ? `zoom=2^${zoomBig.toString(2).length - 1}` : `zoom=${zoom.toFixed(0)}`;
+  statusEl.textContent = `Done in ${elapsed.toFixed(0)}ms (${n} limbs, ${maxIters} iters, ${zoomStr})`;
 
   // Render to canvas — GPU outputs packed RGBA directly
   const imageData = ctx2d.createImageData(width, height);
@@ -513,21 +572,47 @@ async function render() {
   readbackBuf.destroy();
 }
 
-// Click to zoom
+// Click to zoom — use BigInt for deep zoom precision
 canvas.addEventListener('click', (e) => {
   const rect = canvas.getBoundingClientRect();
   const px = (e.clientX - rect.left) / rect.width;
   const py = (e.clientY - rect.top) / rect.height;
-  const pixelStep = 3.0 / (zoom * canvas.width);
-  centerRe += (px - 0.5) * canvas.width * pixelStep;
-  centerIm += (py - 0.5) * canvas.height * pixelStep;
-  zoom *= 2;
+  const n = 1 << parseInt(refNSlider.value);
+  const frac_limbs = n - 1;
+  const scale = 1n << BigInt(32 * frac_limbs);
+
+  // Initialize BigInt center from f64 on first zoom
+  if (centerReBig === null) {
+    centerReBig = doubleToBigFixed(centerRe, frac_limbs);
+    centerImBig = doubleToBigFixed(centerIm, frac_limbs);
+    zoomBig = BigInt(Math.round(zoom));
+    if (zoomBig < 1n) zoomBig = 1n;
+  }
+
+  const pixelStepBig = (3n * scale) / (zoomBig * BigInt(canvas.width));
+  const dx = BigInt(Math.round((px - 0.5) * canvas.width));
+  const dy = BigInt(Math.round((py - 0.5) * canvas.height));
+  centerReBig += dx * pixelStepBig;
+  centerImBig += dy * pixelStepBig;
+  zoomBig *= 2n;
+
+  // Keep f64 in sync for display
+  centerRe = Number(centerReBig) / Number(scale);
+  centerIm = Number(centerImBig) / Number(scale);
+  zoom = Number(zoomBig);
+
   render();
 });
 
 canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  zoom = Math.max(1, zoom / 2);
+  if (zoomBig > 1n) {
+    zoomBig /= 2n;
+    if (zoomBig < 1n) zoomBig = 1n;
+    zoom = Number(zoomBig);
+  } else {
+    zoom = Math.max(1, zoom / 2);
+  }
   render();
 });
 
