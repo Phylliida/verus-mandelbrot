@@ -33,6 +33,16 @@ impl<T: LimbOps> FpComplex<T> {
     pub open spec fn same_format(&self, other: &Self) -> bool {
         self.re.n_exec == other.re.n_exec && self.re.frac_exec == other.re.frac_exec
     }
+
+    /// Convert to spec-level complex (signed_val representation).
+    pub open spec fn to_spec(&self) -> SpecComplex {
+        SpecComplex { re: self.re.signed_val(), im: self.im.signed_val() }
+    }
+
+    /// The limb modulus P = limb_power(n).
+    pub open spec fn modulus(&self) -> int {
+        limb_power(self.re.n_spec())
+    }
 }
 
 /// Complex squaring: z^2 = (re^2 - im^2, 2*re*im).
@@ -62,9 +72,21 @@ pub fn complex_square<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
 }
 
 /// Complex addition.
+/// Exact when |a.re + b.re| < P and |a.im + b.im| < P.
 pub fn complex_add<T: LimbOps>(a: &FpComplex<T>, b: &FpComplex<T>) -> (out: FpComplex<T>)
     requires a.wf(), b.wf(), a.same_format(b),
     ensures out.wf(), out.same_format(a),
+        // Modular postcondition (always holds):
+        out.re.signed_val() == a.re.signed_val() + b.re.signed_val()
+            || (out.re.signed_val() == a.re.signed_val() + b.re.signed_val() - a.modulus()
+                && a.re.signed_val() + b.re.signed_val() >= a.modulus())
+            || (out.re.signed_val() == a.re.signed_val() + b.re.signed_val() + a.modulus()
+                && a.re.signed_val() + b.re.signed_val() <= -a.modulus()),
+        out.im.signed_val() == a.im.signed_val() + b.im.signed_val()
+            || (out.im.signed_val() == a.im.signed_val() + b.im.signed_val() - a.modulus()
+                && a.im.signed_val() + b.im.signed_val() >= a.modulus())
+            || (out.im.signed_val() == a.im.signed_val() + b.im.signed_val() + a.modulus()
+                && a.im.signed_val() + b.im.signed_val() <= -a.modulus()),
 {
     FpComplex {
         re: a.re.signed_add(&b.re),
