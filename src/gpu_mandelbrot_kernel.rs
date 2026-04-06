@@ -436,4 +436,68 @@ proof fn corollary_mandelbrot_no_overflow(
     theorem_glitch_detection_soundness(z_re, z_im, d_re, d_im, dc_re, dc_im, 2, 3, 1);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// THEOREM: Escape check polarity
+// ═══════════════════════════════════════════════════════════════
+
+/// Proves that the sub_limbs-based escape check has correct polarity:
+///   borrow == 0  ↔  magnitude >= threshold
+///   borrow == 1  ↔  magnitude < threshold
+///
+/// The kernel checks `if borrow == 0 { escaped }`. If someone wrote
+/// `borrow == 1`, pixels would never escape → solid black.
+/// This proof catches that class of bug.
+proof fn theorem_escape_check_polarity(
+    magnitude: int,      // |Z+δ|² as unsigned limb value
+    threshold: int,      // escape threshold (e.g., 4.0 in fixed-point)
+    sub_result: int,     // result of sub_limbs(magnitude, threshold)
+    borrow: int,         // borrow from sub_limbs
+    p: int,              // limb_power(n)
+)
+    requires
+        // sub_limbs postcondition: result + threshold == magnitude + borrow * P
+        sub_result + threshold == magnitude + borrow * p,
+        0 <= sub_result && sub_result < p,
+        borrow == 0 || borrow == 1,
+        0 <= magnitude,
+        0 <= threshold,
+        p > 0,
+    ensures
+        // borrow == 0 means magnitude >= threshold (ESCAPED)
+        (borrow == 0) == (magnitude >= threshold),
+        // borrow == 1 means magnitude < threshold (NOT escaped)
+        (borrow == 1) == (magnitude < threshold),
+{
+    if borrow == 0 {
+        // sub_result + threshold == magnitude → sub_result = magnitude - threshold >= 0
+        assert(magnitude >= threshold);
+    } else {
+        // sub_result + threshold == magnitude + P → sub_result = magnitude - threshold + P
+        // sub_result < P → magnitude - threshold + P < P → magnitude < threshold
+        assert(magnitude < threshold);
+    }
+}
+
+/// Corollary: escape at threshold 4 with non-negative magnitude.
+/// If borrow == 0 after sub_limbs(|Z+δ|², 4.0), the orbit has escaped.
+proof fn corollary_escape_at_4(
+    mag_squared: int,     // |Z+δ|² unsigned value
+    sub_result: int,
+    borrow: int,
+    p: int,
+    threshold_val: int,   // fixed-point encoding of 4.0
+)
+    requires
+        sub_result + threshold_val == mag_squared + borrow * p,
+        0 <= sub_result && sub_result < p,
+        borrow == 0 || borrow == 1,
+        0 <= mag_squared,
+        threshold_val > 0,
+        p > 0,
+    ensures
+        borrow == 0 ==> mag_squared >= threshold_val,
+{
+    theorem_escape_check_polarity(mag_squared, threshold_val, sub_result, borrow, p);
+}
+
 } // verus!
