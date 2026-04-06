@@ -5,12 +5,15 @@
 use verus_fixed_point::runtime_fixed_point::*;
 use verus_fixed_point::fixed_point::limb_ops::*;
 
-/// Fixed-point multiply: schoolbook n×n → 2n limbs, take middle n (shift right by frac_limbs).
-/// This is GenericFixedPoint::signed_mul without the struct wrapper.
+/// Fixed-point multiply: Karatsuba n×n → 2n limbs, take middle n (shift right by frac_limbs).
+/// Uses generic_mul_karatsuba (recursive, transpiler unrolls to depth variants).
+/// At depth 0, self-calls are replaced with generic_mul_schoolbook (base case).
 fn fp_mul(a_limbs: &Vec<u32>, a_sign: u32,
           b_limbs: &Vec<u32>, b_sign: u32,
           n: usize, frac_limbs: usize) -> (Vec<u32>, u32)
 {
+    // Karatsuba multiply (transpiler unrolls recursion, uses schoolbook at depth 0
+    // via #[gpu_base_case(generic_mul_schoolbook)] annotation)
     let (product, _gc) = generic_mul_karatsuba(a_limbs, b_limbs, n);
     let truncated = generic_slice_vec(&product, frac_limbs, frac_limbs + n);
     // Sign XOR
