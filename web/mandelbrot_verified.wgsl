@@ -8,144 +8,12 @@ struct R2 {
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
-fn fp_mag_squared(re_limbs: u32, re_sign: u32, im_limbs: u32, im_sign: u32, n: u32, frac_limbs: u32) -> R2 {
-  var re2: u32;
-  var _re2_sign: u32;
-  var im2: u32;
-  var _im2_sign: u32;
-  var mag: u32;
-  var _carry: u32;
-  var _ret: R2;
-  {
-    var _td = fp_mul_scratch_scratch(re_limbs, re_sign, re_limbs, re_sign, n, frac_limbs);
-    re2 = _td._0;
-    _re2_sign = _td._1;
-  }
-  {
-    var _td = fp_mul_scratch_scratch(im_limbs, im_sign, im_limbs, im_sign, n, frac_limbs);
-    im2 = _td._0;
-    _im2_sign = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(re2, im2, n);
-    mag = _td._0;
-    _carry = _td._1;
-  }
-  _ret = R2(mag, 0u);
-  return _ret;
-}
-
-fn fp_signed_sub(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
-  var neg_b_sign: u32;
-  var _ret: R2;
-  neg_b_sign = select_limb(b_sign, 1u, 0u);
-  _ret = fp_signed_add_c_data(a_limbs, a_sign, b_limbs, neg_b_sign, n);
-  return _ret;
-}
-
-fn fp_mul_scratch_scratch(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32, frac_limbs: u32) -> R2 {
-  var product: u32;
-  var _gc: u32;
-  var truncated: u32;
-  var sign_b_flip: u32;
-  var result_sign: u32;
-  var _ret: R2;
-  {
-    var _td = generic_mul_karatsuba_d6(a_limbs, b_limbs, n);
-    product = _td._0;
-    _gc = _td._1;
-  }
-  truncated = generic_slice_vec(product, frac_limbs, (frac_limbs + n));
-  sign_b_flip = select_limb(b_sign, 1u, 0u);
-  result_sign = select_limb(a_sign, b_sign, sign_b_flip);
-  _ret = R2(truncated, result_sign);
-  return _ret;
-}
-
-fn generic_sub_limbs_params(a: u32, b: u32, n: u32) -> R2 {
-  var out_len: u32;
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
-  var _ret: R2;
-  out_len = 0u;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow(params[(a + i)], scratch[(b + i)], borrow);
-      digit = _td._0;
-      next_borrow = _td._1;
-    }
-    scratch[(out + out_len)] = digit;
-    out_len = out_len + 1u;
-    borrow = next_borrow;
-  }
-  _ret = R2(out, borrow);
-  return _ret;
-}
-
-fn fp_signed_add_c_data(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
-  var sum: u32;
-  var _carry: u32;
-  var a_minus_b: u32;
-  var borrow_ab: u32;
-  var b_minus_a: u32;
-  var _borrow_ba: u32;
-  var sign_diff: u32;
-  var sign_borrow: u32;
-  var diff_zero: u32;
-  var borrow_zero: u32;
-  var same_sign: u32;
-  var _unused_17: u32;
-  var diff_result: u32;
-  var diff_sign: u32;
-  var result_limbs: u32;
-  var result_sign: u32;
-  var _ret: R2;
-  {
-    var _td = generic_add_limbs(a_limbs, b_limbs, n);
-    sum = _td._0;
-    _carry = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(a_limbs, b_limbs, n);
-    a_minus_b = _td._0;
-    borrow_ab = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(b_limbs, a_limbs, n);
-    b_minus_a = _td._0;
-    _borrow_ba = _td._1;
-  }
-  {
-    var _td = sub_borrow(a_sign, b_sign, 0u);
-    sign_diff = _td._0;
-    sign_borrow = _td._1;
-  }
-  diff_zero = is_zero_limb(sign_diff);
-  borrow_zero = is_zero_limb(sign_borrow);
-  {
-    var _td = mul2(diff_zero, borrow_zero);
-    same_sign = _td._0;
-    _unused_17 = _td._1;
-  }
-  diff_result = generic_select_vec(borrow_ab, a_minus_b, b_minus_a, n);
-  diff_sign = select_limb(borrow_ab, a_sign, b_sign);
-  result_limbs = generic_select_vec(same_sign, sum, diff_result, n);
-  result_sign = select_limb(same_sign, a_sign, diff_sign);
-  _ret = R2(result_limbs, result_sign);
-  return _ret;
-}
-
-fn generic_add_limbs(a: u32, b: u32, n: u32) -> R2 {
-  var out_len: u32;
+fn add_limbs_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
   var carry: u32;
   var i: u32;
   var digit: u32;
   var next_carry: u32;
-  var _ret: R2;
-  out_len = 0u;
+  var _ret: u32;
   carry = zero_val();
   for (var i: u32 = 0u; i < n; i++) {
     {
@@ -153,885 +21,109 @@ fn generic_add_limbs(a: u32, b: u32, n: u32) -> R2 {
       digit = _td._0;
       next_carry = _td._1;
     }
-    scratch[(out + out_len)] = digit;
-    out_len = out_len + 1u;
+    _call_tmp = fn_9(i, digit);
     carry = next_carry;
   }
-  _ret = R2(out, carry);
+  _ret = carry;
   return _ret;
 }
 
-fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
-  var _ret: u32;
-  if ((cond == 0u)) {
-    _ret = if_zero;
-  } else {
-    _ret = if_nonzero;
-  }
-  return _ret;
-}
-
-fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
-  var half: u32;
-  var upper: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var a_lo_p: u32;
-  var b_lo_p: u32;
-  var z0: u32;
-  var gz0: u32;
-  var z2: u32;
-  var gz2: u32;
-  var a_sum_body: u32;
-  var a_carry: u32;
-  var b_sum_body: u32;
-  var b_carry: u32;
-  var a_sum: u32;
-  var b_sum: u32;
-  var z1_full: u32;
-  var gz1f: u32;
-  var tgt: u32;
-  var z0_p: u32;
-  var z2_p: u32;
-  var z1_tmp: u32;
-  var bw1: u32;
-  var z1: u32;
-  var bw2: u32;
-  var z1_shifted: u32;
-  var z2_shifted: u32;
-  var rlen: u32;
-  var z0_f: u32;
-  var z1_f: u32;
-  var z2_f: u32;
-  var s1: u32;
-  var c1: u32;
-  var s2: u32;
-  var c2: u32;
-  var _ret: R2;
-  if ((n <= 4u)) {
-    return;
-  } else {
-  }
-  half = (n / 2u);
-  upper = (n - half);
-  a_lo = generic_slice_vec(a, 0u, half);
-  a_hi = generic_slice_vec(a, half, n);
-  b_lo = generic_slice_vec(b, 0u, half);
-  b_hi = generic_slice_vec(b, half, n);
-  a_lo_p = generic_pad_to_length(a_lo, upper);
-  b_lo_p = generic_pad_to_length(b_lo, upper);
-  {
-    var _td = generic_mul_schoolbook(a_lo_p, b_lo_p, upper);
-    z0 = _td._0;
-    gz0 = _td._1;
-  }
-  {
-    var _td = generic_mul_schoolbook(a_hi, b_hi, upper);
-    z2 = _td._0;
-    gz2 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = _td._0;
-    a_carry = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = _td._0;
-    b_carry = _td._1;
-  }
-  a_sum = a_sum_body;
-  _call_tmp = fn_21(a_carry);
-  b_sum = b_sum_body;
-  _call_tmp = fn_22(b_carry);
-  {
-    var _td = generic_mul_schoolbook(a_sum, b_sum, (upper + 1u));
-    z1_full = _td._0;
-    gz1f = _td._1;
-  }
-  tgt = (2u * (upper + 1u));
-  z0_p = generic_pad_to_length(z0, tgt);
-  z2_p = generic_pad_to_length(z2, tgt);
-  {
-    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = _td._0;
-    bw1 = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = _td._0;
-    bw2 = _td._1;
-  }
-  z1_shifted = generic_shift_left(z1, half);
-  z2_shifted = generic_shift_left(z2, (2u * half));
-  rlen = (2u * n);
-  z0_f = generic_pad_to_length(z0, rlen);
-  z1_f = generic_pad_to_length(z1_shifted, rlen);
-  z2_f = generic_pad_to_length(z2_shifted, rlen);
-  {
-    var _td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = _td._0;
-    c1 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = _td._0;
-    c2 = _td._1;
-  }
-  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
-  return _ret;
-}
-
-fn generic_mul_karatsuba_d1(a: u32, b: u32, n: u32) -> R2 {
-  var half: u32;
-  var upper: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var a_lo_p: u32;
-  var b_lo_p: u32;
-  var z0: u32;
-  var gz0: u32;
-  var z2: u32;
-  var gz2: u32;
-  var a_sum_body: u32;
-  var a_carry: u32;
-  var b_sum_body: u32;
-  var b_carry: u32;
-  var a_sum: u32;
-  var b_sum: u32;
-  var z1_full: u32;
-  var gz1f: u32;
-  var tgt: u32;
-  var z0_p: u32;
-  var z2_p: u32;
-  var z1_tmp: u32;
-  var bw1: u32;
-  var z1: u32;
-  var bw2: u32;
-  var z1_shifted: u32;
-  var z2_shifted: u32;
-  var rlen: u32;
-  var z0_f: u32;
-  var z1_f: u32;
-  var z2_f: u32;
-  var s1: u32;
-  var c1: u32;
-  var s2: u32;
-  var c2: u32;
-  var _ret: R2;
-  if ((n <= 4u)) {
-    return;
-  } else {
-  }
-  half = (n / 2u);
-  upper = (n - half);
-  a_lo = generic_slice_vec(a, 0u, half);
-  a_hi = generic_slice_vec(a, half, n);
-  b_lo = generic_slice_vec(b, 0u, half);
-  b_hi = generic_slice_vec(b, half, n);
-  a_lo_p = generic_pad_to_length(a_lo, upper);
-  b_lo_p = generic_pad_to_length(b_lo, upper);
-  {
-    var _td = generic_mul_karatsuba_d0(a_lo_p, b_lo_p, upper);
-    z0 = _td._0;
-    gz0 = _td._1;
-  }
-  {
-    var _td = generic_mul_karatsuba_d0(a_hi, b_hi, upper);
-    z2 = _td._0;
-    gz2 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = _td._0;
-    a_carry = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = _td._0;
-    b_carry = _td._1;
-  }
-  a_sum = a_sum_body;
-  _call_tmp = fn_21(a_carry);
-  b_sum = b_sum_body;
-  _call_tmp = fn_22(b_carry);
-  {
-    var _td = generic_mul_karatsuba_d0(a_sum, b_sum, (upper + 1u));
-    z1_full = _td._0;
-    gz1f = _td._1;
-  }
-  tgt = (2u * (upper + 1u));
-  z0_p = generic_pad_to_length(z0, tgt);
-  z2_p = generic_pad_to_length(z2, tgt);
-  {
-    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = _td._0;
-    bw1 = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = _td._0;
-    bw2 = _td._1;
-  }
-  z1_shifted = generic_shift_left(z1, half);
-  z2_shifted = generic_shift_left(z2, (2u * half));
-  rlen = (2u * n);
-  z0_f = generic_pad_to_length(z0, rlen);
-  z1_f = generic_pad_to_length(z1_shifted, rlen);
-  z2_f = generic_pad_to_length(z2_shifted, rlen);
-  {
-    var _td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = _td._0;
-    c1 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = _td._0;
-    c2 = _td._1;
-  }
-  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
-  return _ret;
-}
-
-fn generic_mul_karatsuba_d2(a: u32, b: u32, n: u32) -> R2 {
-  var half: u32;
-  var upper: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var a_lo_p: u32;
-  var b_lo_p: u32;
-  var z0: u32;
-  var gz0: u32;
-  var z2: u32;
-  var gz2: u32;
-  var a_sum_body: u32;
-  var a_carry: u32;
-  var b_sum_body: u32;
-  var b_carry: u32;
-  var a_sum: u32;
-  var b_sum: u32;
-  var z1_full: u32;
-  var gz1f: u32;
-  var tgt: u32;
-  var z0_p: u32;
-  var z2_p: u32;
-  var z1_tmp: u32;
-  var bw1: u32;
-  var z1: u32;
-  var bw2: u32;
-  var z1_shifted: u32;
-  var z2_shifted: u32;
-  var rlen: u32;
-  var z0_f: u32;
-  var z1_f: u32;
-  var z2_f: u32;
-  var s1: u32;
-  var c1: u32;
-  var s2: u32;
-  var c2: u32;
-  var _ret: R2;
-  if ((n <= 4u)) {
-    return;
-  } else {
-  }
-  half = (n / 2u);
-  upper = (n - half);
-  a_lo = generic_slice_vec(a, 0u, half);
-  a_hi = generic_slice_vec(a, half, n);
-  b_lo = generic_slice_vec(b, 0u, half);
-  b_hi = generic_slice_vec(b, half, n);
-  a_lo_p = generic_pad_to_length(a_lo, upper);
-  b_lo_p = generic_pad_to_length(b_lo, upper);
-  {
-    var _td = generic_mul_karatsuba_d1(a_lo_p, b_lo_p, upper);
-    z0 = _td._0;
-    gz0 = _td._1;
-  }
-  {
-    var _td = generic_mul_karatsuba_d1(a_hi, b_hi, upper);
-    z2 = _td._0;
-    gz2 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = _td._0;
-    a_carry = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = _td._0;
-    b_carry = _td._1;
-  }
-  a_sum = a_sum_body;
-  _call_tmp = fn_21(a_carry);
-  b_sum = b_sum_body;
-  _call_tmp = fn_22(b_carry);
-  {
-    var _td = generic_mul_karatsuba_d1(a_sum, b_sum, (upper + 1u));
-    z1_full = _td._0;
-    gz1f = _td._1;
-  }
-  tgt = (2u * (upper + 1u));
-  z0_p = generic_pad_to_length(z0, tgt);
-  z2_p = generic_pad_to_length(z2, tgt);
-  {
-    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = _td._0;
-    bw1 = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = _td._0;
-    bw2 = _td._1;
-  }
-  z1_shifted = generic_shift_left(z1, half);
-  z2_shifted = generic_shift_left(z2, (2u * half));
-  rlen = (2u * n);
-  z0_f = generic_pad_to_length(z0, rlen);
-  z1_f = generic_pad_to_length(z1_shifted, rlen);
-  z2_f = generic_pad_to_length(z2_shifted, rlen);
-  {
-    var _td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = _td._0;
-    c1 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = _td._0;
-    c2 = _td._1;
-  }
-  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
-  return _ret;
-}
-
-fn generic_mul_karatsuba_d3(a: u32, b: u32, n: u32) -> R2 {
-  var half: u32;
-  var upper: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var a_lo_p: u32;
-  var b_lo_p: u32;
-  var z0: u32;
-  var gz0: u32;
-  var z2: u32;
-  var gz2: u32;
-  var a_sum_body: u32;
-  var a_carry: u32;
-  var b_sum_body: u32;
-  var b_carry: u32;
-  var a_sum: u32;
-  var b_sum: u32;
-  var z1_full: u32;
-  var gz1f: u32;
-  var tgt: u32;
-  var z0_p: u32;
-  var z2_p: u32;
-  var z1_tmp: u32;
-  var bw1: u32;
-  var z1: u32;
-  var bw2: u32;
-  var z1_shifted: u32;
-  var z2_shifted: u32;
-  var rlen: u32;
-  var z0_f: u32;
-  var z1_f: u32;
-  var z2_f: u32;
-  var s1: u32;
-  var c1: u32;
-  var s2: u32;
-  var c2: u32;
-  var _ret: R2;
-  if ((n <= 4u)) {
-    return;
-  } else {
-  }
-  half = (n / 2u);
-  upper = (n - half);
-  a_lo = generic_slice_vec(a, 0u, half);
-  a_hi = generic_slice_vec(a, half, n);
-  b_lo = generic_slice_vec(b, 0u, half);
-  b_hi = generic_slice_vec(b, half, n);
-  a_lo_p = generic_pad_to_length(a_lo, upper);
-  b_lo_p = generic_pad_to_length(b_lo, upper);
-  {
-    var _td = generic_mul_karatsuba_d2(a_lo_p, b_lo_p, upper);
-    z0 = _td._0;
-    gz0 = _td._1;
-  }
-  {
-    var _td = generic_mul_karatsuba_d2(a_hi, b_hi, upper);
-    z2 = _td._0;
-    gz2 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = _td._0;
-    a_carry = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = _td._0;
-    b_carry = _td._1;
-  }
-  a_sum = a_sum_body;
-  _call_tmp = fn_21(a_carry);
-  b_sum = b_sum_body;
-  _call_tmp = fn_22(b_carry);
-  {
-    var _td = generic_mul_karatsuba_d2(a_sum, b_sum, (upper + 1u));
-    z1_full = _td._0;
-    gz1f = _td._1;
-  }
-  tgt = (2u * (upper + 1u));
-  z0_p = generic_pad_to_length(z0, tgt);
-  z2_p = generic_pad_to_length(z2, tgt);
-  {
-    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = _td._0;
-    bw1 = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = _td._0;
-    bw2 = _td._1;
-  }
-  z1_shifted = generic_shift_left(z1, half);
-  z2_shifted = generic_shift_left(z2, (2u * half));
-  rlen = (2u * n);
-  z0_f = generic_pad_to_length(z0, rlen);
-  z1_f = generic_pad_to_length(z1_shifted, rlen);
-  z2_f = generic_pad_to_length(z2_shifted, rlen);
-  {
-    var _td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = _td._0;
-    c1 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = _td._0;
-    c2 = _td._1;
-  }
-  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
-  return _ret;
-}
-
-fn generic_mul_karatsuba_d4(a: u32, b: u32, n: u32) -> R2 {
-  var half: u32;
-  var upper: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var a_lo_p: u32;
-  var b_lo_p: u32;
-  var z0: u32;
-  var gz0: u32;
-  var z2: u32;
-  var gz2: u32;
-  var a_sum_body: u32;
-  var a_carry: u32;
-  var b_sum_body: u32;
-  var b_carry: u32;
-  var a_sum: u32;
-  var b_sum: u32;
-  var z1_full: u32;
-  var gz1f: u32;
-  var tgt: u32;
-  var z0_p: u32;
-  var z2_p: u32;
-  var z1_tmp: u32;
-  var bw1: u32;
-  var z1: u32;
-  var bw2: u32;
-  var z1_shifted: u32;
-  var z2_shifted: u32;
-  var rlen: u32;
-  var z0_f: u32;
-  var z1_f: u32;
-  var z2_f: u32;
-  var s1: u32;
-  var c1: u32;
-  var s2: u32;
-  var c2: u32;
-  var _ret: R2;
-  if ((n <= 4u)) {
-    return;
-  } else {
-  }
-  half = (n / 2u);
-  upper = (n - half);
-  a_lo = generic_slice_vec(a, 0u, half);
-  a_hi = generic_slice_vec(a, half, n);
-  b_lo = generic_slice_vec(b, 0u, half);
-  b_hi = generic_slice_vec(b, half, n);
-  a_lo_p = generic_pad_to_length(a_lo, upper);
-  b_lo_p = generic_pad_to_length(b_lo, upper);
-  {
-    var _td = generic_mul_karatsuba_d3(a_lo_p, b_lo_p, upper);
-    z0 = _td._0;
-    gz0 = _td._1;
-  }
-  {
-    var _td = generic_mul_karatsuba_d3(a_hi, b_hi, upper);
-    z2 = _td._0;
-    gz2 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = _td._0;
-    a_carry = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = _td._0;
-    b_carry = _td._1;
-  }
-  a_sum = a_sum_body;
-  _call_tmp = fn_21(a_carry);
-  b_sum = b_sum_body;
-  _call_tmp = fn_22(b_carry);
-  {
-    var _td = generic_mul_karatsuba_d3(a_sum, b_sum, (upper + 1u));
-    z1_full = _td._0;
-    gz1f = _td._1;
-  }
-  tgt = (2u * (upper + 1u));
-  z0_p = generic_pad_to_length(z0, tgt);
-  z2_p = generic_pad_to_length(z2, tgt);
-  {
-    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = _td._0;
-    bw1 = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = _td._0;
-    bw2 = _td._1;
-  }
-  z1_shifted = generic_shift_left(z1, half);
-  z2_shifted = generic_shift_left(z2, (2u * half));
-  rlen = (2u * n);
-  z0_f = generic_pad_to_length(z0, rlen);
-  z1_f = generic_pad_to_length(z1_shifted, rlen);
-  z2_f = generic_pad_to_length(z2_shifted, rlen);
-  {
-    var _td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = _td._0;
-    c1 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = _td._0;
-    c2 = _td._1;
-  }
-  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
-  return _ret;
-}
-
-fn generic_mul_karatsuba_d5(a: u32, b: u32, n: u32) -> R2 {
-  var half: u32;
-  var upper: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var a_lo_p: u32;
-  var b_lo_p: u32;
-  var z0: u32;
-  var gz0: u32;
-  var z2: u32;
-  var gz2: u32;
-  var a_sum_body: u32;
-  var a_carry: u32;
-  var b_sum_body: u32;
-  var b_carry: u32;
-  var a_sum: u32;
-  var b_sum: u32;
-  var z1_full: u32;
-  var gz1f: u32;
-  var tgt: u32;
-  var z0_p: u32;
-  var z2_p: u32;
-  var z1_tmp: u32;
-  var bw1: u32;
-  var z1: u32;
-  var bw2: u32;
-  var z1_shifted: u32;
-  var z2_shifted: u32;
-  var rlen: u32;
-  var z0_f: u32;
-  var z1_f: u32;
-  var z2_f: u32;
-  var s1: u32;
-  var c1: u32;
-  var s2: u32;
-  var c2: u32;
-  var _ret: R2;
-  if ((n <= 4u)) {
-    return;
-  } else {
-  }
-  half = (n / 2u);
-  upper = (n - half);
-  a_lo = generic_slice_vec(a, 0u, half);
-  a_hi = generic_slice_vec(a, half, n);
-  b_lo = generic_slice_vec(b, 0u, half);
-  b_hi = generic_slice_vec(b, half, n);
-  a_lo_p = generic_pad_to_length(a_lo, upper);
-  b_lo_p = generic_pad_to_length(b_lo, upper);
-  {
-    var _td = generic_mul_karatsuba_d4(a_lo_p, b_lo_p, upper);
-    z0 = _td._0;
-    gz0 = _td._1;
-  }
-  {
-    var _td = generic_mul_karatsuba_d4(a_hi, b_hi, upper);
-    z2 = _td._0;
-    gz2 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = _td._0;
-    a_carry = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = _td._0;
-    b_carry = _td._1;
-  }
-  a_sum = a_sum_body;
-  _call_tmp = fn_21(a_carry);
-  b_sum = b_sum_body;
-  _call_tmp = fn_22(b_carry);
-  {
-    var _td = generic_mul_karatsuba_d4(a_sum, b_sum, (upper + 1u));
-    z1_full = _td._0;
-    gz1f = _td._1;
-  }
-  tgt = (2u * (upper + 1u));
-  z0_p = generic_pad_to_length(z0, tgt);
-  z2_p = generic_pad_to_length(z2, tgt);
-  {
-    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = _td._0;
-    bw1 = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = _td._0;
-    bw2 = _td._1;
-  }
-  z1_shifted = generic_shift_left(z1, half);
-  z2_shifted = generic_shift_left(z2, (2u * half));
-  rlen = (2u * n);
-  z0_f = generic_pad_to_length(z0, rlen);
-  z1_f = generic_pad_to_length(z1_shifted, rlen);
-  z2_f = generic_pad_to_length(z2_shifted, rlen);
-  {
-    var _td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = _td._0;
-    c1 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = _td._0;
-    c2 = _td._1;
-  }
-  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
-  return _ret;
-}
-
-fn generic_mul_karatsuba_d6(a: u32, b: u32, n: u32) -> R2 {
-  var half: u32;
-  var upper: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var a_lo_p: u32;
-  var b_lo_p: u32;
-  var z0: u32;
-  var gz0: u32;
-  var z2: u32;
-  var gz2: u32;
-  var a_sum_body: u32;
-  var a_carry: u32;
-  var b_sum_body: u32;
-  var b_carry: u32;
-  var a_sum: u32;
-  var b_sum: u32;
-  var z1_full: u32;
-  var gz1f: u32;
-  var tgt: u32;
-  var z0_p: u32;
-  var z2_p: u32;
-  var z1_tmp: u32;
-  var bw1: u32;
-  var z1: u32;
-  var bw2: u32;
-  var z1_shifted: u32;
-  var z2_shifted: u32;
-  var rlen: u32;
-  var z0_f: u32;
-  var z1_f: u32;
-  var z2_f: u32;
-  var s1: u32;
-  var c1: u32;
-  var s2: u32;
-  var c2: u32;
-  var _ret: R2;
-  if ((n <= 4u)) {
-    return;
-  } else {
-  }
-  half = (n / 2u);
-  upper = (n - half);
-  a_lo = generic_slice_vec(a, 0u, half);
-  a_hi = generic_slice_vec(a, half, n);
-  b_lo = generic_slice_vec(b, 0u, half);
-  b_hi = generic_slice_vec(b, half, n);
-  a_lo_p = generic_pad_to_length(a_lo, upper);
-  b_lo_p = generic_pad_to_length(b_lo, upper);
-  {
-    var _td = generic_mul_karatsuba_d5(a_lo_p, b_lo_p, upper);
-    z0 = _td._0;
-    gz0 = _td._1;
-  }
-  {
-    var _td = generic_mul_karatsuba_d5(a_hi, b_hi, upper);
-    z2 = _td._0;
-    gz2 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = _td._0;
-    a_carry = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = _td._0;
-    b_carry = _td._1;
-  }
-  a_sum = a_sum_body;
-  _call_tmp = fn_21(a_carry);
-  b_sum = b_sum_body;
-  _call_tmp = fn_22(b_carry);
-  {
-    var _td = generic_mul_karatsuba_d5(a_sum, b_sum, (upper + 1u));
-    z1_full = _td._0;
-    gz1f = _td._1;
-  }
-  tgt = (2u * (upper + 1u));
-  z0_p = generic_pad_to_length(z0, tgt);
-  z2_p = generic_pad_to_length(z2, tgt);
-  {
-    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = _td._0;
-    bw1 = _td._1;
-  }
-  {
-    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = _td._0;
-    bw2 = _td._1;
-  }
-  z1_shifted = generic_shift_left(z1, half);
-  z2_shifted = generic_shift_left(z2, (2u * half));
-  rlen = (2u * n);
-  z0_f = generic_pad_to_length(z0, rlen);
-  z1_f = generic_pad_to_length(z1_shifted, rlen);
-  z2_f = generic_pad_to_length(z2_shifted, rlen);
-  {
-    var _td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = _td._0;
-    c1 = _td._1;
-  }
-  {
-    var _td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = _td._0;
-    c2 = _td._1;
-  }
-  _ret = R2(s2, fn_24((fn_23(c1) + fn_23(c2))));
-  return _ret;
-}
-
-fn generic_slice_vec(a: u32, start: u32, end: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var _ret: u32;
-  out_len = 0u;
-  for (var i: u32 = start; i < end; i++) {
-    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
-    out_len = out_len + 1u;
-  }
-  _ret = out;
-  return _ret;
-}
-
-fn generic_mul_schoolbook_scratch_scratch(a: u32, b: u32, n: u32) -> R2 {
+fn mul_schoolbook_to_scratch_scratch_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
   var nn: u32;
-  var acc: u32;
   var i: u32;
-  var bi: u32;
-  var partial: u32;
-  var shifted: u32;
-  var shifted_p: u32;
-  var new_acc: u32;
   var carry: u32;
-  var ghost_carry: u32;
-  var _ret: R2;
+  var j: u32;
+  var prod_lo: u32;
+  var prod_hi: u32;
+  var sum1: u32;
+  var c1: u32;
+  var new_carry: u32;
+  var _c2: u32;
+  var _ret: u32;
   nn = (2u * n);
-  acc = fn_21(nn);
-  for (var i: u32 = 0u; i < n; i++) {
-    bi = clone_limb(scratch[(b + i)]);
-    partial = generic_mul_by_limb(a, bi, n);
-    shifted = generic_shift_left(partial, i);
-    shifted_p = generic_pad_to_length(shifted, nn);
-    {
-      var _td = generic_add_limbs(acc, shifted_p, nn);
-      new_acc = _td._0;
-      carry = _td._1;
-    }
-    acc = new_acc;
+  for (var i: u32 = 0u; i < nn; i++) {
+    _call_tmp = fn_9(i, zero_val());
   }
-  _ret = R2(acc, fn_22(ghost_carry));
+  for (var i: u32 = 0u; i < n; i++) {
+    carry = zero_val();
+    for (var j: u32 = 0u; j < n; j++) {
+      {
+        var _td = mul2(scratch[(a + j)], scratch[(b + i)]);
+        prod_lo = _td._0;
+        prod_hi = _td._1;
+      }
+      {
+        var _td = add3(prod_lo, scratch[(out + (i + j))], carry);
+        sum1 = _td._0;
+        c1 = _td._1;
+      }
+      {
+        var _td = add3(prod_hi, c1, zero_val());
+        new_carry = _td._0;
+        _c2 = _td._1;
+      }
+      _call_tmp = fn_9((i + j), sum1);
+      carry = new_carry;
+    }
+    _call_tmp = fn_9((i + n), carry);
+  }
   return _ret;
 }
 
-fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
+fn slice_vec_to_scratch_scratch(a: u32, start: u32, end: u32, out: u32, out_off: u32) -> u32 {
+  var len: u32;
+  var si: u32;
+  var di: u32;
+  var idx: u32;
+  var _ret: u32;
+  len = (end - start);
+  si = start;
+  di = out_off;
+  for (var idx: u32 = 0u; idx < len; idx++) {
+    _call_tmp = fn_9(di, clone_limb(scratch[(a + si)]));
+    si = (si + 1u);
+    di = (di + 1u);
+  }
+  return _ret;
+}
+
+fn sub_limbs_to_scratch_params_scratch(a: u32, b: u32, out: u32, n: u32) -> u32 {
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: u32;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(scratch[(a + i)], params[(b + i)], borrow);
+      digit = _td._0;
+      next_borrow = _td._1;
+    }
+    _call_tmp = fn_9(i, digit);
+    borrow = next_borrow;
+  }
+  _ret = borrow;
+  return _ret;
+}
+
+fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
   var ab: u32;
-  var bw1: u32;
-  var result: u32;
-  var bw2: u32;
+  var c1: u32;
+  var abc: u32;
+  var c2: u32;
   var _ret: R2;
-  ab = (self_val - b);
-  bw1 = select(0u, 1u, (self_val < b));
-  result = (ab - borrow);
-  bw2 = select(0u, 1u, (ab < borrow));
-  _ret = R2(result, (bw1 + bw2));
+  ab = (self_val + b);
+  c1 = select(0u, 1u, (ab < self_val));
+  abc = (ab + carry);
+  c2 = select(0u, 1u, (abc < ab));
+  _ret = R2(abc, (c1 + c2));
   return _ret;
 }
 
 fn zero_val() -> u32 {
   var _ret: u32;
   _ret = 0u;
-  return _ret;
-}
-
-fn is_zero_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  if ((self_val == 0u)) {
-    _ret = 1u;
-  } else {
-    _ret = 0u;
-  }
   return _ret;
 }
 
@@ -1065,121 +157,23 @@ fn mul2(self_val: u32, b: u32) -> R2 {
   return _ret;
 }
 
-fn generic_select_vec(cond: u32, if_zero: u32, if_nonzero: u32, n: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var selected: u32;
-  var _ret: u32;
-  out_len = 0u;
-  for (var i: u32 = 0u; i < n; i++) {
-    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
-    scratch[(out + out_len)] = selected;
-    out_len = out_len + 1u;
-  }
-  _ret = out;
-  return _ret;
-}
-
-fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
-  var ab: u32;
-  var c1: u32;
-  var abc: u32;
-  var c2: u32;
-  var _ret: R2;
-  ab = (self_val + b);
-  c1 = select(0u, 1u, (ab < self_val));
-  abc = (ab + carry);
-  c2 = select(0u, 1u, (abc < ab));
-  _ret = R2(abc, (c1 + c2));
-  return _ret;
-}
-
-fn generic_pad_to_length(a: u32, target_v: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var _ret: u32;
-  out_len = 0u;
-  for (var i: u32 = 0u; i < fn_21(a); i++) {
-    scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
-    out_len = out_len + 1u;
-  }
-  for (var i: u32 = fn_21(a); i < target_v; i++) {
-    scratch[(out + out_len)] = zero_val();
-    out_len = out_len + 1u;
-  }
-  _ret = out;
-  return _ret;
-}
-
-fn generic_shift_left(a: u32, offset: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var k: u32;
-  var _ret: u32;
-  out_len = 0u;
-  for (var i: u32 = 0u; i < offset; i++) {
-    scratch[(out + out_len)] = zero_val();
-    out_len = out_len + 1u;
-  }
-  for (var k: u32 = 0u; k < fn_21(a); k++) {
-    scratch[(out + out_len)] = clone_limb(scratch[(a + k)]);
-    out_len = out_len + 1u;
-  }
-  _ret = out;
-  return _ret;
-}
-
 fn clone_limb(self_val: u32) -> u32 {
   var _ret: u32;
   _ret = self_val;
   return _ret;
 }
 
-fn generic_mul_by_limb(a: u32, scalar: u32, n: u32) -> u32 {
-  var out_len: u32;
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var _ret: u32;
-  out_len = 0u;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = mul_add_carry(scratch[(a + i)], scalar, zero_val(), carry);
-      digit = _td._0;
-      next_carry = _td._1;
-    }
-    scratch[(out + out_len)] = digit;
-    out_len = out_len + 1u;
-    carry = next_carry;
-  }
-  scratch[(out + out_len)] = carry;
-  out_len = out_len + 1u;
-  _ret = out;
-  return _ret;
-}
-
-fn mul_add_carry(self_val: u32, b: u32, accum: u32, carry: u32) -> R2 {
-  var mul_lo: u32;
-  var mul_hi: u32;
-  var sum1: u32;
-  var c1: u32;
-  var sum2: u32;
-  var c2: u32;
-  var carry_out: u32;
+fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
+  var ab: u32;
+  var bw1: u32;
+  var result: u32;
+  var bw2: u32;
   var _ret: R2;
-  {
-    var _td = mul2(self_val, b);
-    mul_lo = _td._0;
-    mul_hi = _td._1;
-  }
-  sum1 = (mul_lo + accum);
-  c1 = select(0u, 1u, (sum1 < mul_lo));
-  sum2 = (sum1 + carry);
-  c2 = select(0u, 1u, (sum2 < sum1));
-  carry_out = ((mul_hi + c1) + c2);
-  _ret = R2(sum2, carry_out);
+  ab = (self_val - b);
+  bw1 = select(0u, 1u, (self_val < b));
+  result = (ab - borrow);
+  bw2 = select(0u, 1u, (ab < borrow));
+  _ret = R2(result, (bw1 + bw2));
   return _ret;
 }
 
@@ -1195,40 +189,24 @@ fn mandelbrot_fixedpoint(
   var n: u32;
   var frac_limbs: u32;
   var tid: u32;
-  var stride: u32;
-  var c_base: u32;
   var words_per_thread: u32;
   var sb: u32;
-  var zr_off: u32;
-  var zr_sign_off: u32;
-  var zi_off: u32;
-  var zi_sign_off: u32;
+  var s0: u32;
+  var s1: u32;
+  var s2: u32;
+  var s4: u32;
+  var s5: u32;
+  var s6: u32;
+  var s7: u32;
+  var s8: u32;
+  var s9: u32;
+  var s10: u32;
+  var c_re: u32;
+  var c_im: u32;
   var i: u32;
   var escaped_iter: u32;
   var iter: u32;
-  var re2: u32;
-  var re2_sign: u32;
-  var im2: u32;
-  var im2_sign: u32;
-  var re_plus_im: u32;
-  var rpi_sign: u32;
-  var sum2: u32;
-  var sum2_sign: u32;
-  var re_diff: u32;
-  var re_diff_sign: u32;
-  var new_re: u32;
-  var new_re_sign: u32;
-  var t1: u32;
-  var t1_sign: u32;
-  var t2: u32;
-  var t2_sign: u32;
-  var c_im_base: u32;
-  var new_im: u32;
-  var new_im_sign: u32;
-  var mag: u32;
-  var _mag_sign: u32;
   var thresh_off: u32;
-  var _diff: u32;
   var borrow: u32;
   width = params[0u];
   height = params[1u];
@@ -1244,85 +222,49 @@ fn mandelbrot_fixedpoint(
   } else {
   }
   tid = ((gid_y * width) + gid_x);
-  stride = ((2u * n) + 2u);
-  c_base = (tid * stride);
-  words_per_thread = ((7u * n) + 3u);
+  words_per_thread = (12u * n);
   sb = (tid * words_per_thread);
-  zr_off = sb;
-  zr_sign_off = (sb + n);
-  zi_off = ((sb + n) + 1u);
-  zi_sign_off = ((sb + (2u * n)) + 1u);
+  s0 = sb;
+  s1 = (sb + n);
+  s2 = (sb + (2u * n));
+  s4 = (sb + (4u * n));
+  s5 = (sb + (5u * n));
+  s6 = (sb + (6u * n));
+  s7 = (sb + (7u * n));
+  s8 = (sb + (8u * n));
+  s9 = (sb + (9u * n));
+  s10 = (sb + (10u * n));
+  c_re = ((tid * 2u) * n);
+  c_im = (c_re + n);
   for (var i: u32 = 0u; i < n; i++) {
-    scratch[(zr_off + i)] = 0u;
-    scratch[(zi_off + i)] = 0u;
+    scratch[(s0 + i)] = 0u;
+    scratch[(s1 + i)] = 0u;
   }
-  scratch[zr_sign_off] = 0u;
-  scratch[zi_sign_off] = 0u;
   escaped_iter = max_iters;
   for (var iter: u32 = 0u; iter < max_iters; iter++) {
-    {
-      var _td = fp_mul_scratch_scratch(zr_off, scratch[zr_sign_off], zr_off, scratch[zr_sign_off], n, frac_limbs);
-      re2 = _td._0;
-      re2_sign = _td._1;
-    }
-    {
-      var _td = fp_mul_scratch_scratch(zi_off, scratch[zi_sign_off], zi_off, scratch[zi_sign_off], n, frac_limbs);
-      im2 = _td._0;
-      im2_sign = _td._1;
-    }
-    {
-      var _td = fp_signed_add_c_data(zr_off, scratch[zr_sign_off], zi_off, scratch[zi_sign_off], n);
-      re_plus_im = _td._0;
-      rpi_sign = _td._1;
-    }
-    {
-      var _td = fp_mul_scratch_scratch(re_plus_im, rpi_sign, re_plus_im, rpi_sign, n, frac_limbs);
-      sum2 = _td._0;
-      sum2_sign = _td._1;
-    }
-    {
-      var _td = fp_signed_sub(re2, re2_sign, im2, im2_sign, n);
-      re_diff = _td._0;
-      re_diff_sign = _td._1;
-    }
-    {
-      var _td = fp_signed_add_c_data(re_diff, re_diff_sign, c_base, c_data[(c_base + n)], n);
-      new_re = _td._0;
-      new_re_sign = _td._1;
-    }
-    {
-      var _td = fp_signed_sub(sum2, sum2_sign, re2, re2_sign, n);
-      t1 = _td._0;
-      t1_sign = _td._1;
-    }
-    {
-      var _td = fp_signed_sub(t1, t1_sign, im2, im2_sign, n);
-      t2 = _td._0;
-      t2_sign = _td._1;
-    }
-    c_im_base = ((c_base + n) + 1u);
-    {
-      var _td = fp_signed_add_c_data(t2, t2_sign, c_im_base, c_data[(c_im_base + n)], n);
-      new_im = _td._0;
-      new_im_sign = _td._1;
-    }
+    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s0, s0, s2, n);
+    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s4, 0u);
+    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s1, s1, s2, n);
+    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s5, 0u);
+    _call_tmp = add_limbs_to_scratch_scratch_scratch(s0, s1, s7, n);
+    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s7, s7, s2, n);
+    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s6, 0u);
+    _call_tmp = sub_limbs_to_scratch_params_scratch(s4, s5, s9, n);
+    _call_tmp = add_limbs_to_scratch_scratch_scratch(s9, c_re, s9, n);
+    _call_tmp = sub_limbs_to_scratch_params_scratch(s6, s4, s10, n);
+    _call_tmp = sub_limbs_to_scratch_params_scratch(s10, s5, s10, n);
+    _call_tmp = add_limbs_to_scratch_scratch_scratch(s10, c_im, s10, n);
     for (var i: u32 = 0u; i < n; i++) {
-      scratch[(zr_off + i)] = new_re;
-      scratch[(zi_off + i)] = new_im;
+      scratch[(s0 + i)] = scratch[(s9 + i)];
+      scratch[(s1 + i)] = scratch[(s10 + i)];
     }
-    scratch[zr_sign_off] = new_re_sign;
-    scratch[zi_sign_off] = new_im_sign;
-    {
-      var _td = fp_mag_squared(new_re, new_re_sign, new_im, new_im_sign, n, frac_limbs);
-      mag = _td._0;
-      _mag_sign = _td._1;
-    }
+    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s0, s0, s2, n);
+    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s4, 0u);
+    _call_tmp = mul_schoolbook_to_scratch_scratch_scratch(s1, s1, s2, n);
+    _call_tmp = slice_vec_to_scratch_scratch(s2, frac_limbs, (frac_limbs + n), s5, 0u);
+    _call_tmp = add_limbs_to_scratch_scratch_scratch(s4, s5, s8, n);
     thresh_off = 5u;
-    {
-      var _td = generic_sub_limbs_params(mag, thresh_off, n);
-      _diff = _td._0;
-      borrow = _td._1;
-    }
+    borrow = sub_limbs_to_scratch_params_scratch(s8, thresh_off, s9, n);
     if ((borrow == 0u)) {
       if ((escaped_iter == max_iters)) {
         escaped_iter = iter;
