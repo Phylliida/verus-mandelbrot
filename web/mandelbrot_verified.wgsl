@@ -8,25 +8,6 @@ struct R2 {
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
-fn fp_mul_scratch_scratch(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32, frac_limbs: u32) -> R2 {
-  var product: u32;
-  var _gc: u32;
-  var truncated: u32;
-  var sign_b_flip: u32;
-  var result_sign: u32;
-  var __ret: R2;
-  {
-    var __td = generic_mul_karatsuba_d6(a_limbs, b_limbs, n);
-    product = __td._0;
-    _gc = __td._1;
-  }
-  truncated = generic_slice_vec(product, frac_limbs, (frac_limbs + n));
-  sign_b_flip = select_limb(b_sign, 1u, 0u);
-  result_sign = select_limb(a_sign, b_sign, sign_b_flip);
-  __ret = R2(truncated, result_sign);
-  return __ret;
-}
-
 fn fp_signed_add_c_data(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
   var sum: u32;
   var _carry: u32;
@@ -44,40 +25,90 @@ fn fp_signed_add_c_data(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n:
   var diff_sign: u32;
   var result_limbs: u32;
   var result_sign: u32;
-  var __ret: R2;
+  var _ret: R2;
   {
-    var __td = generic_add_limbs(a_limbs, b_limbs, n);
-    sum = __td._0;
-    _carry = __td._1;
+    var _td = generic_add_limbs(a_limbs, b_limbs, n);
+    sum = _td._0;
+    _carry = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(a_limbs, b_limbs, n);
-    a_minus_b = __td._0;
-    borrow_ab = __td._1;
+    var _td = generic_sub_limbs_params(a_limbs, b_limbs, n);
+    a_minus_b = _td._0;
+    borrow_ab = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(b_limbs, a_limbs, n);
-    b_minus_a = __td._0;
-    _borrow_ba = __td._1;
+    var _td = generic_sub_limbs_params(b_limbs, a_limbs, n);
+    b_minus_a = _td._0;
+    _borrow_ba = _td._1;
   }
   {
-    var __td = sub_borrow(a_sign, b_sign, 0u);
-    sign_diff = __td._0;
-    sign_borrow = __td._1;
+    var _td = sub_borrow(a_sign, b_sign, 0u);
+    sign_diff = _td._0;
+    sign_borrow = _td._1;
   }
   diff_zero = is_zero_limb(sign_diff);
   borrow_zero = is_zero_limb(sign_borrow);
   {
-    var __td = mul2(diff_zero, borrow_zero);
-    same_sign = __td._0;
-    _ = __td._1;
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td._0;
+    _ = _td._1;
   }
   diff_result = generic_select_vec(borrow_ab, a_minus_b, b_minus_a, n);
   diff_sign = select_limb(borrow_ab, a_sign, b_sign);
   result_limbs = generic_select_vec(same_sign, sum, diff_result, n);
   result_sign = select_limb(same_sign, a_sign, diff_sign);
-  __ret = R2(result_limbs, result_sign);
-  return __ret;
+  _ret = R2(result_limbs, result_sign);
+  return _ret;
+}
+
+fn generic_sub_limbs_params(a: u32, b: u32, n: u32) -> R2 {
+  var out_len: u32;
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: R2;
+  out_len = 0u;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(params[(a + i)], scratch[(b + i)], borrow);
+      digit = _td._0;
+      next_borrow = _td._1;
+    }
+    scratch[(out + out_len)] = digit;
+    out_len = out_len + 1u;
+    borrow = next_borrow;
+  }
+  _ret = R2(out, borrow);
+  return _ret;
+}
+
+fn fp_mul_scratch_scratch(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32, frac_limbs: u32) -> R2 {
+  var product: u32;
+  var _gc: u32;
+  var truncated: u32;
+  var sign_b_flip: u32;
+  var result_sign: u32;
+  var _ret: R2;
+  {
+    var _td = generic_mul_karatsuba_d6(a_limbs, b_limbs, n);
+    product = _td._0;
+    _gc = _td._1;
+  }
+  truncated = generic_slice_vec(product, frac_limbs, (frac_limbs + n));
+  sign_b_flip = select_limb(b_sign, 1u, 0u);
+  result_sign = select_limb(a_sign, b_sign, sign_b_flip);
+  _ret = R2(truncated, result_sign);
+  return _ret;
+}
+
+fn fp_signed_sub(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
+  var neg_b_sign: u32;
+  var _ret: R2;
+  neg_b_sign = select_limb(b_sign, 1u, 0u);
+  _ret = fp_signed_add_c_data(a_limbs, a_sign, b_limbs, neg_b_sign, n);
+  return _ret;
 }
 
 fn fp_mag_squared(re_limbs: u32, re_sign: u32, im_limbs: u32, im_sign: u32, n: u32, frac_limbs: u32) -> R2 {
@@ -87,65 +118,135 @@ fn fp_mag_squared(re_limbs: u32, re_sign: u32, im_limbs: u32, im_sign: u32, n: u
   var _im2_sign: u32;
   var mag: u32;
   var _carry: u32;
-  var __ret: R2;
+  var _ret: R2;
   {
-    var __td = fp_mul_scratch_scratch(re_limbs, re_sign, re_limbs, re_sign, n, frac_limbs);
-    re2 = __td._0;
-    _re2_sign = __td._1;
+    var _td = fp_mul_scratch_scratch(re_limbs, re_sign, re_limbs, re_sign, n, frac_limbs);
+    re2 = _td._0;
+    _re2_sign = _td._1;
   }
   {
-    var __td = fp_mul_scratch_scratch(im_limbs, im_sign, im_limbs, im_sign, n, frac_limbs);
-    im2 = __td._0;
-    _im2_sign = __td._1;
+    var _td = fp_mul_scratch_scratch(im_limbs, im_sign, im_limbs, im_sign, n, frac_limbs);
+    im2 = _td._0;
+    _im2_sign = _td._1;
   }
   {
-    var __td = generic_add_limbs(re2, im2, n);
-    mag = __td._0;
-    _carry = __td._1;
+    var _td = generic_add_limbs(re2, im2, n);
+    mag = _td._0;
+    _carry = _td._1;
   }
-  __ret = R2(mag, 0u);
-  return __ret;
+  _ret = R2(mag, 0u);
+  return _ret;
 }
 
-fn generic_sub_limbs_params(a: u32, b: u32, n: u32) -> R2 {
+fn mul2(self_val: u32, b: u32) -> R2 {
+  var b: u32;
+  var lo: u32;
+  var a_lo: u32;
+  var a_hi: u32;
+  var b_lo: u32;
+  var b_hi: u32;
+  var p0: u32;
+  var p1: u32;
+  var p2: u32;
+  var p3: u32;
+  var p0_hi: u32;
+  var mid: u32;
+  var hi: u32;
+  var _ret: R2;
+  lo = (self_val * b);
+  a_lo = (self_val & 0u);
+  a_hi = (self_val >> 16u);
+  b_lo = (b & 0u);
+  b_hi = (b >> 16u);
+  p0 = (a_lo * b_lo);
+  p1 = (a_lo * b_hi);
+  p2 = (a_hi * b_lo);
+  p3 = (a_hi * b_hi);
+  p0_hi = (p0 >> 16u);
+  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
+  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
+  _ret = R2(lo, hi);
+  return _ret;
+}
+
+fn is_zero_limb(self_val: u32) -> u32 {
+  var self: u32;
+  var _ret: u32;
+  if ((self_val == 0u)) {
+    _ret = 1u;
+  } else {
+    _ret = 0u;
+  }
+  return _ret;
+}
+
+fn generic_select_vec(cond: u32, if_zero: u32, if_nonzero: u32, n: u32) -> u32 {
   var out_len: u32;
-  var borrow: u32;
+  var i: u32;
+  var selected: u32;
+  var _ret: u32;
+  out_len = 0u;
+  for (var i: u32 = 0u; i < n; i++) {
+    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
+    scratch[(out + out_len)] = selected;
+    out_len = out_len + 1u;
+  }
+  _ret = out;
+  return _ret;
+}
+
+fn generic_add_limbs(a: u32, b: u32, n: u32) -> R2 {
+  var out_len: u32;
+  var carry: u32;
   var i: u32;
   var digit: u32;
-  var next_borrow: u32;
-  var __ret: R2;
+  var next_carry: u32;
+  var _ret: R2;
   out_len = 0u;
-  borrow = zero_val();
+  carry = zero_val();
   for (var i: u32 = 0u; i < n; i++) {
     {
-      var __td = sub_borrow(params[(a + i)], scratch[(b + i)], borrow);
-      digit = __td._0;
-      next_borrow = __td._1;
+      var _td = add3(scratch[(a + i)], scratch[(b + i)], carry);
+      digit = _td._0;
+      next_carry = _td._1;
     }
     scratch[(out + out_len)] = digit;
     out_len = out_len + 1u;
-    borrow = next_borrow;
+    carry = next_carry;
   }
-  __ret = R2(out, borrow);
-  return __ret;
+  _ret = R2(out, carry);
+  return _ret;
 }
 
-fn fp_signed_sub(a_limbs: u32, a_sign: u32, b_limbs: u32, b_sign: u32, n: u32) -> R2 {
-  var neg_b_sign: u32;
-  var __ret: R2;
-  neg_b_sign = select_limb(b_sign, 1u, 0u);
-  __ret = fp_signed_add_c_data(a_limbs, a_sign, b_limbs, neg_b_sign, n);
-  return __ret;
+fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
+  var borrow: u32;
+  var ab: u32;
+  var bw1: u32;
+  var result: u32;
+  var bw2: u32;
+  var _ret: R2;
+  ab = (self_val - b);
+  bw1 = select(0u, 1u, (self_val < b));
+  result = (ab - borrow);
+  bw2 = select(0u, 1u, (ab < borrow));
+  _ret = R2(result, (bw1 + bw2));
+  return _ret;
 }
 
 fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
-  var __ret: u32;
+  var _ret: u32;
   if ((cond == 0u)) {
-    __ret = if_zero;
+    _ret = if_zero;
   } else {
-    __ret = if_nonzero;
+    _ret = if_nonzero;
   }
-  return __ret;
+  return _ret;
+}
+
+fn zero_val() -> u32 {
+  var _ret: u32;
+  _ret = 0u;
+  return _ret;
 }
 
 fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
@@ -186,7 +287,7 @@ fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
   var c1: u32;
   var s2: u32;
   var c2: u32;
-  var __ret: R2;
+  var _ret: R2;
   if ((n <= 4u)) {
     return;
   } else {
@@ -200,46 +301,46 @@ fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var __td = generic_mul_karatsuba_d0(a_lo_p, b_lo_p, upper);
-    z0 = __td._0;
-    gz0 = __td._1;
+    var _td = generic_mul_karatsuba_d0(a_lo_p, b_lo_p, upper);
+    z0 = _td._0;
+    gz0 = _td._1;
   }
   {
-    var __td = generic_mul_karatsuba_d0(a_hi, b_hi, upper);
-    z2 = __td._0;
-    gz2 = __td._1;
+    var _td = generic_mul_karatsuba_d0(a_hi, b_hi, upper);
+    z2 = _td._0;
+    gz2 = _td._1;
   }
   {
-    var __td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = __td._0;
-    a_carry = __td._1;
+    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
+    a_sum_body = _td._0;
+    a_carry = _td._1;
   }
   {
-    var __td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = __td._0;
-    b_carry = __td._1;
+    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
+    b_sum_body = _td._0;
+    b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  __call_tmp = fn_18(a_carry);
+  _call_tmp = fn_18(a_carry);
   b_sum = b_sum_body;
-  __call_tmp = fn_19(b_carry);
+  _call_tmp = fn_19(b_carry);
   {
-    var __td = generic_mul_karatsuba_d0(a_sum, b_sum, (upper + 1u));
-    z1_full = __td._0;
-    gz1f = __td._1;
+    var _td = generic_mul_karatsuba_d0(a_sum, b_sum, (upper + 1u));
+    z1_full = _td._0;
+    gz1f = _td._1;
   }
   tgt = (2u * (upper + 1u));
   z0_p = generic_pad_to_length(z0, tgt);
   z2_p = generic_pad_to_length(z2, tgt);
   {
-    var __td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = __td._0;
-    bw1 = __td._1;
+    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
+    z1_tmp = _td._0;
+    bw1 = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = __td._0;
-    bw2 = __td._1;
+    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
+    z1 = _td._0;
+    bw2 = _td._1;
   }
   z1_shifted = generic_shift_left(z1, half);
   z2_shifted = generic_shift_left(z2, (2u * half));
@@ -248,17 +349,17 @@ fn generic_mul_karatsuba_d0(a: u32, b: u32, n: u32) -> R2 {
   z1_f = generic_pad_to_length(z1_shifted, rlen);
   z2_f = generic_pad_to_length(z2_shifted, rlen);
   {
-    var __td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = __td._0;
-    c1 = __td._1;
+    var _td = generic_add_limbs(z0_f, z1_f, rlen);
+    s1 = _td._0;
+    c1 = _td._1;
   }
   {
-    var __td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = __td._0;
-    c2 = __td._1;
+    var _td = generic_add_limbs(s1, z2_f, rlen);
+    s2 = _td._0;
+    c2 = _td._1;
   }
-  __ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
-  return __ret;
+  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  return _ret;
 }
 
 fn generic_mul_karatsuba_d1(a: u32, b: u32, n: u32) -> R2 {
@@ -299,7 +400,7 @@ fn generic_mul_karatsuba_d1(a: u32, b: u32, n: u32) -> R2 {
   var c1: u32;
   var s2: u32;
   var c2: u32;
-  var __ret: R2;
+  var _ret: R2;
   if ((n <= 4u)) {
     return;
   } else {
@@ -313,46 +414,46 @@ fn generic_mul_karatsuba_d1(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var __td = generic_mul_karatsuba_d0(a_lo_p, b_lo_p, upper);
-    z0 = __td._0;
-    gz0 = __td._1;
+    var _td = generic_mul_karatsuba_d0(a_lo_p, b_lo_p, upper);
+    z0 = _td._0;
+    gz0 = _td._1;
   }
   {
-    var __td = generic_mul_karatsuba_d0(a_hi, b_hi, upper);
-    z2 = __td._0;
-    gz2 = __td._1;
+    var _td = generic_mul_karatsuba_d0(a_hi, b_hi, upper);
+    z2 = _td._0;
+    gz2 = _td._1;
   }
   {
-    var __td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = __td._0;
-    a_carry = __td._1;
+    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
+    a_sum_body = _td._0;
+    a_carry = _td._1;
   }
   {
-    var __td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = __td._0;
-    b_carry = __td._1;
+    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
+    b_sum_body = _td._0;
+    b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  __call_tmp = fn_18(a_carry);
+  _call_tmp = fn_18(a_carry);
   b_sum = b_sum_body;
-  __call_tmp = fn_19(b_carry);
+  _call_tmp = fn_19(b_carry);
   {
-    var __td = generic_mul_karatsuba_d0(a_sum, b_sum, (upper + 1u));
-    z1_full = __td._0;
-    gz1f = __td._1;
+    var _td = generic_mul_karatsuba_d0(a_sum, b_sum, (upper + 1u));
+    z1_full = _td._0;
+    gz1f = _td._1;
   }
   tgt = (2u * (upper + 1u));
   z0_p = generic_pad_to_length(z0, tgt);
   z2_p = generic_pad_to_length(z2, tgt);
   {
-    var __td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = __td._0;
-    bw1 = __td._1;
+    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
+    z1_tmp = _td._0;
+    bw1 = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = __td._0;
-    bw2 = __td._1;
+    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
+    z1 = _td._0;
+    bw2 = _td._1;
   }
   z1_shifted = generic_shift_left(z1, half);
   z2_shifted = generic_shift_left(z2, (2u * half));
@@ -361,17 +462,17 @@ fn generic_mul_karatsuba_d1(a: u32, b: u32, n: u32) -> R2 {
   z1_f = generic_pad_to_length(z1_shifted, rlen);
   z2_f = generic_pad_to_length(z2_shifted, rlen);
   {
-    var __td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = __td._0;
-    c1 = __td._1;
+    var _td = generic_add_limbs(z0_f, z1_f, rlen);
+    s1 = _td._0;
+    c1 = _td._1;
   }
   {
-    var __td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = __td._0;
-    c2 = __td._1;
+    var _td = generic_add_limbs(s1, z2_f, rlen);
+    s2 = _td._0;
+    c2 = _td._1;
   }
-  __ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
-  return __ret;
+  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  return _ret;
 }
 
 fn generic_mul_karatsuba_d2(a: u32, b: u32, n: u32) -> R2 {
@@ -412,7 +513,7 @@ fn generic_mul_karatsuba_d2(a: u32, b: u32, n: u32) -> R2 {
   var c1: u32;
   var s2: u32;
   var c2: u32;
-  var __ret: R2;
+  var _ret: R2;
   if ((n <= 4u)) {
     return;
   } else {
@@ -426,46 +527,46 @@ fn generic_mul_karatsuba_d2(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var __td = generic_mul_karatsuba_d1(a_lo_p, b_lo_p, upper);
-    z0 = __td._0;
-    gz0 = __td._1;
+    var _td = generic_mul_karatsuba_d1(a_lo_p, b_lo_p, upper);
+    z0 = _td._0;
+    gz0 = _td._1;
   }
   {
-    var __td = generic_mul_karatsuba_d1(a_hi, b_hi, upper);
-    z2 = __td._0;
-    gz2 = __td._1;
+    var _td = generic_mul_karatsuba_d1(a_hi, b_hi, upper);
+    z2 = _td._0;
+    gz2 = _td._1;
   }
   {
-    var __td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = __td._0;
-    a_carry = __td._1;
+    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
+    a_sum_body = _td._0;
+    a_carry = _td._1;
   }
   {
-    var __td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = __td._0;
-    b_carry = __td._1;
+    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
+    b_sum_body = _td._0;
+    b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  __call_tmp = fn_18(a_carry);
+  _call_tmp = fn_18(a_carry);
   b_sum = b_sum_body;
-  __call_tmp = fn_19(b_carry);
+  _call_tmp = fn_19(b_carry);
   {
-    var __td = generic_mul_karatsuba_d1(a_sum, b_sum, (upper + 1u));
-    z1_full = __td._0;
-    gz1f = __td._1;
+    var _td = generic_mul_karatsuba_d1(a_sum, b_sum, (upper + 1u));
+    z1_full = _td._0;
+    gz1f = _td._1;
   }
   tgt = (2u * (upper + 1u));
   z0_p = generic_pad_to_length(z0, tgt);
   z2_p = generic_pad_to_length(z2, tgt);
   {
-    var __td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = __td._0;
-    bw1 = __td._1;
+    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
+    z1_tmp = _td._0;
+    bw1 = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = __td._0;
-    bw2 = __td._1;
+    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
+    z1 = _td._0;
+    bw2 = _td._1;
   }
   z1_shifted = generic_shift_left(z1, half);
   z2_shifted = generic_shift_left(z2, (2u * half));
@@ -474,17 +575,17 @@ fn generic_mul_karatsuba_d2(a: u32, b: u32, n: u32) -> R2 {
   z1_f = generic_pad_to_length(z1_shifted, rlen);
   z2_f = generic_pad_to_length(z2_shifted, rlen);
   {
-    var __td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = __td._0;
-    c1 = __td._1;
+    var _td = generic_add_limbs(z0_f, z1_f, rlen);
+    s1 = _td._0;
+    c1 = _td._1;
   }
   {
-    var __td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = __td._0;
-    c2 = __td._1;
+    var _td = generic_add_limbs(s1, z2_f, rlen);
+    s2 = _td._0;
+    c2 = _td._1;
   }
-  __ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
-  return __ret;
+  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  return _ret;
 }
 
 fn generic_mul_karatsuba_d3(a: u32, b: u32, n: u32) -> R2 {
@@ -525,7 +626,7 @@ fn generic_mul_karatsuba_d3(a: u32, b: u32, n: u32) -> R2 {
   var c1: u32;
   var s2: u32;
   var c2: u32;
-  var __ret: R2;
+  var _ret: R2;
   if ((n <= 4u)) {
     return;
   } else {
@@ -539,46 +640,46 @@ fn generic_mul_karatsuba_d3(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var __td = generic_mul_karatsuba_d2(a_lo_p, b_lo_p, upper);
-    z0 = __td._0;
-    gz0 = __td._1;
+    var _td = generic_mul_karatsuba_d2(a_lo_p, b_lo_p, upper);
+    z0 = _td._0;
+    gz0 = _td._1;
   }
   {
-    var __td = generic_mul_karatsuba_d2(a_hi, b_hi, upper);
-    z2 = __td._0;
-    gz2 = __td._1;
+    var _td = generic_mul_karatsuba_d2(a_hi, b_hi, upper);
+    z2 = _td._0;
+    gz2 = _td._1;
   }
   {
-    var __td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = __td._0;
-    a_carry = __td._1;
+    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
+    a_sum_body = _td._0;
+    a_carry = _td._1;
   }
   {
-    var __td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = __td._0;
-    b_carry = __td._1;
+    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
+    b_sum_body = _td._0;
+    b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  __call_tmp = fn_18(a_carry);
+  _call_tmp = fn_18(a_carry);
   b_sum = b_sum_body;
-  __call_tmp = fn_19(b_carry);
+  _call_tmp = fn_19(b_carry);
   {
-    var __td = generic_mul_karatsuba_d2(a_sum, b_sum, (upper + 1u));
-    z1_full = __td._0;
-    gz1f = __td._1;
+    var _td = generic_mul_karatsuba_d2(a_sum, b_sum, (upper + 1u));
+    z1_full = _td._0;
+    gz1f = _td._1;
   }
   tgt = (2u * (upper + 1u));
   z0_p = generic_pad_to_length(z0, tgt);
   z2_p = generic_pad_to_length(z2, tgt);
   {
-    var __td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = __td._0;
-    bw1 = __td._1;
+    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
+    z1_tmp = _td._0;
+    bw1 = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = __td._0;
-    bw2 = __td._1;
+    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
+    z1 = _td._0;
+    bw2 = _td._1;
   }
   z1_shifted = generic_shift_left(z1, half);
   z2_shifted = generic_shift_left(z2, (2u * half));
@@ -587,17 +688,17 @@ fn generic_mul_karatsuba_d3(a: u32, b: u32, n: u32) -> R2 {
   z1_f = generic_pad_to_length(z1_shifted, rlen);
   z2_f = generic_pad_to_length(z2_shifted, rlen);
   {
-    var __td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = __td._0;
-    c1 = __td._1;
+    var _td = generic_add_limbs(z0_f, z1_f, rlen);
+    s1 = _td._0;
+    c1 = _td._1;
   }
   {
-    var __td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = __td._0;
-    c2 = __td._1;
+    var _td = generic_add_limbs(s1, z2_f, rlen);
+    s2 = _td._0;
+    c2 = _td._1;
   }
-  __ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
-  return __ret;
+  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  return _ret;
 }
 
 fn generic_mul_karatsuba_d4(a: u32, b: u32, n: u32) -> R2 {
@@ -638,7 +739,7 @@ fn generic_mul_karatsuba_d4(a: u32, b: u32, n: u32) -> R2 {
   var c1: u32;
   var s2: u32;
   var c2: u32;
-  var __ret: R2;
+  var _ret: R2;
   if ((n <= 4u)) {
     return;
   } else {
@@ -652,46 +753,46 @@ fn generic_mul_karatsuba_d4(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var __td = generic_mul_karatsuba_d3(a_lo_p, b_lo_p, upper);
-    z0 = __td._0;
-    gz0 = __td._1;
+    var _td = generic_mul_karatsuba_d3(a_lo_p, b_lo_p, upper);
+    z0 = _td._0;
+    gz0 = _td._1;
   }
   {
-    var __td = generic_mul_karatsuba_d3(a_hi, b_hi, upper);
-    z2 = __td._0;
-    gz2 = __td._1;
+    var _td = generic_mul_karatsuba_d3(a_hi, b_hi, upper);
+    z2 = _td._0;
+    gz2 = _td._1;
   }
   {
-    var __td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = __td._0;
-    a_carry = __td._1;
+    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
+    a_sum_body = _td._0;
+    a_carry = _td._1;
   }
   {
-    var __td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = __td._0;
-    b_carry = __td._1;
+    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
+    b_sum_body = _td._0;
+    b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  __call_tmp = fn_18(a_carry);
+  _call_tmp = fn_18(a_carry);
   b_sum = b_sum_body;
-  __call_tmp = fn_19(b_carry);
+  _call_tmp = fn_19(b_carry);
   {
-    var __td = generic_mul_karatsuba_d3(a_sum, b_sum, (upper + 1u));
-    z1_full = __td._0;
-    gz1f = __td._1;
+    var _td = generic_mul_karatsuba_d3(a_sum, b_sum, (upper + 1u));
+    z1_full = _td._0;
+    gz1f = _td._1;
   }
   tgt = (2u * (upper + 1u));
   z0_p = generic_pad_to_length(z0, tgt);
   z2_p = generic_pad_to_length(z2, tgt);
   {
-    var __td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = __td._0;
-    bw1 = __td._1;
+    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
+    z1_tmp = _td._0;
+    bw1 = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = __td._0;
-    bw2 = __td._1;
+    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
+    z1 = _td._0;
+    bw2 = _td._1;
   }
   z1_shifted = generic_shift_left(z1, half);
   z2_shifted = generic_shift_left(z2, (2u * half));
@@ -700,17 +801,17 @@ fn generic_mul_karatsuba_d4(a: u32, b: u32, n: u32) -> R2 {
   z1_f = generic_pad_to_length(z1_shifted, rlen);
   z2_f = generic_pad_to_length(z2_shifted, rlen);
   {
-    var __td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = __td._0;
-    c1 = __td._1;
+    var _td = generic_add_limbs(z0_f, z1_f, rlen);
+    s1 = _td._0;
+    c1 = _td._1;
   }
   {
-    var __td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = __td._0;
-    c2 = __td._1;
+    var _td = generic_add_limbs(s1, z2_f, rlen);
+    s2 = _td._0;
+    c2 = _td._1;
   }
-  __ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
-  return __ret;
+  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  return _ret;
 }
 
 fn generic_mul_karatsuba_d5(a: u32, b: u32, n: u32) -> R2 {
@@ -751,7 +852,7 @@ fn generic_mul_karatsuba_d5(a: u32, b: u32, n: u32) -> R2 {
   var c1: u32;
   var s2: u32;
   var c2: u32;
-  var __ret: R2;
+  var _ret: R2;
   if ((n <= 4u)) {
     return;
   } else {
@@ -765,46 +866,46 @@ fn generic_mul_karatsuba_d5(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var __td = generic_mul_karatsuba_d4(a_lo_p, b_lo_p, upper);
-    z0 = __td._0;
-    gz0 = __td._1;
+    var _td = generic_mul_karatsuba_d4(a_lo_p, b_lo_p, upper);
+    z0 = _td._0;
+    gz0 = _td._1;
   }
   {
-    var __td = generic_mul_karatsuba_d4(a_hi, b_hi, upper);
-    z2 = __td._0;
-    gz2 = __td._1;
+    var _td = generic_mul_karatsuba_d4(a_hi, b_hi, upper);
+    z2 = _td._0;
+    gz2 = _td._1;
   }
   {
-    var __td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = __td._0;
-    a_carry = __td._1;
+    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
+    a_sum_body = _td._0;
+    a_carry = _td._1;
   }
   {
-    var __td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = __td._0;
-    b_carry = __td._1;
+    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
+    b_sum_body = _td._0;
+    b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  __call_tmp = fn_18(a_carry);
+  _call_tmp = fn_18(a_carry);
   b_sum = b_sum_body;
-  __call_tmp = fn_19(b_carry);
+  _call_tmp = fn_19(b_carry);
   {
-    var __td = generic_mul_karatsuba_d4(a_sum, b_sum, (upper + 1u));
-    z1_full = __td._0;
-    gz1f = __td._1;
+    var _td = generic_mul_karatsuba_d4(a_sum, b_sum, (upper + 1u));
+    z1_full = _td._0;
+    gz1f = _td._1;
   }
   tgt = (2u * (upper + 1u));
   z0_p = generic_pad_to_length(z0, tgt);
   z2_p = generic_pad_to_length(z2, tgt);
   {
-    var __td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = __td._0;
-    bw1 = __td._1;
+    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
+    z1_tmp = _td._0;
+    bw1 = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = __td._0;
-    bw2 = __td._1;
+    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
+    z1 = _td._0;
+    bw2 = _td._1;
   }
   z1_shifted = generic_shift_left(z1, half);
   z2_shifted = generic_shift_left(z2, (2u * half));
@@ -813,17 +914,17 @@ fn generic_mul_karatsuba_d5(a: u32, b: u32, n: u32) -> R2 {
   z1_f = generic_pad_to_length(z1_shifted, rlen);
   z2_f = generic_pad_to_length(z2_shifted, rlen);
   {
-    var __td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = __td._0;
-    c1 = __td._1;
+    var _td = generic_add_limbs(z0_f, z1_f, rlen);
+    s1 = _td._0;
+    c1 = _td._1;
   }
   {
-    var __td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = __td._0;
-    c2 = __td._1;
+    var _td = generic_add_limbs(s1, z2_f, rlen);
+    s2 = _td._0;
+    c2 = _td._1;
   }
-  __ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
-  return __ret;
+  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  return _ret;
 }
 
 fn generic_mul_karatsuba_d6(a: u32, b: u32, n: u32) -> R2 {
@@ -864,7 +965,7 @@ fn generic_mul_karatsuba_d6(a: u32, b: u32, n: u32) -> R2 {
   var c1: u32;
   var s2: u32;
   var c2: u32;
-  var __ret: R2;
+  var _ret: R2;
   if ((n <= 4u)) {
     return;
   } else {
@@ -878,46 +979,46 @@ fn generic_mul_karatsuba_d6(a: u32, b: u32, n: u32) -> R2 {
   a_lo_p = generic_pad_to_length(a_lo, upper);
   b_lo_p = generic_pad_to_length(b_lo, upper);
   {
-    var __td = generic_mul_karatsuba_d5(a_lo_p, b_lo_p, upper);
-    z0 = __td._0;
-    gz0 = __td._1;
+    var _td = generic_mul_karatsuba_d5(a_lo_p, b_lo_p, upper);
+    z0 = _td._0;
+    gz0 = _td._1;
   }
   {
-    var __td = generic_mul_karatsuba_d5(a_hi, b_hi, upper);
-    z2 = __td._0;
-    gz2 = __td._1;
+    var _td = generic_mul_karatsuba_d5(a_hi, b_hi, upper);
+    z2 = _td._0;
+    gz2 = _td._1;
   }
   {
-    var __td = generic_add_limbs(a_lo_p, a_hi, upper);
-    a_sum_body = __td._0;
-    a_carry = __td._1;
+    var _td = generic_add_limbs(a_lo_p, a_hi, upper);
+    a_sum_body = _td._0;
+    a_carry = _td._1;
   }
   {
-    var __td = generic_add_limbs(b_lo_p, b_hi, upper);
-    b_sum_body = __td._0;
-    b_carry = __td._1;
+    var _td = generic_add_limbs(b_lo_p, b_hi, upper);
+    b_sum_body = _td._0;
+    b_carry = _td._1;
   }
   a_sum = a_sum_body;
-  __call_tmp = fn_18(a_carry);
+  _call_tmp = fn_18(a_carry);
   b_sum = b_sum_body;
-  __call_tmp = fn_19(b_carry);
+  _call_tmp = fn_19(b_carry);
   {
-    var __td = generic_mul_karatsuba_d5(a_sum, b_sum, (upper + 1u));
-    z1_full = __td._0;
-    gz1f = __td._1;
+    var _td = generic_mul_karatsuba_d5(a_sum, b_sum, (upper + 1u));
+    z1_full = _td._0;
+    gz1f = _td._1;
   }
   tgt = (2u * (upper + 1u));
   z0_p = generic_pad_to_length(z0, tgt);
   z2_p = generic_pad_to_length(z2, tgt);
   {
-    var __td = generic_sub_limbs_params(z1_full, z0_p, tgt);
-    z1_tmp = __td._0;
-    bw1 = __td._1;
+    var _td = generic_sub_limbs_params(z1_full, z0_p, tgt);
+    z1_tmp = _td._0;
+    bw1 = _td._1;
   }
   {
-    var __td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
-    z1 = __td._0;
-    bw2 = __td._1;
+    var _td = generic_sub_limbs_params(z1_tmp, z2_p, tgt);
+    z1 = _td._0;
+    bw2 = _td._1;
   }
   z1_shifted = generic_shift_left(z1, half);
   z2_shifted = generic_shift_left(z2, (2u * half));
@@ -926,137 +1027,58 @@ fn generic_mul_karatsuba_d6(a: u32, b: u32, n: u32) -> R2 {
   z1_f = generic_pad_to_length(z1_shifted, rlen);
   z2_f = generic_pad_to_length(z2_shifted, rlen);
   {
-    var __td = generic_add_limbs(z0_f, z1_f, rlen);
-    s1 = __td._0;
-    c1 = __td._1;
+    var _td = generic_add_limbs(z0_f, z1_f, rlen);
+    s1 = _td._0;
+    c1 = _td._1;
   }
   {
-    var __td = generic_add_limbs(s1, z2_f, rlen);
-    s2 = __td._0;
-    c2 = __td._1;
+    var _td = generic_add_limbs(s1, z2_f, rlen);
+    s2 = _td._0;
+    c2 = _td._1;
   }
-  __ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
-  return __ret;
+  _ret = R2(s2, fn_21((fn_20(c1) + fn_20(c2))));
+  return _ret;
 }
 
 fn generic_slice_vec(a: u32, start: u32, end: u32) -> u32 {
   var out_len: u32;
   var i: u32;
-  var __ret: u32;
+  var _ret: u32;
   out_len = 0u;
   for (var i: u32 = start; i < end; i++) {
     scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
     out_len = out_len + 1u;
   }
-  __ret = out;
-  return __ret;
+  _ret = out;
+  return _ret;
 }
 
-fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
-  var borrow: u32;
-  var ab: u32;
-  var bw1: u32;
-  var result: u32;
-  var bw2: u32;
-  var __ret: R2;
-  ab = (self_val - b);
-  bw1 = select(0u, 1u, (self_val < b));
-  result = (ab - borrow);
-  bw2 = select(0u, 1u, (ab < borrow));
-  __ret = R2(result, (bw1 + bw2));
-  return __ret;
-}
-
-fn mul2(self_val: u32, b: u32) -> R2 {
-  var b: u32;
-  var lo: u32;
-  var a_lo: u32;
-  var a_hi: u32;
-  var b_lo: u32;
-  var b_hi: u32;
-  var p0: u32;
-  var p1: u32;
-  var p2: u32;
-  var p3: u32;
-  var p0_hi: u32;
-  var mid: u32;
-  var hi: u32;
-  var __ret: R2;
-  lo = (self_val * b);
-  a_lo = (self_val & 0u);
-  a_hi = (self_val >> 16u);
-  b_lo = (b & 0u);
-  b_hi = (b >> 16u);
-  p0 = (a_lo * b_lo);
-  p1 = (a_lo * b_hi);
-  p2 = (a_hi * b_lo);
-  p3 = (a_hi * b_hi);
-  p0_hi = (p0 >> 16u);
-  mid = ((p0_hi + (p1 & 0u)) + (p2 & 0u));
-  hi = (((p3 + (p1 >> 16u)) + (p2 >> 16u)) + (mid >> 16u));
-  __ret = R2(lo, hi);
-  return __ret;
-}
-
-fn generic_select_vec(cond: u32, if_zero: u32, if_nonzero: u32, n: u32) -> u32 {
-  var out_len: u32;
-  var i: u32;
-  var selected: u32;
-  var __ret: u32;
-  out_len = 0u;
-  for (var i: u32 = 0u; i < n; i++) {
-    selected = select_limb(cond, clone_limb(scratch[(if_zero + i)]), clone_limb(scratch[(if_nonzero + i)]));
-    scratch[(out + out_len)] = selected;
-    out_len = out_len + 1u;
-  }
-  __ret = out;
-  return __ret;
-}
-
-fn generic_add_limbs(a: u32, b: u32, n: u32) -> R2 {
-  var out_len: u32;
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var __ret: R2;
-  out_len = 0u;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var __td = add3(scratch[(a + i)], scratch[(b + i)], carry);
-      digit = __td._0;
-      next_carry = __td._1;
-    }
-    scratch[(out + out_len)] = digit;
-    out_len = out_len + 1u;
-    carry = next_carry;
-  }
-  __ret = R2(out, carry);
-  return __ret;
-}
-
-fn is_zero_limb(self_val: u32) -> u32 {
+fn clone_limb(self_val: u32) -> u32 {
   var self: u32;
-  var __ret: u32;
-  if ((self_val == 0u)) {
-    __ret = 1u;
-  } else {
-    __ret = 0u;
-  }
-  return __ret;
+  var _ret: u32;
+  _ret = self_val;
+  return _ret;
 }
 
-fn zero_val() -> u32 {
-  var __ret: u32;
-  __ret = 0u;
-  return __ret;
+fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
+  var carry: u32;
+  var ab: u32;
+  var c1: u32;
+  var abc: u32;
+  var c2: u32;
+  var _ret: R2;
+  ab = (self_val + b);
+  c1 = select(0u, 1u, (ab < self_val));
+  abc = (ab + carry);
+  c2 = select(0u, 1u, (abc < ab));
+  _ret = R2(abc, (c1 + c2));
+  return _ret;
 }
 
 fn generic_pad_to_length(a: u32, target: u32) -> u32 {
   var out_len: u32;
   var i: u32;
-  var __ret: u32;
+  var _ret: u32;
   out_len = 0u;
   for (var i: u32 = 0u; i < fn_18(a); i++) {
     scratch[(out + out_len)] = clone_limb(scratch[(a + i)]);
@@ -1066,15 +1088,15 @@ fn generic_pad_to_length(a: u32, target: u32) -> u32 {
     scratch[(out + out_len)] = zero_val();
     out_len = out_len + 1u;
   }
-  __ret = out;
-  return __ret;
+  _ret = out;
+  return _ret;
 }
 
 fn generic_shift_left(a: u32, offset: u32) -> u32 {
   var out_len: u32;
   var i: u32;
   var k: u32;
-  var __ret: u32;
+  var _ret: u32;
   out_len = 0u;
   for (var i: u32 = 0u; i < offset; i++) {
     scratch[(out + out_len)] = zero_val();
@@ -1084,30 +1106,8 @@ fn generic_shift_left(a: u32, offset: u32) -> u32 {
     scratch[(out + out_len)] = clone_limb(scratch[(a + k)]);
     out_len = out_len + 1u;
   }
-  __ret = out;
-  return __ret;
-}
-
-fn clone_limb(self_val: u32) -> u32 {
-  var self: u32;
-  var __ret: u32;
-  __ret = self_val;
-  return __ret;
-}
-
-fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
-  var carry: u32;
-  var ab: u32;
-  var c1: u32;
-  var abc: u32;
-  var c2: u32;
-  var __ret: R2;
-  ab = (self_val + b);
-  c1 = select(0u, 1u, (ab < self_val));
-  abc = (ab + carry);
-  c2 = select(0u, 1u, (abc < ab));
-  __ret = R2(abc, (c1 + c2));
-  return __ret;
+  _ret = out;
+  return _ret;
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -1188,50 +1188,50 @@ fn mandelbrot_fixedpoint(
   escaped_iter = max_iters;
   for (var iter: u32 = 0u; iter < max_iters; iter++) {
     {
-      var __td = fp_mul_scratch_scratch(zr_off, scratch[zr_sign_off], zr_off, scratch[zr_sign_off], n, frac_limbs);
-      re2 = __td._0;
-      re2_sign = __td._1;
+      var _td = fp_mul_scratch_scratch(zr_off, scratch[zr_sign_off], zr_off, scratch[zr_sign_off], n, frac_limbs);
+      re2 = _td._0;
+      re2_sign = _td._1;
     }
     {
-      var __td = fp_mul_scratch_scratch(zi_off, scratch[zi_sign_off], zi_off, scratch[zi_sign_off], n, frac_limbs);
-      im2 = __td._0;
-      im2_sign = __td._1;
+      var _td = fp_mul_scratch_scratch(zi_off, scratch[zi_sign_off], zi_off, scratch[zi_sign_off], n, frac_limbs);
+      im2 = _td._0;
+      im2_sign = _td._1;
     }
     {
-      var __td = fp_signed_add_c_data(zr_off, scratch[zr_sign_off], zi_off, scratch[zi_sign_off], n);
-      re_plus_im = __td._0;
-      rpi_sign = __td._1;
+      var _td = fp_signed_add_c_data(zr_off, scratch[zr_sign_off], zi_off, scratch[zi_sign_off], n);
+      re_plus_im = _td._0;
+      rpi_sign = _td._1;
     }
     {
-      var __td = fp_mul_scratch_scratch(re_plus_im, rpi_sign, re_plus_im, rpi_sign, n, frac_limbs);
-      sum2 = __td._0;
-      sum2_sign = __td._1;
+      var _td = fp_mul_scratch_scratch(re_plus_im, rpi_sign, re_plus_im, rpi_sign, n, frac_limbs);
+      sum2 = _td._0;
+      sum2_sign = _td._1;
     }
     {
-      var __td = fp_signed_sub(re2, re2_sign, im2, im2_sign, n);
-      re_diff = __td._0;
-      re_diff_sign = __td._1;
+      var _td = fp_signed_sub(re2, re2_sign, im2, im2_sign, n);
+      re_diff = _td._0;
+      re_diff_sign = _td._1;
     }
     {
-      var __td = fp_signed_add_c_data(re_diff, re_diff_sign, c_base, c_data[(c_base + n)], n);
-      new_re = __td._0;
-      new_re_sign = __td._1;
+      var _td = fp_signed_add_c_data(re_diff, re_diff_sign, c_base, c_data[(c_base + n)], n);
+      new_re = _td._0;
+      new_re_sign = _td._1;
     }
     {
-      var __td = fp_signed_sub(sum2, sum2_sign, re2, re2_sign, n);
-      t1 = __td._0;
-      t1_sign = __td._1;
+      var _td = fp_signed_sub(sum2, sum2_sign, re2, re2_sign, n);
+      t1 = _td._0;
+      t1_sign = _td._1;
     }
     {
-      var __td = fp_signed_sub(t1, t1_sign, im2, im2_sign, n);
-      t2 = __td._0;
-      t2_sign = __td._1;
+      var _td = fp_signed_sub(t1, t1_sign, im2, im2_sign, n);
+      t2 = _td._0;
+      t2_sign = _td._1;
     }
     c_im_base = ((c_base + n) + 1u);
     {
-      var __td = fp_signed_add_c_data(t2, t2_sign, c_im_base, c_data[(c_im_base + n)], n);
-      new_im = __td._0;
-      new_im_sign = __td._1;
+      var _td = fp_signed_add_c_data(t2, t2_sign, c_im_base, c_data[(c_im_base + n)], n);
+      new_im = _td._0;
+      new_im_sign = _td._1;
     }
     for (var i: u32 = 0u; i < n; i++) {
       scratch[(zr_off + i)] = new_re;
@@ -1240,15 +1240,15 @@ fn mandelbrot_fixedpoint(
     scratch[zr_sign_off] = new_re_sign;
     scratch[zi_sign_off] = new_im_sign;
     {
-      var __td = fp_mag_squared(new_re, new_re_sign, new_im, new_im_sign, n, frac_limbs);
-      mag = __td._0;
-      _mag_sign = __td._1;
+      var _td = fp_mag_squared(new_re, new_re_sign, new_im, new_im_sign, n, frac_limbs);
+      mag = _td._0;
+      _mag_sign = _td._1;
     }
     thresh_off = 5u;
     {
-      var __td = generic_sub_limbs_params(mag, thresh_off, n);
-      _diff = __td._0;
-      borrow = __td._1;
+      var _td = generic_sub_limbs_params(mag, thresh_off, n);
+      _diff = _td._0;
+      borrow = _td._1;
     }
     if ((borrow == 0u)) {
       if ((escaped_iter == max_iters)) {
