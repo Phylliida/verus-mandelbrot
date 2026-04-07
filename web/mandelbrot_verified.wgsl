@@ -4,7 +4,6 @@ struct R2 {
 }
 
 @group(0) @binding(0) var<storage, read> c_data: array<u32>;
-@group(0) @binding(1) var<storage, read_write> scratch: array<u32>;
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
@@ -70,6 +69,25 @@ fn sub_limbs_to___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, b
   return _ret;
 }
 
+fn signed_sub_to___local_4___local_4___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, tmp1: ptr<function, array<u32, 4>>, tmp2: ptr<function, array<u32, 4>>, n: u32) -> u32 {
+  var neg_b_sign: u32;
+  var _ret: u32;
+  neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = signed_add_to___local_4___local_4___local_4___local_4___local_4(a, a_sign, b, neg_b_sign, out, tmp1, tmp2, n);
+  return _ret;
+}
+
+fn signed_mul_to___local_4___local_4___local_4___local_8(a: ptr<function, array<u32, 4>>, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, prod: ptr<function, array<u32, 8>>, n: u32, frac_limbs: u32) -> u32 {
+  var _call_tmp: u32;
+  var sign_b_flipped: u32;
+  var _ret: u32;
+  _call_tmp = mul_schoolbook_to___local_4___local_4___local_8(a, b, prod, n);
+  _call_tmp = slice_vec_to___local_8___local_4(prod, frac_limbs, (frac_limbs + n), out, 0u);
+  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
+  return _ret;
+}
+
 fn add_limbs_to___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, b: ptr<function, array<u32, 4>>, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
   var carry: u32;
   var i: u32;
@@ -90,37 +108,6 @@ fn add_limbs_to___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, b
   return _ret;
 }
 
-fn signed_sub_to___local_4___local_4___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, tmp1: ptr<function, array<u32, 4>>, tmp2: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var neg_b_sign: u32;
-  var _ret: u32;
-  neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = signed_add_to___local_4___local_4___local_4___local_4___local_4(a, a_sign, b, neg_b_sign, out, tmp1, tmp2, n);
-  return _ret;
-}
-
-fn signed_mul_to___local_4___local_4___local_4___local_8(a: ptr<function, array<u32, 4>>, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, prod: ptr<function, array<u32, 8>>, n: u32, frac_limbs: u32) -> u32 {
-  var _call_tmp: u32;
-  var sign_b_flipped: u32;
-  var _ret: u32;
-  _call_tmp = mul_schoolbook_to___local_4___local_4___local_8(a, b, prod, n);
-  _call_tmp = slice_vec_to___local_8___local_4(prod, frac_limbs, (frac_limbs + n), out, 0u);
-  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
-  return _ret;
-}
-
-fn zero_val() -> u32 {
-  var _ret: u32;
-  _ret = 0u;
-  return _ret;
-}
-
-fn clone_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  _ret = self_val;
-  return _ret;
-}
-
 fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
   var _ret: u32;
   if ((cond == 0u)) {
@@ -128,6 +115,12 @@ fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
   } else {
     _ret = if_nonzero;
   }
+  return _ret;
+}
+
+fn zero_val() -> u32 {
+  var _ret: u32;
+  _ret = 0u;
   return _ret;
 }
 
@@ -185,17 +178,9 @@ fn mul2(self_val: u32, b: u32) -> R2 {
   return _ret;
 }
 
-fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
-  var ab: u32;
-  var c1: u32;
-  var abc: u32;
-  var c2: u32;
-  var _ret: R2;
-  ab = (self_val + b);
-  c1 = select(0u, 1u, (ab < self_val));
-  abc = (ab + carry);
-  c2 = select(0u, 1u, (abc < ab));
-  _ret = R2(abc, (c1 + c2));
+fn clone_limb(self_val: u32) -> u32 {
+  var _ret: u32;
+  _ret = self_val;
   return _ret;
 }
 
@@ -261,6 +246,20 @@ fn slice_vec_to___local_8___local_4(a: ptr<function, array<u32, 8>>, start: u32,
     si = (si + 1u);
     di = (di + 1u);
   }
+  return _ret;
+}
+
+fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
+  var ab: u32;
+  var c1: u32;
+  var abc: u32;
+  var c2: u32;
+  var _ret: R2;
+  ab = (self_val + b);
+  c1 = select(0u, 1u, (ab < self_val));
+  abc = (ab + carry);
+  c2 = select(0u, 1u, (abc < ab));
+  _ret = R2(abc, (c1 + c2));
   return _ret;
 }
 
