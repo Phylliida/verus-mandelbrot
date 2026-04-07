@@ -8,58 +8,7 @@ var<workgroup> wg_mem: array<u32, 8192>;
 @group(0) @binding(2) var<storage, read_write> iter_counts: array<u32>;
 @group(0) @binding(3) var<storage, read> params: array<u32>;
 
-fn sub_limbs_to___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, b: ptr<function, array<u32, 4>>, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
-  var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow((*a)[i], (*b)[i], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    (*out)[i] = digit;
-    borrow = next_borrow;
-  }
-  _ret = borrow;
-  return _ret;
-}
-
-fn add_limbs_to___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, b: ptr<function, array<u32, 4>>, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3((*a)[i], (*b)[i], carry);
-      digit = _td.f0;
-      next_carry = _td.f1;
-    }
-    (*out)[i] = digit;
-    carry = next_carry;
-  }
-  _ret = carry;
-  return _ret;
-}
-
-fn signed_mul_to___local_4___local_4___local_4___local_8(a: ptr<function, array<u32, 4>>, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, prod: ptr<function, array<u32, 8>>, n: u32, frac_limbs: u32) -> u32 {
-  var _call_tmp: u32;
-  var sign_b_flipped: u32;
-  var _ret: u32;
-  _call_tmp = mul_schoolbook_to___local_4___local_4___local_8(a, b, prod, n);
-  _call_tmp = slice_vec_to___local_8___local_4(prod, frac_limbs, (frac_limbs + n), out, 0u);
-  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
-  return _ret;
-}
-
-fn signed_add_to___local_4___local_4___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, tmp1: ptr<function, array<u32, 4>>, tmp2: ptr<function, array<u32, 4>>, n: u32) -> u32 {
+fn signed_add_to___local_4___local_4___local_4___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: ptr<function, array<u32, 4>>, out_off: u32, tmp1: ptr<function, array<u32, 4>>, tmp1_off: u32, tmp2: ptr<function, array<u32, 4>>, tmp2_off: u32, n: u32) -> u32 {
   var _sum_carry: u32;
   var borrow_ab: u32;
   var _borrow_ba: u32;
@@ -68,16 +17,16 @@ fn signed_add_to___local_4___local_4___local_4___local_4___local_4(a: ptr<functi
   var diff_zero: u32;
   var borrow_zero: u32;
   var same_sign: u32;
-  var _unused_17: u32;
+  var _unused_20: u32;
   var diff_sign: u32;
   var result_sign: u32;
   var i: u32;
   var diff_val: u32;
   var final_val: u32;
   var _ret: u32;
-  _sum_carry = add_limbs_to___local_4___local_4___local_4(a, b, tmp1, n);
-  borrow_ab = sub_limbs_to___local_4___local_4___local_4(a, b, tmp2, n);
-  _borrow_ba = sub_limbs_to___local_4___local_4___local_4(b, a, out, n);
+  _sum_carry = add_limbs_to___local_4(a, b, tmp1, tmp1_off, n);
+  borrow_ab = sub_limbs_to___local_4(a, b, tmp2, tmp2_off, n);
+  _borrow_ba = sub_limbs_to___local_4(b, a, out, out_off, n);
   {
     var _td = sub_borrow(a_sign, b_sign, zero_val());
     sign_diff = _td.f0;
@@ -88,24 +37,154 @@ fn signed_add_to___local_4___local_4___local_4___local_4___local_4(a: ptr<functi
   {
     var _td = mul2(diff_zero, borrow_zero);
     same_sign = _td.f0;
-    _unused_17 = _td.f1;
+    _unused_20 = _td.f1;
   }
   diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
   result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
   for (var i: u32 = 0u; i < n; i++) {
-    diff_val = select_limb(borrow_ab, clone_limb((*tmp2)[i]), clone_limb((*out)[i]));
-    final_val = select_limb(same_sign, diff_val, clone_limb((*tmp1)[i]));
-    (*out)[i] = final_val;
+    diff_val = select_limb(borrow_ab, clone_limb((*tmp2)[(tmp2_off + i)]), clone_limb((*out)[(out_off + i)]));
+    final_val = select_limb(same_sign, diff_val, clone_limb((*tmp1)[(tmp1_off + i)]));
+    (*out)[(out_off + i)] = final_val;
   }
   _ret = result_sign;
   return _ret;
 }
 
-fn signed_sub_to___local_4___local_4___local_4___local_4___local_4(a: ptr<function, array<u32, 4>>, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, tmp1: ptr<function, array<u32, 4>>, tmp2: ptr<function, array<u32, 4>>, n: u32) -> u32 {
+fn signed_mul_to_buf___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, buf: ptr<function, array<u32, 4>>, out_off: u32, prod_off: u32, n: u32, frac_limbs: u32, out: ptr<function, array<u32, 4>>) -> u32 {
+  var _call_tmp: u32;
+  var i: u32;
+  var val: u32;
+  var sign_b_flipped: u32;
+  var _ret: u32;
+  _call_tmp = mul_schoolbook_to___local_4(a, b, buf, prod_off, n);
+  for (var i: u32 = 0u; i < n; i++) {
+    val = clone_limb((*buf)[((prod_off + frac_limbs) + i)]);
+    (*buf)[(out_off + i)] = val;
+  }
+  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
+  return _ret;
+}
+
+fn signed_sub_to_buf___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, buf: ptr<function, array<u32, 4>>, out_off: u32, tmp1_off: u32, tmp2_off: u32, n: u32, out: ptr<function, array<u32, 4>>) -> u32 {
   var neg_b_sign: u32;
   var _ret: u32;
   neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = signed_add_to___local_4___local_4___local_4___local_4___local_4(a, a_sign, b, neg_b_sign, out, tmp1, tmp2, n);
+  _ret = signed_add_to_buf___local_4(a, a_sign, b, neg_b_sign, buf, out_off, tmp1_off, tmp2_off, n);
+  return _ret;
+}
+
+fn add_limbs_to___local_4___local_4___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, out_off: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(a, b, carry);
+      digit = _td.f0;
+      next_carry = _td.f1;
+    }
+    (*out)[(out_off + i)] = digit;
+    carry = next_carry;
+  }
+  _ret = carry;
+  return _ret;
+}
+
+fn generic_zero_vec_scratch(n: u32, out: u32) -> u32 {
+  var out_len: u32;
+  var i: u32;
+  var _ret: u32;
+  out_len = 0u;
+  for (var i: u32 = 0u; i < n; i++) {
+    scratch[(out + out_len)] = zero_val();
+    out_len = out_len + 1u;
+  }
+  _ret = out;
+  return _ret;
+}
+
+fn sub_limbs_to___local_4_params___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, out_off: u32, n: u32) -> u32 {
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: u32;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(a, b, borrow);
+      digit = _td.f0;
+      next_borrow = _td.f1;
+    }
+    (*out)[(out_off + i)] = digit;
+    borrow = next_borrow;
+  }
+  _ret = borrow;
+  return _ret;
+}
+
+fn signed_sub_to___local_4___local_4___local_4___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: ptr<function, array<u32, 4>>, out_off: u32, tmp1: ptr<function, array<u32, 4>>, tmp1_off: u32, tmp2: ptr<function, array<u32, 4>>, tmp2_off: u32, n: u32) -> u32 {
+  var neg_b_sign: u32;
+  var _ret: u32;
+  neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = signed_add_to___local_4___local_4___local_4(a, a_sign, b, neg_b_sign, out, out_off, tmp1, tmp1_off, tmp2, tmp2_off, n);
+  return _ret;
+}
+
+fn signed_mul_to___local_4___local_4___local_4___local_8(a: u32, a_sign: u32, b: u32, b_sign: u32, out: ptr<function, array<u32, 4>>, out_off: u32, prod: ptr<function, array<u32, 4>>, prod_off: u32, n: u32, frac_limbs: u32) -> u32 {
+  var _call_tmp: u32;
+  var sign_b_flipped: u32;
+  var _ret: u32;
+  _call_tmp = mul_schoolbook_to___local_4(a, b, prod, prod_off, n);
+  _call_tmp = slice_vec_to___local_8(signed_add_to___local_4___local_4___local_4(prod), (prod_off + frac_limbs), ((prod_off + frac_limbs) + n), out, out_off);
+  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
+  return _ret;
+}
+
+fn signed_add_to_buf___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, buf: ptr<function, array<u32, 4>>, out_off: u32, tmp1_off: u32, tmp2_off: u32, n: u32, out: ptr<function, array<u32, 4>>) -> u32 {
+  var _sum_carry: u32;
+  var borrow_ab: u32;
+  var _borrow_ba: u32;
+  var sign_diff: u32;
+  var sign_borrow: u32;
+  var diff_zero: u32;
+  var borrow_zero: u32;
+  var same_sign: u32;
+  var _unused_18: u32;
+  var diff_sign: u32;
+  var result_sign: u32;
+  var i: u32;
+  var diff_val: u32;
+  var final_val: u32;
+  var _ret: u32;
+  _sum_carry = add_limbs_to___local_4(a, b, buf, tmp1_off, n);
+  borrow_ab = sub_limbs_to___local_4(a, b, buf, tmp2_off, n);
+  _borrow_ba = sub_limbs_to___local_4(b, a, buf, out_off, n);
+  {
+    var _td = sub_borrow(a_sign, b_sign, zero_val());
+    sign_diff = _td.f0;
+    sign_borrow = _td.f1;
+  }
+  diff_zero = is_zero_limb(sign_diff);
+  borrow_zero = is_zero_limb(sign_borrow);
+  {
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td.f0;
+    _unused_18 = _td.f1;
+  }
+  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
+  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
+  for (var i: u32 = 0u; i < n; i++) {
+    diff_val = select_limb(borrow_ab, clone_limb((*buf)[(tmp2_off + i)]), clone_limb((*buf)[(out_off + i)]));
+    final_val = select_limb(same_sign, diff_val, clone_limb((*buf)[(tmp1_off + i)]));
+    (*buf)[(out_off + i)] = final_val;
+  }
+  _ret = result_sign;
   return _ret;
 }
 
@@ -123,113 +202,12 @@ fn sub_borrow(self_val: u32, b: u32, borrow: u32) -> R2 {
   return _ret;
 }
 
-fn zero_val() -> u32 {
-  var _ret: u32;
-  _ret = 0u;
-  return _ret;
-}
-
-fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
-  var ab: u32;
-  var c1: u32;
-  var abc: u32;
-  var c2: u32;
-  var _ret: R2;
-  ab = (self_val + b);
-  c1 = select(0u, 1u, (ab < self_val));
-  abc = (ab + carry);
-  c2 = select(0u, 1u, (abc < ab));
-  _ret = R2(abc, (c1 + c2));
-  return _ret;
-}
-
-fn mul_schoolbook_to___local_4___local_4___local_8(a: ptr<function, array<u32, 4>>, b: ptr<function, array<u32, 4>>, out: ptr<function, array<u32, 8>>, n: u32) -> u32 {
-  var nn: u32;
-  var i: u32;
-  var carry: u32;
-  var j: u32;
-  var prod_lo: u32;
-  var prod_hi: u32;
-  var sum1: u32;
-  var c1: u32;
-  var new_carry: u32;
-  var _c2: u32;
-  var _ret: u32;
-  nn = (2u * n);
-  for (var i: u32 = 0u; i < nn; i++) {
-    (*out)[i] = zero_val();
-  }
-  for (var i: u32 = 0u; i < n; i++) {
-    carry = zero_val();
-    for (var j: u32 = 0u; j < n; j++) {
-      {
-        var _td = mul2((*a)[j], (*b)[i]);
-        prod_lo = _td.f0;
-        prod_hi = _td.f1;
-      }
-      {
-        var _td = add3(prod_lo, (*out)[(i + j)], carry);
-        sum1 = _td.f0;
-        c1 = _td.f1;
-      }
-      {
-        var _td = add3(prod_hi, c1, zero_val());
-        new_carry = _td.f0;
-        _c2 = _td.f1;
-      }
-      (*out)[(i + j)] = sum1;
-      carry = new_carry;
-    }
-    (*out)[(i + n)] = carry;
-  }
-  return _ret;
-}
-
-fn const_u32(c: u32) -> u32 {
-  var _ret: u32;
-  _ret = c;
-  return _ret;
-}
-
-fn slice_vec_to___local_8___local_4(a: ptr<function, array<u32, 8>>, start: u32, end: u32, out: ptr<function, array<u32, 4>>, out_off: u32) -> u32 {
-  var len: u32;
-  var si: u32;
-  var di: u32;
-  var idx: u32;
-  var _ret: u32;
-  len = (end - start);
-  si = start;
-  di = out_off;
-  for (var idx: u32 = 0u; idx < len; idx++) {
-    (*out)[di] = clone_limb((*a)[si]);
-    si = (si + 1u);
-    di = (di + 1u);
-  }
-  return _ret;
-}
-
-fn clone_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  _ret = self_val;
-  return _ret;
-}
-
 fn select_limb(cond: u32, if_zero: u32, if_nonzero: u32) -> u32 {
   var _ret: u32;
   if ((cond == 0u)) {
     _ret = if_zero;
   } else {
     _ret = if_nonzero;
-  }
-  return _ret;
-}
-
-fn is_zero_limb(self_val: u32) -> u32 {
-  var _ret: u32;
-  if ((self_val == 0u)) {
-    _ret = 1u;
-  } else {
-    _ret = 0u;
   }
   return _ret;
 }
@@ -264,371 +242,35 @@ fn mul2(self_val: u32, b: u32) -> R2 {
   return _ret;
 }
 
-fn sub_limbs_to___local_4_params___local_4(a: ptr<function, array<u32, 4>>, b: u32, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
+fn clone_limb(self_val: u32) -> u32 {
   var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow((*a)[i], params[(b + i)], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    (*out)[i] = digit;
-    borrow = next_borrow;
-  }
-  _ret = borrow;
+  _ret = self_val;
   return _ret;
 }
 
-fn sub_limbs_to___local_4_wg_mem___local_4(a: ptr<function, array<u32, 4>>, b: u32, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
+fn zero_val() -> u32 {
   var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow((*a)[i], wg_mem[(b + i)], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    (*out)[i] = digit;
-    borrow = next_borrow;
-  }
-  _ret = borrow;
+  _ret = 0u;
   return _ret;
 }
 
-fn sub_limbs_to_c_data_wg_mem___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
+fn is_zero_limb(self_val: u32) -> u32 {
   var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow(c_data[(a + i)], wg_mem[(b + i)], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    (*out)[i] = digit;
-    borrow = next_borrow;
+  if ((self_val == 0u)) {
+    _ret = 1u;
+  } else {
+    _ret = 0u;
   }
-  _ret = borrow;
   return _ret;
 }
 
-fn sub_limbs_to_wg_mem___local_4___local_4(a: u32, b: ptr<function, array<u32, 4>>, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
+fn const_u32(c: u32) -> u32 {
   var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow(wg_mem[(a + i)], (*b)[i], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    (*out)[i] = digit;
-    borrow = next_borrow;
-  }
-  _ret = borrow;
+  _ret = c;
   return _ret;
 }
 
-fn sub_limbs_to_wg_mem_c_data___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
-  var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow(wg_mem[(a + i)], c_data[(b + i)], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    (*out)[i] = digit;
-    borrow = next_borrow;
-  }
-  _ret = borrow;
-  return _ret;
-}
-
-fn sub_limbs_to_wg_mem_params_wg_mem(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
-  var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow(wg_mem[(a + i)], params[(b + i)], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    wg_mem[(out + i)] = digit;
-    borrow = next_borrow;
-  }
-  _ret = borrow;
-  return _ret;
-}
-
-fn sub_limbs_to_wg_mem_wg_mem_wg_mem(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var borrow: u32;
-  var i: u32;
-  var digit: u32;
-  var next_borrow: u32;
-  var _ret: u32;
-  borrow = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = sub_borrow(wg_mem[(a + i)], wg_mem[(b + i)], borrow);
-      digit = _td.f0;
-      next_borrow = _td.f1;
-    }
-    wg_mem[(out + i)] = digit;
-    borrow = next_borrow;
-  }
-  _ret = borrow;
-  return _ret;
-}
-
-fn add_limbs_to_c_data_wg_mem___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3(c_data[(a + i)], wg_mem[(b + i)], carry);
-      digit = _td.f0;
-      next_carry = _td.f1;
-    }
-    (*out)[i] = digit;
-    carry = next_carry;
-  }
-  _ret = carry;
-  return _ret;
-}
-
-fn add_limbs_to_wg_mem___local_4___local_4(a: u32, b: ptr<function, array<u32, 4>>, out: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3(wg_mem[(a + i)], (*b)[i], carry);
-      digit = _td.f0;
-      next_carry = _td.f1;
-    }
-    (*out)[i] = digit;
-    carry = next_carry;
-  }
-  _ret = carry;
-  return _ret;
-}
-
-fn add_limbs_to_wg_mem_wg_mem_wg_mem(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var carry: u32;
-  var i: u32;
-  var digit: u32;
-  var next_carry: u32;
-  var _ret: u32;
-  carry = zero_val();
-  for (var i: u32 = 0u; i < n; i++) {
-    {
-      var _td = add3(wg_mem[(a + i)], wg_mem[(b + i)], carry);
-      digit = _td.f0;
-      next_carry = _td.f1;
-    }
-    wg_mem[(out + i)] = digit;
-    carry = next_carry;
-  }
-  _ret = carry;
-  return _ret;
-}
-
-fn signed_mul_to_wg_mem___local_4___local_4___local_8(a: u32, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, prod: ptr<function, array<u32, 8>>, n: u32, frac_limbs: u32) -> u32 {
-  var _call_tmp: u32;
-  var sign_b_flipped: u32;
-  var _ret: u32;
-  _call_tmp = mul_schoolbook_to_wg_mem___local_4___local_8(a, b, prod, n);
-  _call_tmp = slice_vec_to___local_8___local_4(prod, frac_limbs, (frac_limbs + n), out, 0u);
-  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
-  return _ret;
-}
-
-fn signed_mul_to_wg_mem_wg_mem_wg_mem_wg_mem(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, prod: u32, n: u32, frac_limbs: u32) -> u32 {
-  var _call_tmp: u32;
-  var sign_b_flipped: u32;
-  var _ret: u32;
-  _call_tmp = mul_schoolbook_to_wg_mem_wg_mem_wg_mem(a, b, prod, n);
-  _call_tmp = slice_vec_to_wg_mem_wg_mem(prod, frac_limbs, (frac_limbs + n), out, 0u);
-  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
-  return _ret;
-}
-
-fn signed_add_to_c_data_wg_mem___local_4___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: ptr<function, array<u32, 4>>, tmp1: ptr<function, array<u32, 4>>, tmp2: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var _sum_carry: u32;
-  var borrow_ab: u32;
-  var _borrow_ba: u32;
-  var sign_diff: u32;
-  var sign_borrow: u32;
-  var diff_zero: u32;
-  var borrow_zero: u32;
-  var same_sign: u32;
-  var _unused_17: u32;
-  var diff_sign: u32;
-  var result_sign: u32;
-  var i: u32;
-  var diff_val: u32;
-  var final_val: u32;
-  var _ret: u32;
-  _sum_carry = add_limbs_to_c_data_wg_mem___local_4(a, b, tmp1, n);
-  borrow_ab = sub_limbs_to_c_data_wg_mem___local_4(a, b, tmp2, n);
-  _borrow_ba = sub_limbs_to_wg_mem_c_data___local_4(b, a, out, n);
-  {
-    var _td = sub_borrow(a_sign, b_sign, zero_val());
-    sign_diff = _td.f0;
-    sign_borrow = _td.f1;
-  }
-  diff_zero = is_zero_limb(sign_diff);
-  borrow_zero = is_zero_limb(sign_borrow);
-  {
-    var _td = mul2(diff_zero, borrow_zero);
-    same_sign = _td.f0;
-    _unused_17 = _td.f1;
-  }
-  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
-  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
-  for (var i: u32 = 0u; i < n; i++) {
-    diff_val = select_limb(borrow_ab, clone_limb((*tmp2)[i]), clone_limb((*out)[i]));
-    final_val = select_limb(same_sign, diff_val, clone_limb((*tmp1)[i]));
-    (*out)[i] = final_val;
-  }
-  _ret = result_sign;
-  return _ret;
-}
-
-fn signed_add_to_wg_mem___local_4___local_4___local_4___local_4(a: u32, a_sign: u32, b: ptr<function, array<u32, 4>>, b_sign: u32, out: ptr<function, array<u32, 4>>, tmp1: ptr<function, array<u32, 4>>, tmp2: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var _sum_carry: u32;
-  var borrow_ab: u32;
-  var _borrow_ba: u32;
-  var sign_diff: u32;
-  var sign_borrow: u32;
-  var diff_zero: u32;
-  var borrow_zero: u32;
-  var same_sign: u32;
-  var _unused_17: u32;
-  var diff_sign: u32;
-  var result_sign: u32;
-  var i: u32;
-  var diff_val: u32;
-  var final_val: u32;
-  var _ret: u32;
-  _sum_carry = add_limbs_to_wg_mem___local_4___local_4(a, b, tmp1, n);
-  borrow_ab = sub_limbs_to_wg_mem___local_4___local_4(a, b, tmp2, n);
-  _borrow_ba = sub_limbs_to___local_4_wg_mem___local_4(b, a, out, n);
-  {
-    var _td = sub_borrow(a_sign, b_sign, zero_val());
-    sign_diff = _td.f0;
-    sign_borrow = _td.f1;
-  }
-  diff_zero = is_zero_limb(sign_diff);
-  borrow_zero = is_zero_limb(sign_borrow);
-  {
-    var _td = mul2(diff_zero, borrow_zero);
-    same_sign = _td.f0;
-    _unused_17 = _td.f1;
-  }
-  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
-  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
-  for (var i: u32 = 0u; i < n; i++) {
-    diff_val = select_limb(borrow_ab, clone_limb((*tmp2)[i]), clone_limb((*out)[i]));
-    final_val = select_limb(same_sign, diff_val, clone_limb((*tmp1)[i]));
-    (*out)[i] = final_val;
-  }
-  _ret = result_sign;
-  return _ret;
-}
-
-fn signed_add_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, tmp1: u32, tmp2: u32, n: u32) -> u32 {
-  var _sum_carry: u32;
-  var borrow_ab: u32;
-  var _borrow_ba: u32;
-  var sign_diff: u32;
-  var sign_borrow: u32;
-  var diff_zero: u32;
-  var borrow_zero: u32;
-  var same_sign: u32;
-  var _unused_17: u32;
-  var diff_sign: u32;
-  var result_sign: u32;
-  var i: u32;
-  var diff_val: u32;
-  var final_val: u32;
-  var _ret: u32;
-  _sum_carry = add_limbs_to_wg_mem_wg_mem_wg_mem(a, b, tmp1, n);
-  borrow_ab = sub_limbs_to_wg_mem_wg_mem_wg_mem(a, b, tmp2, n);
-  _borrow_ba = sub_limbs_to_wg_mem_wg_mem_wg_mem(b, a, out, n);
-  {
-    var _td = sub_borrow(a_sign, b_sign, zero_val());
-    sign_diff = _td.f0;
-    sign_borrow = _td.f1;
-  }
-  diff_zero = is_zero_limb(sign_diff);
-  borrow_zero = is_zero_limb(sign_borrow);
-  {
-    var _td = mul2(diff_zero, borrow_zero);
-    same_sign = _td.f0;
-    _unused_17 = _td.f1;
-  }
-  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
-  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
-  for (var i: u32 = 0u; i < n; i++) {
-    diff_val = select_limb(borrow_ab, clone_limb(wg_mem[(tmp2 + i)]), clone_limb(wg_mem[(out + i)]));
-    final_val = select_limb(same_sign, diff_val, clone_limb(wg_mem[(tmp1 + i)]));
-    wg_mem[(out + i)] = final_val;
-  }
-  _ret = result_sign;
-  return _ret;
-}
-
-fn signed_sub_to_c_data_wg_mem___local_4___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: ptr<function, array<u32, 4>>, tmp1: ptr<function, array<u32, 4>>, tmp2: ptr<function, array<u32, 4>>, n: u32) -> u32 {
-  var neg_b_sign: u32;
-  var _ret: u32;
-  neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = signed_add_to_c_data_wg_mem___local_4___local_4___local_4(a, a_sign, b, neg_b_sign, out, tmp1, tmp2, n);
-  return _ret;
-}
-
-fn signed_sub_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, tmp1: u32, tmp2: u32, n: u32) -> u32 {
-  var neg_b_sign: u32;
-  var _ret: u32;
-  neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
-  _ret = signed_add_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(a, a_sign, b, neg_b_sign, out, tmp1, tmp2, n);
-  return _ret;
-}
-
-fn mul_schoolbook_to_wg_mem___local_4___local_8(a: u32, b: ptr<function, array<u32, 4>>, out: ptr<function, array<u32, 8>>, n: u32) -> u32 {
+fn mul_schoolbook_to___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, out_off: u32, n: u32) -> u32 {
   var nn: u32;
   var i: u32;
   var carry: u32;
@@ -642,18 +284,18 @@ fn mul_schoolbook_to_wg_mem___local_4___local_8(a: u32, b: ptr<function, array<u
   var _ret: u32;
   nn = (2u * n);
   for (var i: u32 = 0u; i < nn; i++) {
-    (*out)[i] = zero_val();
+    (*out)[(out_off + i)] = zero_val();
   }
   for (var i: u32 = 0u; i < n; i++) {
     carry = zero_val();
     for (var j: u32 = 0u; j < n; j++) {
       {
-        var _td = mul2(wg_mem[(a + j)], (*b)[i]);
+        var _td = mul2(a, b);
         prod_lo = _td.f0;
         prod_hi = _td.f1;
       }
       {
-        var _td = add3(prod_lo, (*out)[(i + j)], carry);
+        var _td = add3(prod_lo, (*out)[((out_off + i) + j)], carry);
         sum1 = _td.f0;
         c1 = _td.f1;
       }
@@ -662,57 +304,29 @@ fn mul_schoolbook_to_wg_mem___local_4___local_8(a: u32, b: ptr<function, array<u
         new_carry = _td.f0;
         _c2 = _td.f1;
       }
-      (*out)[(i + j)] = sum1;
+      (*out)[((out_off + i) + j)] = sum1;
       carry = new_carry;
     }
-    (*out)[(i + n)] = carry;
+    (*out)[((out_off + i) + n)] = carry;
   }
   return _ret;
 }
 
-fn mul_schoolbook_to_wg_mem_wg_mem_wg_mem(a: u32, b: u32, out: u32, n: u32) -> u32 {
-  var nn: u32;
-  var i: u32;
-  var carry: u32;
-  var j: u32;
-  var prod_lo: u32;
-  var prod_hi: u32;
-  var sum1: u32;
+fn add3(self_val: u32, b: u32, carry: u32) -> R2 {
+  var ab: u32;
   var c1: u32;
-  var new_carry: u32;
-  var _c2: u32;
-  var _ret: u32;
-  nn = (2u * n);
-  for (var i: u32 = 0u; i < nn; i++) {
-    wg_mem[(out + i)] = zero_val();
-  }
-  for (var i: u32 = 0u; i < n; i++) {
-    carry = zero_val();
-    for (var j: u32 = 0u; j < n; j++) {
-      {
-        var _td = mul2(wg_mem[(a + j)], wg_mem[(b + i)]);
-        prod_lo = _td.f0;
-        prod_hi = _td.f1;
-      }
-      {
-        var _td = add3(prod_lo, wg_mem[(out + (i + j))], carry);
-        sum1 = _td.f0;
-        c1 = _td.f1;
-      }
-      {
-        var _td = add3(prod_hi, c1, zero_val());
-        new_carry = _td.f0;
-        _c2 = _td.f1;
-      }
-      wg_mem[(out + (i + j))] = sum1;
-      carry = new_carry;
-    }
-    wg_mem[(out + (i + n))] = carry;
-  }
+  var abc: u32;
+  var c2: u32;
+  var _ret: R2;
+  ab = (self_val + b);
+  c1 = select(0u, 1u, (ab < self_val));
+  abc = (ab + carry);
+  c2 = select(0u, 1u, (abc < ab));
+  _ret = R2(abc, (c1 + c2));
   return _ret;
 }
 
-fn slice_vec_to_wg_mem_wg_mem(a: u32, start: u32, end: u32, out: u32, out_off: u32) -> u32 {
+fn slice_vec_to___local_8(a: u32, start: u32, end: u32, out: ptr<function, array<u32, 8>>, out_off: u32) -> u32 {
   var len: u32;
   var si: u32;
   var di: u32;
@@ -722,10 +336,297 @@ fn slice_vec_to_wg_mem_wg_mem(a: u32, start: u32, end: u32, out: u32, out_off: u
   si = start;
   di = out_off;
   for (var idx: u32 = 0u; idx < len; idx++) {
-    wg_mem[(out + di)] = clone_limb(wg_mem[(a + si)]);
+    (*out)[di] = clone_limb(a);
     si = (si + 1u);
     di = (di + 1u);
   }
+  return _ret;
+}
+
+fn signed_add_to___local_4___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: ptr<function, array<u32, 4>>, out_off: u32, tmp1: ptr<function, array<u32, 4>>, tmp1_off: u32, tmp2: ptr<function, array<u32, 4>>, tmp2_off: u32, n: u32) -> u32 {
+  var _sum_carry: u32;
+  var borrow_ab: u32;
+  var _borrow_ba: u32;
+  var sign_diff: u32;
+  var sign_borrow: u32;
+  var diff_zero: u32;
+  var borrow_zero: u32;
+  var same_sign: u32;
+  var _unused_20: u32;
+  var diff_sign: u32;
+  var result_sign: u32;
+  var i: u32;
+  var diff_val: u32;
+  var final_val: u32;
+  var _ret: u32;
+  _sum_carry = add_limbs_to___local_4(a, b, tmp1, tmp1_off, n);
+  borrow_ab = sub_limbs_to___local_4(a, b, tmp2, tmp2_off, n);
+  _borrow_ba = sub_limbs_to___local_4(b, a, out, out_off, n);
+  {
+    var _td = sub_borrow(a_sign, b_sign, zero_val());
+    sign_diff = _td.f0;
+    sign_borrow = _td.f1;
+  }
+  diff_zero = is_zero_limb(sign_diff);
+  borrow_zero = is_zero_limb(sign_borrow);
+  {
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td.f0;
+    _unused_20 = _td.f1;
+  }
+  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
+  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
+  for (var i: u32 = 0u; i < n; i++) {
+    diff_val = select_limb(borrow_ab, clone_limb((*tmp2)[(tmp2_off + i)]), clone_limb((*out)[(out_off + i)]));
+    final_val = select_limb(same_sign, diff_val, clone_limb((*tmp1)[(tmp1_off + i)]));
+    (*out)[(out_off + i)] = final_val;
+  }
+  _ret = result_sign;
+  return _ret;
+}
+
+fn signed_add_to___local_4_wg_mem___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: ptr<function, array<u32, 4>>, out_off: u32, tmp1: u32, tmp1_off: u32, tmp2: ptr<function, array<u32, 4>>, tmp2_off: u32, n: u32) -> u32 {
+  var _sum_carry: u32;
+  var borrow_ab: u32;
+  var _borrow_ba: u32;
+  var sign_diff: u32;
+  var sign_borrow: u32;
+  var diff_zero: u32;
+  var borrow_zero: u32;
+  var same_sign: u32;
+  var _unused_20: u32;
+  var diff_sign: u32;
+  var result_sign: u32;
+  var i: u32;
+  var diff_val: u32;
+  var final_val: u32;
+  var _ret: u32;
+  _sum_carry = add_limbs_to_wg_mem(a, b, tmp1, tmp1_off, n);
+  borrow_ab = sub_limbs_to___local_4(a, b, tmp2, tmp2_off, n);
+  _borrow_ba = sub_limbs_to___local_4(b, a, out, out_off, n);
+  {
+    var _td = sub_borrow(a_sign, b_sign, zero_val());
+    sign_diff = _td.f0;
+    sign_borrow = _td.f1;
+  }
+  diff_zero = is_zero_limb(sign_diff);
+  borrow_zero = is_zero_limb(sign_borrow);
+  {
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td.f0;
+    _unused_20 = _td.f1;
+  }
+  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
+  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
+  for (var i: u32 = 0u; i < n; i++) {
+    diff_val = select_limb(borrow_ab, clone_limb((*tmp2)[(tmp2_off + i)]), clone_limb((*out)[(out_off + i)]));
+    final_val = select_limb(same_sign, diff_val, clone_limb(wg_mem[(tmp1 + (tmp1_off + i))]));
+    (*out)[(out_off + i)] = final_val;
+  }
+  _ret = result_sign;
+  return _ret;
+}
+
+fn signed_add_to_wg_mem___local_4___local_4___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, out_off: u32, tmp1: ptr<function, array<u32, 4>>, tmp1_off: u32, tmp2: ptr<function, array<u32, 4>>, tmp2_off: u32, n: u32) -> u32 {
+  var _sum_carry: u32;
+  var borrow_ab: u32;
+  var _borrow_ba: u32;
+  var sign_diff: u32;
+  var sign_borrow: u32;
+  var diff_zero: u32;
+  var borrow_zero: u32;
+  var same_sign: u32;
+  var _unused_20: u32;
+  var diff_sign: u32;
+  var result_sign: u32;
+  var i: u32;
+  var diff_val: u32;
+  var final_val: u32;
+  var _ret: u32;
+  _sum_carry = add_limbs_to___local_4(a, b, tmp1, tmp1_off, n);
+  borrow_ab = sub_limbs_to___local_4(a, b, tmp2, tmp2_off, n);
+  _borrow_ba = sub_limbs_to___local_4(b, a, out, out_off, n);
+  {
+    var _td = sub_borrow(a_sign, b_sign, zero_val());
+    sign_diff = _td.f0;
+    sign_borrow = _td.f1;
+  }
+  diff_zero = is_zero_limb(sign_diff);
+  borrow_zero = is_zero_limb(sign_borrow);
+  {
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td.f0;
+    _unused_20 = _td.f1;
+  }
+  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
+  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
+  for (var i: u32 = 0u; i < n; i++) {
+    diff_val = select_limb(borrow_ab, clone_limb((*tmp2)[(tmp2_off + i)]), clone_limb(wg_mem[(out + (out_off + i))]));
+    final_val = select_limb(same_sign, diff_val, clone_limb((*tmp1)[(tmp1_off + i)]));
+    wg_mem[(out + (out_off + i))] = final_val;
+  }
+  _ret = result_sign;
+  return _ret;
+}
+
+fn add_limbs_to___local_4___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, out_off: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(a, b, carry);
+      digit = _td.f0;
+      next_carry = _td.f1;
+    }
+    (*out)[(out_off + i)] = digit;
+    carry = next_carry;
+  }
+  _ret = carry;
+  return _ret;
+}
+
+fn add_limbs_to___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, out_off: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(a, b, carry);
+      digit = _td.f0;
+      next_carry = _td.f1;
+    }
+    (*out)[(out_off + i)] = digit;
+    carry = next_carry;
+  }
+  _ret = carry;
+  return _ret;
+}
+
+fn add_limbs_to_wg_mem(a: u32, b: u32, out: u32, out_off: u32, n: u32) -> u32 {
+  var carry: u32;
+  var i: u32;
+  var digit: u32;
+  var next_carry: u32;
+  var _ret: u32;
+  carry = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = add3(a, b, carry);
+      digit = _td.f0;
+      next_carry = _td.f1;
+    }
+    wg_mem[(out + (out_off + i))] = digit;
+    carry = next_carry;
+  }
+  _ret = carry;
+  return _ret;
+}
+
+fn sub_limbs_to___local_4_params(a: u32, b: u32, out: ptr<function, array<u32, 4>>, out_off: u32, n: u32) -> u32 {
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: u32;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(a, b, borrow);
+      digit = _td.f0;
+      next_borrow = _td.f1;
+    }
+    (*out)[(out_off + i)] = digit;
+    borrow = next_borrow;
+  }
+  _ret = borrow;
+  return _ret;
+}
+
+fn sub_limbs_to___local_4(a: u32, b: u32, out: ptr<function, array<u32, 4>>, out_off: u32, n: u32) -> u32 {
+  var borrow: u32;
+  var i: u32;
+  var digit: u32;
+  var next_borrow: u32;
+  var _ret: u32;
+  borrow = zero_val();
+  for (var i: u32 = 0u; i < n; i++) {
+    {
+      var _td = sub_borrow(a, b, borrow);
+      digit = _td.f0;
+      next_borrow = _td.f1;
+    }
+    (*out)[(out_off + i)] = digit;
+    borrow = next_borrow;
+  }
+  _ret = borrow;
+  return _ret;
+}
+
+fn signed_sub_to_c_data_wg_mem___local_4___local_4___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, out_off: u32, tmp1: u32, tmp1_off: u32, tmp2: ptr<function, array<u32, 4>>, tmp2_off: u32, n: u32) -> u32 {
+  var neg_b_sign: u32;
+  var _ret: u32;
+  neg_b_sign = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = signed_add_to___local_4_wg_mem___local_4(a, a_sign, b, neg_b_sign, out, out_off, tmp1, tmp1_off, tmp2, tmp2_off, n);
+  return _ret;
+}
+
+fn signed_mul_to_wg_mem___local_4___local_4___local_8(a: u32, a_sign: u32, b: u32, b_sign: u32, out: u32, out_off: u32, prod: ptr<function, array<u32, 4>>, prod_off: u32, n: u32, frac_limbs: u32) -> u32 {
+  var _call_tmp: u32;
+  var sign_b_flipped: u32;
+  var _ret: u32;
+  _call_tmp = mul_schoolbook_to___local_4(a, b, prod, prod_off, n);
+  _call_tmp = slice_vec_to___local_8(signed_add_to___local_4___local_4___local_4(prod), (prod_off + frac_limbs), ((prod_off + frac_limbs) + n), out, out_off);
+  sign_b_flipped = select_limb(b_sign, const_u32(1u), zero_val());
+  _ret = select_limb(a_sign, clone_limb(b_sign), sign_b_flipped);
+  return _ret;
+}
+
+fn signed_add_to_buf___local_4(a: u32, a_sign: u32, b: u32, b_sign: u32, buf: ptr<function, array<u32, 4>>, out_off: u32, tmp1_off: u32, tmp2_off: u32, n: u32) -> u32 {
+  var _sum_carry: u32;
+  var borrow_ab: u32;
+  var _borrow_ba: u32;
+  var sign_diff: u32;
+  var sign_borrow: u32;
+  var diff_zero: u32;
+  var borrow_zero: u32;
+  var same_sign: u32;
+  var _unused_18: u32;
+  var diff_sign: u32;
+  var result_sign: u32;
+  var i: u32;
+  var diff_val: u32;
+  var final_val: u32;
+  var _ret: u32;
+  _sum_carry = add_limbs_to___local_4(a, b, buf, tmp1_off, n);
+  borrow_ab = sub_limbs_to___local_4(a, b, buf, tmp2_off, n);
+  _borrow_ba = sub_limbs_to___local_4(b, a, buf, out_off, n);
+  {
+    var _td = sub_borrow(a_sign, b_sign, zero_val());
+    sign_diff = _td.f0;
+    sign_borrow = _td.f1;
+  }
+  diff_zero = is_zero_limb(sign_diff);
+  borrow_zero = is_zero_limb(sign_borrow);
+  {
+    var _td = mul2(diff_zero, borrow_zero);
+    same_sign = _td.f0;
+    _unused_18 = _td.f1;
+  }
+  diff_sign = select_limb(borrow_ab, clone_limb(a_sign), clone_limb(b_sign));
+  result_sign = select_limb(same_sign, diff_sign, clone_limb(a_sign));
+  for (var i: u32 = 0u; i < n; i++) {
+    diff_val = select_limb(borrow_ab, clone_limb((*buf)[(tmp2_off + i)]), clone_limb((*buf)[(out_off + i)]));
+    final_val = select_limb(same_sign, diff_val, clone_limb((*buf)[(tmp1_off + i)]));
+    (*buf)[(out_off + i)] = final_val;
+  }
+  _ret = result_sign;
   return _ret;
 }
 
@@ -783,6 +684,8 @@ fn mandelbrot_perturbation(
   var lprod: array<u32, 8>;
   var ls1: array<u32, 4>;
   var ls2: array<u32, 4>;
+  var ref_a: array<u32, 4>;
+  var ref_b: array<u32, 4>;
   var escaped_iter: u32;
   var is_glitched: u32;
   var glitch_iter: u32;
@@ -795,14 +698,18 @@ fn mandelbrot_perturbation(
   var ref_tid_init: u32;
   var ref_c_off: u32;
   var i: u32;
-  var z0_off: u32;
   var ref_escaped: u32;
+  var ref_c_re_s: u32;
+  var ref_c_im_s: u32;
   var iter: u32;
   var zk: u32;
   var zk_re: u32;
   var zk_re_sign: u32;
   var zk_im: u32;
   var zk_im_sign: u32;
+  var zk_re_s: u32;
+  var zk_im_s: u32;
+  var _call_tmp: u32;
   var re2_s: u32;
   var im2_s: u32;
   var rpi_s: u32;
@@ -813,13 +720,18 @@ fn mandelbrot_perturbation(
   var t1_s: u32;
   var t2_s: u32;
   var new_im_s: u32;
-  var _call_tmp: u32;
   var thresh_off: u32;
   var esc_borrow: u32;
+  var cre_s: u32;
+  var cim_s: u32;
+  var refre_s: u32;
+  var refim_s: u32;
   var zn_re: u32;
   var zn_re_sign: u32;
   var zn_im: u32;
   var zn_im_sign: u32;
+  var zn_re_s: u32;
+  var zn_im_s: u32;
   var s1: u32;
   var s2: u32;
   var s3: u32;
@@ -844,9 +756,12 @@ fn mandelbrot_perturbation(
   var fr2_s: u32;
   var fi2_s: u32;
   var borrow: u32;
+  var _while_i: u32;
   var best_vote: u32;
   var best_idx: u32;
   var g_count: u32;
+  var best_gx_raw: u32;
+  var best_gy_raw: u32;
   var best_gx: u32;
   var best_gy: u32;
   var best_tid: u32;
@@ -855,6 +770,7 @@ fn mandelbrot_perturbation(
   var t_col: u32;
   var r: u32;
   var g: u32;
+  var half_t: u32;
   var b: u32;
   width = params[0u];
   height = params[1u];
@@ -897,7 +813,12 @@ fn mandelbrot_perturbation(
   is_glitched = 1u;
   glitch_iter = 0u;
   max_rounds = 5u;
-  for (var round: u32 = 0u; round < max_rounds; round++) {
+  round = 0u;
+  for (var _while_i: u32 = 0u; _while_i < 4294967295u; _while_i++) {
+    if ((!(round < max_rounds))) {
+      break;
+    } else {
+    }
     if ((local_id == 0u)) {
       if ((round == 0u)) {
         ref_x = ((gid_x - lid_x) + 8u);
@@ -916,43 +837,72 @@ fn mandelbrot_perturbation(
         wg_mem[((ref_c_base + (2u * n)) + 1u)] = c_data[((ref_c_off + (2u * n)) + 1u)];
       } else {
       }
-      z0_off = orbit_base;
       for (var i: u32 = 0u; i < n; i++) {
-        wg_mem[(z0_off + i)] = 0u;
+        wg_mem[(orbit_base + i)] = 0u;
       }
-      wg_mem[(z0_off + n)] = 0u;
+      wg_mem[(orbit_base + n)] = 0u;
       for (var i: u32 = 0u; i < n; i++) {
-        wg_mem[(((z0_off + n) + 1u) + i)] = 0u;
+        wg_mem[(((orbit_base + n) + 1u) + i)] = 0u;
       }
-      wg_mem[((z0_off + (2u * n)) + 1u)] = 0u;
+      wg_mem[((orbit_base + (2u * n)) + 1u)] = 0u;
       ref_escaped = max_iters;
-      for (var iter: u32 = 0u; iter < max_iters; iter++) {
-        zk = (orbit_base + (iter * z_stride));
-        zk_re = zk;
-        zk_re_sign = (zk + n);
-        zk_im = ((zk + n) + 1u);
-        zk_im_sign = ((zk + (2u * n)) + 1u);
-        re2_s = signed_mul_to_wg_mem_wg_mem_wg_mem_wg_mem(zk_re, wg_mem[zk_re_sign], zk_re, wg_mem[zk_re_sign], t0_re2, t0_prod, n, frac_limbs);
-        im2_s = signed_mul_to_wg_mem_wg_mem_wg_mem_wg_mem(zk_im, wg_mem[zk_im_sign], zk_im, wg_mem[zk_im_sign], t0_im2, t0_prod, n, frac_limbs);
-        rpi_s = signed_add_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(zk_re, wg_mem[zk_re_sign], zk_im, wg_mem[zk_im_sign], t0_rpi, t0_stmp1, t0_stmp2, n);
-        sum2_s = signed_mul_to_wg_mem_wg_mem_wg_mem_wg_mem(t0_rpi, rpi_s, t0_rpi, rpi_s, t0_sum2, t0_prod, n, frac_limbs);
-        zn = (orbit_base + ((iter + 1u) * z_stride));
-        diff_s = signed_sub_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(t0_re2, re2_s, t0_im2, im2_s, t0_diff, t0_stmp1, t0_stmp2, n);
-        new_re_s = signed_add_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(t0_diff, diff_s, ref_c_base, wg_mem[(ref_c_base + n)], zn, t0_stmp1, t0_stmp2, n);
-        wg_mem[(zn + n)] = new_re_s;
-        t1_s = signed_sub_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(t0_sum2, sum2_s, t0_re2, re2_s, t0_diff, t0_stmp1, t0_stmp2, n);
-        t2_s = signed_sub_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(t0_diff, t1_s, t0_im2, im2_s, t0_stmp3, t0_stmp1, t0_stmp2, n);
-        new_im_s = signed_add_to_wg_mem_wg_mem_wg_mem_wg_mem_wg_mem(t0_stmp3, t2_s, ((ref_c_base + n) + 1u), wg_mem[((ref_c_base + (2u * n)) + 1u)], ((zn + n) + 1u), t0_stmp1, t0_stmp2, n);
-        wg_mem[((zn + (2u * n)) + 1u)] = new_im_s;
-        if ((ref_escaped == max_iters)) {
-          _call_tmp = add_limbs_to_wg_mem_wg_mem_wg_mem(t0_re2, t0_im2, t0_diff, n);
-          thresh_off = 5u;
-          esc_borrow = sub_limbs_to_wg_mem_params_wg_mem(t0_diff, thresh_off, t0_stmp1, n);
-          if ((esc_borrow == 0u)) {
-            ref_escaped = (iter + 1u);
+      ref_c_re_s = wg_mem[(ref_c_base + n)];
+      ref_c_im_s = wg_mem[((ref_c_base + (2u * n)) + 1u)];
+      if (((ref_c_re_s > 1u) || (ref_c_im_s > 1u))) {
+        ref_escaped = 0u;
+      } else {
+        for (var iter: u32 = 0u; iter < max_iters; iter++) {
+          zk = (orbit_base + (iter * z_stride));
+          zk_re = zk;
+          zk_re_sign = (zk + n);
+          zk_im = ((zk + n) + 1u);
+          zk_im_sign = ((zk + (2u * n)) + 1u);
+          zk_re_s = wg_mem[zk_re_sign];
+          zk_im_s = wg_mem[zk_im_sign];
+          if (((zk_re_s > 1u) || (zk_im_s > 1u))) {
+            ref_escaped = iter;
           } else {
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, zk_re, &ref_a, n);
+            re2_s = signed_mul_to_buf___local_4___local_4(&ref_a, zk_re_s, &ref_a, zk_re_s, wg_mem, t0_re2, t0_prod, n, frac_limbs);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, zk_im, &ref_a, n);
+            im2_s = signed_mul_to_buf___local_4___local_4(&ref_a, zk_im_s, &ref_a, zk_im_s, wg_mem, t0_im2, t0_prod, n, frac_limbs);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, zk_re, &ref_a, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, zk_im, &ref_b, n);
+            rpi_s = signed_add_to_buf___local_4___local_4(&ref_a, zk_re_s, &ref_b, zk_im_s, wg_mem, t0_rpi, t0_stmp1, t0_stmp2, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_rpi, &ref_a, n);
+            sum2_s = signed_mul_to_buf___local_4___local_4(&ref_a, rpi_s, &ref_a, rpi_s, wg_mem, t0_sum2, t0_prod, n, frac_limbs);
+            zn = (orbit_base + ((iter + 1u) * z_stride));
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_re2, &ref_a, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_im2, &ref_b, n);
+            diff_s = signed_sub_to_buf___local_4___local_4(&ref_a, re2_s, &ref_b, im2_s, wg_mem, t0_diff, t0_stmp1, t0_stmp2, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_diff, &ref_a, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, ref_c_base, &ref_b, n);
+            new_re_s = signed_add_to_buf___local_4___local_4(&ref_a, diff_s, &ref_b, ref_c_re_s, wg_mem, zn, t0_stmp1, t0_stmp2, n);
+            wg_mem[(zn + n)] = new_re_s;
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_sum2, &ref_a, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_re2, &ref_b, n);
+            t1_s = signed_sub_to_buf___local_4___local_4(&ref_a, sum2_s, &ref_b, re2_s, wg_mem, t0_diff, t0_stmp1, t0_stmp2, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_diff, &ref_a, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_im2, &ref_b, n);
+            t2_s = signed_sub_to_buf___local_4___local_4(&ref_a, t1_s, &ref_b, im2_s, wg_mem, t0_stmp3, t0_stmp1, t0_stmp2, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_stmp3, &ref_a, n);
+            _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, ((ref_c_base + n) + 1u), &ref_b, n);
+            new_im_s = signed_add_to_buf___local_4___local_4(&ref_a, t2_s, &ref_b, ref_c_im_s, wg_mem, ((zn + n) + 1u), t0_stmp1, t0_stmp2, n);
+            wg_mem[((zn + (2u * n)) + 1u)] = new_im_s;
+            if ((ref_escaped == max_iters)) {
+              _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_re2, &ref_a, n);
+              _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_im2, &ref_b, n);
+              _call_tmp = add_limbs_to___local_4___local_4___local_4(&ref_a, &ref_b, wg_mem, t0_diff, n);
+              thresh_off = 5u;
+              _call_tmp = signed_add_to___local_4___local_4___local_4(wg_mem, t0_diff, &ref_a, n);
+              esc_borrow = sub_limbs_to___local_4_params___local_4(&ref_a, thresh_off, wg_mem, t0_stmp1, n);
+              if ((esc_borrow == 0u)) {
+                ref_escaped = (iter + 1u);
+              } else {
+              }
+            } else {
+            }
           }
-        } else {
         }
       }
       wg_mem[ref_escape_addr] = ref_escaped;
@@ -960,68 +910,90 @@ fn mandelbrot_perturbation(
     }
     workgroupBarrier();
     if (((is_glitched == 1u) && (escaped_iter == max_iters))) {
-      dc_re_sign = signed_sub_to_c_data_wg_mem___local_4___local_4___local_4(c_re_off, c_data[c_re_sign_off], ref_c_base, wg_mem[(ref_c_base + n)], &dc_re, &ls1, &ls2, n);
-      dc_im_sign = signed_sub_to_c_data_wg_mem___local_4___local_4___local_4(c_im_off, c_data[c_im_sign_off], ((ref_c_base + n) + 1u), wg_mem[((ref_c_base + (2u * n)) + 1u)], &dc_im, &ls1, &ls2, n);
-      for (var i: u32 = 0u; i < n; i++) {
-        delta_re[i] = 0u;
-        delta_im[i] = 0u;
-      }
-      delta_re_sign = 0u;
-      delta_im_sign = 0u;
-      is_glitched = 0u;
-      ref_escaped = wg_mem[ref_escape_addr];
-      for (var iter: u32 = 0u; iter < max_iters; iter++) {
-        if ((iter >= ref_escaped)) {
-          is_glitched = 1u;
-          glitch_iter = iter;
-          break;
-        } else {
+      cre_s = c_data[c_re_sign_off];
+      cim_s = c_data[c_im_sign_off];
+      refre_s = wg_mem[(ref_c_base + n)];
+      refim_s = wg_mem[((ref_c_base + (2u * n)) + 1u)];
+      if (((((cre_s > 1u) || (cim_s > 1u)) || (refre_s > 1u)) || (refim_s > 1u))) {
+        is_glitched = 0u;
+      } else {
+        dc_re_sign = signed_sub_to_c_data_wg_mem___local_4___local_4___local_4(c_re_off, cre_s, ref_c_base, refre_s, &dc_re, 0u, &ls1, 0u, &ls2, 0u, n);
+        dc_im_sign = signed_sub_to_c_data_wg_mem___local_4___local_4___local_4(c_im_off, cim_s, ((ref_c_base + n) + 1u), refim_s, &dc_im, 0u, &ls1, 0u, &ls2, 0u, n);
+        for (var i: u32 = 0u; i < n; i++) {
+          delta_re[i] = 0u;
+          delta_im[i] = 0u;
         }
-        zn = (orbit_base + (iter * z_stride));
-        zn_re = zn;
-        zn_re_sign = (zn + n);
-        zn_im = ((zn + n) + 1u);
-        zn_im_sign = ((zn + (2u * n)) + 1u);
-        s1 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_re, wg_mem[zn_re_sign], &delta_re, delta_re_sign, &t1, &lprod, n, frac_limbs);
-        s2 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_im, wg_mem[zn_im_sign], &delta_im, delta_im_sign, &t2, &lprod, n, frac_limbs);
-        s3 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_re, wg_mem[zn_re_sign], &delta_im, delta_im_sign, &t3, &lprod, n, frac_limbs);
-        s4 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_im, wg_mem[zn_im_sign], &delta_re, delta_re_sign, &t4, &lprod, n, frac_limbs);
-        d1_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&t1, s1, &t2, s2, &t5, &ls1, &ls2, n);
-        tzd_re_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t5, d1_s, &t5, d1_s, &t1, &ls1, &ls2, n);
-        d2_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t3, s3, &t4, s4, &t5, &ls1, &ls2, n);
-        tzd_im_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t5, d2_s, &t5, d2_s, &t2, &ls1, &ls2, n);
-        drs_s = signed_mul_to___local_4___local_4___local_4___local_8(&delta_re, delta_re_sign, &delta_re, delta_re_sign, &t3, &lprod, n, frac_limbs);
-        dis_s = signed_mul_to___local_4___local_4___local_4___local_8(&delta_im, delta_im_sign, &delta_im, delta_im_sign, &t4, &lprod, n, frac_limbs);
-        dri_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&delta_re, delta_re_sign, &delta_im, delta_im_sign, &t5, &ls1, &ls2, n);
-        dri2_s = signed_mul_to___local_4___local_4___local_4___local_8(&t5, dri_s, &t5, dri_s, &ls1, &lprod, n, frac_limbs);
-        dsq_re_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&t3, drs_s, &t4, dis_s, &t5, &delta_re, &delta_im, n);
-        q1_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&ls1, dri2_s, &t3, drs_s, &delta_re, &ls2, &delta_im, n);
-        dsq_im_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&delta_re, q1_s, &t4, dis_s, &t3, &ls2, &delta_im, n);
-        p1_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t1, tzd_re_s, &t5, dsq_re_s, &t4, &ls1, &ls2, n);
-        new_dr_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t4, p1_s, &dc_re, dc_re_sign, &delta_re, &ls1, &ls2, n);
-        delta_re_sign = new_dr_s;
-        p2_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t2, tzd_im_s, &t3, dsq_im_s, &t4, &ls1, &ls2, n);
-        new_di_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t4, p2_s, &dc_im, dc_im_sign, &delta_im, &ls1, &ls2, n);
-        delta_im_sign = new_di_s;
-        if (((delta_re[(n - 1u)] > 3u) || (delta_im[(n - 1u)] > 3u))) {
-          is_glitched = 1u;
-          glitch_iter = iter;
-          break;
-        } else {
-        }
-        full_re_s = signed_add_to_wg_mem___local_4___local_4___local_4___local_4(zn_re, wg_mem[zn_re_sign], &delta_re, delta_re_sign, &t1, &ls1, &ls2, n);
-        full_im_s = signed_add_to_wg_mem___local_4___local_4___local_4___local_4(zn_im, wg_mem[zn_im_sign], &delta_im, delta_im_sign, &t2, &ls1, &ls2, n);
-        fr2_s = signed_mul_to___local_4___local_4___local_4___local_8(&t1, full_re_s, &t1, full_re_s, &t3, &lprod, n, frac_limbs);
-        fi2_s = signed_mul_to___local_4___local_4___local_4___local_8(&t2, full_im_s, &t2, full_im_s, &t4, &lprod, n, frac_limbs);
-        _call_tmp = add_limbs_to___local_4___local_4___local_4(&t3, &t4, &t5, n);
-        thresh_off = 5u;
-        borrow = sub_limbs_to___local_4_params___local_4(&t5, thresh_off, &t1, n);
-        if ((borrow == 0u)) {
-          if ((escaped_iter == max_iters)) {
-            escaped_iter = iter;
+        delta_re_sign = 0u;
+        delta_im_sign = 0u;
+        is_glitched = 0u;
+        ref_escaped = wg_mem[ref_escape_addr];
+        iter = 0u;
+        for (var _while_i: u32 = 0u; _while_i < 4294967295u; _while_i++) {
+          if ((!(iter < max_iters))) {
+            break;
           } else {
           }
-        } else {
+          if ((iter >= ref_escaped)) {
+            is_glitched = 1u;
+            glitch_iter = iter;
+            break;
+          } else {
+          }
+          zn = (orbit_base + (iter * z_stride));
+          zn_re = zn;
+          zn_re_sign = (zn + n);
+          zn_im = ((zn + n) + 1u);
+          zn_im_sign = ((zn + (2u * n)) + 1u);
+          zn_re_s = wg_mem[zn_re_sign];
+          zn_im_s = wg_mem[zn_im_sign];
+          if (((zn_re_s > 1u) || (zn_im_s > 1u))) {
+            is_glitched = 1u;
+            glitch_iter = iter;
+            break;
+          } else {
+          }
+          s1 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_re, zn_re_s, &delta_re, delta_re_sign, &t1, 0u, &lprod, 0u, n, frac_limbs);
+          s2 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_im, zn_im_s, &delta_im, delta_im_sign, &t2, 0u, &lprod, 0u, n, frac_limbs);
+          s3 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_re, zn_re_s, &delta_im, delta_im_sign, &t3, 0u, &lprod, 0u, n, frac_limbs);
+          s4 = signed_mul_to_wg_mem___local_4___local_4___local_8(zn_im, zn_im_s, &delta_re, delta_re_sign, &t4, 0u, &lprod, 0u, n, frac_limbs);
+          d1_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&t1, s1, &t2, s2, &t5, 0u, &ls1, 0u, &ls2, 0u, n);
+          tzd_re_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t5, d1_s, &t5, d1_s, &t1, 0u, &ls1, 0u, &ls2, 0u, n);
+          d2_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t3, s3, &t4, s4, &t5, 0u, &ls1, 0u, &ls2, 0u, n);
+          tzd_im_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t5, d2_s, &t5, d2_s, &t2, 0u, &ls1, 0u, &ls2, 0u, n);
+          drs_s = signed_mul_to___local_4___local_4___local_4___local_8(&delta_re, delta_re_sign, &delta_re, delta_re_sign, &t3, 0u, &lprod, 0u, n, frac_limbs);
+          dis_s = signed_mul_to___local_4___local_4___local_4___local_8(&delta_im, delta_im_sign, &delta_im, delta_im_sign, &t4, 0u, &lprod, 0u, n, frac_limbs);
+          dri_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&delta_re, delta_re_sign, &delta_im, delta_im_sign, &t5, 0u, &ls1, 0u, &ls2, 0u, n);
+          dri2_s = signed_mul_to___local_4___local_4___local_4___local_8(&t5, dri_s, &t5, dri_s, &ls1, 0u, &lprod, 0u, n, frac_limbs);
+          dsq_re_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&t3, drs_s, &t4, dis_s, &t5, 0u, &delta_re, 0u, &delta_im, 0u, n);
+          q1_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&ls1, dri2_s, &t3, drs_s, &delta_re, 0u, &ls2, 0u, &delta_im, 0u, n);
+          dsq_im_s = signed_sub_to___local_4___local_4___local_4___local_4___local_4(&delta_re, q1_s, &t4, dis_s, &t3, 0u, &ls2, 0u, &delta_im, 0u, n);
+          p1_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t1, tzd_re_s, &t5, dsq_re_s, &t4, 0u, &ls1, 0u, &ls2, 0u, n);
+          new_dr_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t4, p1_s, &dc_re, dc_re_sign, &delta_re, 0u, &ls1, 0u, &ls2, 0u, n);
+          delta_re_sign = new_dr_s;
+          p2_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t2, tzd_im_s, &t3, dsq_im_s, &t4, 0u, &ls1, 0u, &ls2, 0u, n);
+          new_di_s = signed_add_to___local_4___local_4___local_4___local_4___local_4(&t4, p2_s, &dc_im, dc_im_sign, &delta_im, 0u, &ls1, 0u, &ls2, 0u, n);
+          delta_im_sign = new_di_s;
+          if (((delta_re[(n - 1u)] > 3u) || (delta_im[(n - 1u)] > 3u))) {
+            is_glitched = 1u;
+            glitch_iter = iter;
+            break;
+          } else {
+          }
+          full_re_s = signed_add_to_wg_mem___local_4___local_4___local_4___local_4(zn_re, zn_re_s, &delta_re, delta_re_sign, &t1, 0u, &ls1, 0u, &ls2, 0u, n);
+          full_im_s = signed_add_to_wg_mem___local_4___local_4___local_4___local_4(zn_im, zn_im_s, &delta_im, delta_im_sign, &t2, 0u, &ls1, 0u, &ls2, 0u, n);
+          fr2_s = signed_mul_to___local_4___local_4___local_4___local_8(&t1, full_re_s, &t1, full_re_s, &t3, 0u, &lprod, 0u, n, frac_limbs);
+          fi2_s = signed_mul_to___local_4___local_4___local_4___local_8(&t2, full_im_s, &t2, full_im_s, &t4, 0u, &lprod, 0u, n, frac_limbs);
+          _call_tmp = add_limbs_to___local_4___local_4___local_4(&t3, &t4, &t5, 0u, n);
+          thresh_off = 5u;
+          borrow = sub_limbs_to___local_4_params___local_4(&t5, thresh_off, &t1, 0u, n);
+          if ((borrow == 0u)) {
+            if ((escaped_iter == max_iters)) {
+              escaped_iter = iter;
+            } else {
+            }
+          } else {
+          }
+          iter = (iter + 1u);
         }
       }
     } else {
@@ -1051,8 +1023,10 @@ fn mandelbrot_perturbation(
       wg_mem[glitch_count_addr] = g_count;
       wg_mem[best_ref_addr] = best_idx;
       if ((g_count > 0u)) {
-        best_gx = ((gid_x - lid_x) + (best_idx % 16u));
-        best_gy = ((gid_y - lid_y) + (best_idx / 16u));
+        best_gx_raw = ((gid_x - lid_x) + (best_idx % 16u));
+        best_gy_raw = ((gid_y - lid_y) + (best_idx / 16u));
+        best_gx = select(best_gx_raw, (width - 1u), (best_gx_raw >= width));
+        best_gy = select(best_gy_raw, (height - 1u), (best_gy_raw >= height));
         best_tid = ((best_gy * width) + best_gx);
         best_c_off = (best_tid * c_stride_px);
         for (var i: u32 = 0u; i < n; i++) {
@@ -1072,6 +1046,7 @@ fn mandelbrot_perturbation(
       break;
     } else {
     }
+    round = (round + 1u);
   }
   alpha = 4278190080u;
   if ((escaped_iter >= max_iters)) {
@@ -1080,7 +1055,8 @@ fn mandelbrot_perturbation(
     t_col = ((escaped_iter * 255u) / max_iters);
     r = t_col;
     g = (t_col / 3u);
-    b = (255u - (t_col / 2u));
+    half_t = (t_col / 2u);
+    b = (255u - half_t);
     iter_counts[tid] = (((alpha | (b << 16u)) | (g << 8u)) | r);
   }
 }
