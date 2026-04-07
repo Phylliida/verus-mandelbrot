@@ -30,3 +30,6 @@ pub mod gpu_mandelbrot_kernel;
 
 // gpu_kernel_n4: transpiler-only (not compiled by Verus)
 // pub mod gpu_kernel_n4;
+
+#[cfg(verus_keep_ghost)]
+pub mod gpu_perturbation_entry;
