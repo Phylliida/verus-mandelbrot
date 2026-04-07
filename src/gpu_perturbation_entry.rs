@@ -35,8 +35,9 @@ proof fn lemma_tid_cstride_safe(tid: int, cs: int, wh: int)
     requires 0 <= tid, tid < wh, 0 <= cs, wh * cs < u32_max(),
     ensures tid * cs < u32_max(),
 {
-    assert(tid * cs < wh * cs) by(nonlinear_arith)
-        requires 0 <= tid, tid < wh, 0 <= cs;
+    assert(tid * cs <= wh * cs) by(nonlinear_arith)
+        requires 0 <= tid, tid < wh, cs >= 0;
+    assert(tid * cs < u32_max());
 }
 
 /// No-op barrier for Verus verification (GPU semantics handled by transpiler).
