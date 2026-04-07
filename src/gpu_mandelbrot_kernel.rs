@@ -459,6 +459,231 @@ proof fn corollary_mandelbrot_no_overflow(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// THEOREM: Fixed-point multiplication truncation error
+// ═══════════════════════════════════════════════════════════════
+
+/// The truncated product satisfies: trunc(a*b) * scale ≤ a*b < (trunc(a*b) + 1) * scale.
+/// In other words, trunc(a*b) = floor(a*b / scale), with error < 1 ulp (unit in last place).
+proof fn lemma_truncation_error(a: int, b: int, scale: int, p: int)
+    requires
+        a >= 0, b >= 0, scale > 0, p > 0,
+        a * b >= 0,
+    ensures ({
+        let trunc = ((a * b) / scale) % p;
+        let exact_div = a * b / scale;  // floor(a*b / scale)
+        // trunc = exact_div mod P
+        // exact_div * scale ≤ a*b < (exact_div + 1) * scale
+        &&& exact_div * scale <= a * b
+        &&& a * b < (exact_div + 1) * scale
+    })
+{
+    let exact_div = a * b / scale;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a * b, scale);
+    // a*b == scale * exact_div + (a*b % scale)
+    // 0 <= a*b % scale < scale
+    assert(exact_div * scale <= a * b) by(nonlinear_arith)
+        requires
+            a * b == scale * exact_div + (a * b) % scale,
+            (a * b) % scale >= 0,
+            scale > 0;
+    assert(a * b < (exact_div + 1) * scale) by(nonlinear_arith)
+        requires
+            a * b == scale * exact_div + (a * b) % scale,
+            (a * b) % scale < scale,
+            scale > 0;
+}
+
+/// Per-multiply truncation bound: floor(a*b/scale) is within 1 ulp of a*b/scale.
+/// Stated as: trunc * scale ≤ a*b < (trunc+1) * scale, where trunc = floor(a*b/scale).
+/// The mod P doesn't affect the bound when a*b/scale < P (bounded inputs).
+proof fn lemma_mul_truncation_bound(a: int, b: int, scale: int)
+    requires a >= 0, b >= 0, scale > 0,
+    ensures ({
+        let trunc = a * b / scale;
+        &&& trunc * scale <= a * b
+        &&& a * b < (trunc + 1) * scale
+        &&& trunc >= 0
+    })
+{
+    lemma_truncation_error(a, b, scale, 1);
+}
+
+/// Complex squaring truncation error: new_re and new_im each have bounded error.
+///
+/// Given: re2 = floor(re*re/S), im2 = floor(im*im/S), sum2 = floor(rpi*rpi/S)
+/// Then:
+///   new_re = re2 - im2, error from exact (re²-im²)/S: at most 2 ulps
+///   new_im = sum2 - re2 - im2, error from exact 2*re*im/S: at most 3 ulps
+///
+/// Proof: each floor truncation loses < 1, and subtraction adds errors.
+proof fn theorem_complex_square_error(
+    re: int, im: int, scale: int,
+)
+    requires re >= 0, im >= 0, scale > 0,
+    ensures ({
+        let re2 = re * re / scale;
+        let im2 = im * im / scale;
+        let rpi = re + im;
+        let sum2 = rpi * rpi / scale;
+        let new_re = re2 - im2;
+        let new_im = sum2 - re2 - im2;
+        let exact_re = (re * re - im * im) / scale;
+        let exact_im = (2 * re * im) / scale;
+        // new_re is within 2 ulps of exact
+        &&& new_re >= exact_re
+        &&& new_re <= exact_re + 1
+        // new_im is within 3 ulps of exact
+        &&& new_im >= exact_im
+        &&& new_im <= exact_im + 2
+    })
+{
+    let S = scale;
+    lemma_mul_truncation_bound(re, re, S);
+    lemma_mul_truncation_bound(im, im, S);
+    lemma_mul_truncation_bound(re + im, re + im, S);
+
+    let re2 = re * re / S;
+    let im2 = im * im / S;
+    let rpi = re + im;
+    let sum2 = rpi * rpi / S;
+
+    // re2 = floor(re²/S), so re² = re2*S + r1 where 0 ≤ r1 < S
+    // im2 = floor(im²/S), so im² = im2*S + r2 where 0 ≤ r2 < S
+    // exact_re = floor((re² - im²)/S)
+
+    // re² - im² = (re2 - im2)*S + (r1 - r2)
+    // If r1 ≥ r2: floor((re²-im²)/S) = re2 - im2, new_re = re2 - im2 = exact_re ✓
+    // If r1 < r2: floor((re²-im²)/S) = re2 - im2 - 1 (since r1-r2 < 0, borrows 1)
+    //   new_re = re2 - im2 = exact_re + 1 ✓
+    // So new_re ∈ {exact_re, exact_re + 1} ← error ≤ 1 ulp
+
+    // For new_im: sum2 - re2 - im2
+    // (re+im)² = re² + 2*re*im + im²
+    // sum2 = floor((re+im)²/S) = floor((re² + 2*re*im + im²)/S)
+    // sum2 - re2 - im2 = floor((re²+2ri+im²)/S) - floor(re²/S) - floor(im²/S)
+    // exact_im = floor(2*re*im/S)
+    // Error: sum2 - re2 - im2 - exact_im
+    //   = floor((re²+2ri+im²)/S) - floor(re²/S) - floor(im²/S) - floor(2ri/S)
+    //   ∈ [0, 2] (each floor loses at most 1, and we subtract 3 floors from 1)
+
+    // The algebraic identity: (re+im)² = re² + 2*re*im + im²
+    assert(rpi * rpi == re * re + 2 * re * im + im * im) by(nonlinear_arith)
+        requires rpi == re + im;
+
+    // Bounds from truncation:
+    // re2*S ≤ re² < (re2+1)*S
+    // im2*S ≤ im² < (im2+1)*S
+    // sum2*S ≤ (re+im)² < (sum2+1)*S
+
+    // new_re = re2 - im2
+    // exact_re = (re² - im²) / S
+    // From: re² = re2*S + r1 (0≤r1<S), im² = im2*S + r2 (0≤r2<S)
+    // re² - im² = (re2-im2)*S + (r1-r2), where -(S-1) ≤ r1-r2 < S
+    // exact_re = re2-im2 + floor((r1-r2)/S)
+    //   If r1≥r2: floor((r1-r2)/S) = 0, exact_re = re2-im2 = new_re ✓
+    //   If r1<r2: floor((r1-r2)/S) = -1, exact_re = re2-im2-1 = new_re-1 ✓
+    // So: new_re ∈ {exact_re, exact_re+1}
+
+    // new_im = sum2 - re2 - im2
+    // (re+im)² = re² + 2ri + im², so 2ri = (re+im)² - re² - im²
+    // sum2 - re2 - im2 vs exact_im = floor(2ri/S) = floor(((re+im)² - re² - im²)/S)
+    // Let R = (re+im)² - re² - im² = 2ri
+    // sum2*S ≤ (re+im)², re2*S ≤ re², im2*S ≤ im²
+    // (sum2 - re2 - im2)*S ≤ (re+im)² - re² - im² = R → sum2-re2-im2 ≤ R/S
+    // But also: (re+im)² < (sum2+1)*S, re² ≥ re2*S, im² ≥ im2*S
+    // (sum2+1)*S > (re+im)² = R + re² + im² ≥ R + re2*S + im2*S
+    // (sum2+1-re2-im2)*S > R → sum2-re2-im2 > R/S - 1
+    // floor(R/S) ≤ sum2-re2-im2 ... hmm, need to be more careful
+
+    // Actually: exact_im = R/S (exact division would give 2ri/S)
+    // But R = 2ri, and we want floor(2ri/S)
+    // sum2 = floor((re+im)²/S), re2 = floor(re²/S), im2 = floor(im²/S)
+    // sum2 - re2 - im2: we need bounds
+
+    // Lower bound: sum2*S ≤ (re+im)², re² < (re2+1)*S, im² < (im2+1)*S
+    // (re+im)² = 2ri + re² + im² < 2ri + (re2+1)*S + (im2+1)*S = 2ri + (re2+im2+2)*S
+    // sum2*S ≤ 2ri + (re2+im2+2)*S - ... hmm this is getting circular.
+
+    // Simpler: just assert with nonlinear_arith using the truncation bounds
+    assert(re * re >= re2 * S);
+    assert(re * re < (re2 + 1) * S);
+    assert(im * im >= im2 * S);
+    assert(im * im < (im2 + 1) * S);
+    assert(rpi * rpi >= sum2 * S);
+    assert(rpi * rpi < (sum2 + 1) * S);
+
+    let exact_re = (re * re - im * im) / S;
+    let exact_im = (2 * re * im) / S;
+    let new_re = re2 - im2;
+    let new_im = sum2 - re2 - im2;
+
+    // new_re bounds
+    assert(new_re >= exact_re) by {
+        // re² - im² ≤ re2*S + S - 1 - im2*S = (re2-im2)*S + S - 1 = new_re*S + S - 1
+        // So (re²-im²)/S ≤ new_re + (S-1)/S < new_re + 1
+        // floor((re²-im²)/S) ≤ new_re
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(re * re - im * im, S);
+        assert((re * re - im * im) < (new_re + 1) * S) by(nonlinear_arith)
+            requires re * re < (re2 + 1) * S, im * im >= im2 * S, new_re == re2 - im2;
+        assert((re * re - im * im) / S <= new_re) by(nonlinear_arith)
+            requires
+                re * re - im * im == S * ((re * re - im * im) / S) + (re * re - im * im) % S,
+                (re * re - im * im) < (new_re + 1) * S,
+                (re * re - im * im) % S >= 0,
+                S > 0;
+    };
+    assert(new_re <= exact_re + 1) by {
+        // re² - im² ≥ re2*S - (im2*S + S - 1) = (re2-im2)*S - S + 1 = (new_re-1)*S + 1
+        // So (re²-im²)/S ≥ new_re - 1 + 1/S > new_re - 1
+        // floor((re²-im²)/S) ≥ new_re - 1
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(re * re - im * im, S);
+        assert((re * re - im * im) >= (new_re - 1) * S + 1) by(nonlinear_arith)
+            requires re * re >= re2 * S, im * im < (im2 + 1) * S, new_re == re2 - im2;
+        assert((re * re - im * im) / S >= new_re - 1) by(nonlinear_arith)
+            requires
+                re * re - im * im == S * ((re * re - im * im) / S) + (re * re - im * im) % S,
+                (re * re - im * im) >= (new_re - 1) * S + 1,
+                (re * re - im * im) % S < S,
+                S > 0;
+    };
+
+    // new_im bounds: new_im ∈ [exact_im, exact_im + 2]
+    assert(new_im >= exact_im) by {
+        // 2ri < (new_im+1)*S: from rpi² < (sum2+1)*S, re²≥re2*S, im²≥im2*S
+        assert(2 * re * im < (new_im + 1) * S) by(nonlinear_arith)
+            requires
+                rpi * rpi == re * re + 2 * re * im + im * im,
+                rpi * rpi < (sum2 + 1) * S,
+                re * re >= re2 * S,
+                im * im >= im2 * S,
+                new_im == sum2 - re2 - im2, S > 0;
+        // 2ri < (new_im+1)*S → floor(2ri/S) ≤ new_im
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(2 * re * im, S);
+        assert(exact_im <= new_im) by(nonlinear_arith)
+            requires
+                2 * re * im < (new_im + 1) * S,
+                2 * re * im == S * exact_im + (2 * re * im) % S,
+                (2 * re * im) % S >= 0, S > 0;
+    };
+    assert(new_im <= exact_im + 2) by {
+        // 2ri ≥ (new_im-2)*S: from rpi²≥sum2*S, re²<(re2+1)*S, im²<(im2+1)*S
+        assert(2 * re * im >= (new_im - 2) * S) by(nonlinear_arith)
+            requires
+                rpi * rpi == re * re + 2 * re * im + im * im,
+                rpi * rpi >= sum2 * S,
+                re * re < (re2 + 1) * S,
+                im * im < (im2 + 1) * S,
+                new_im == sum2 - re2 - im2, S > 0;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(2 * re * im, S);
+        assert(exact_im >= new_im - 2) by(nonlinear_arith)
+            requires
+                2 * re * im >= (new_im - 2) * S,
+                2 * re * im == S * exact_im + (2 * re * im) % S,
+                (2 * re * im) % S < S, S > 0;
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // THEOREM: Escape check polarity
 // ═══════════════════════════════════════════════════════════════
 
