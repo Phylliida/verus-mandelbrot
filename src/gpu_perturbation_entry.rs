@@ -16,10 +16,34 @@ pub open spec fn u32_max() -> int { 0x1_0000_0000 - 1 }
 
 proof fn lemma_mul_u32_safe(a: int, b: int)
     requires 0 <= a, a <= 65535, 0 <= b, b <= 65535,
-    ensures a * b < 4294967296,
+    ensures a * b <= 65535 * 65535,
+            a * b < 4294967296,
 {
     assert(a * b <= 65535 * 65535) by(nonlinear_arith)
         requires 0 <= a, a <= 65535, 0 <= b, b <= 65535;
+}
+
+proof fn lemma_tid_safe(gy: int, w: int, gx: int, h: int)
+    requires 0 <= gy, gy < h, h <= 65535, 0 <= gx, gx < w, w <= 65535,
+    ensures gy * w + gx < 4294967296,
+            gy * w + gx < w * h,
+{
+    assert(gy * w <= (h - 1) * w) by(nonlinear_arith)
+        requires 0 <= gy, gy < h, 0 <= w;
+    assert((h - 1) * w + gx < w * h) by(nonlinear_arith)
+        requires 0 <= gx, gx < w, w <= 65535, h <= 65535;
+    lemma_mul_u32_safe(h - 1, w);
+}
+
+proof fn lemma_cdata_offset_safe(tid: int, cs: int, wh: int, cdata_len: int)
+    requires 0 <= tid, tid < wh, cs >= 1, wh * cs <= cdata_len, wh * cs < u32_max(),
+    ensures tid * cs + cs <= cdata_len,
+            tid * cs + cs < u32_max(),
+{
+    assert((tid + 1) * cs <= wh * cs) by(nonlinear_arith)
+        requires 0 <= tid, tid < wh, cs >= 1;
+    assert(tid * cs + cs == (tid + 1) * cs) by(nonlinear_arith)
+        requires cs >= 1;
 }
 
 proof fn lemma_iter_stride_safe(iter: int, z_stride: int, max_bound: int)
@@ -144,7 +168,7 @@ fn mandelbrot_perturbation(
     if gid_x >= width { return; }
     if gid_y >= height { return; }
 
-    proof { lemma_mul_u32_safe(gid_y as int, width as int); }
+    proof { lemma_tid_safe(gid_y as int, width as int, gid_x as int, height as int); }
     let tid = gid_y * width + gid_x;
     let local_id = lid_y * 16u32 + lid_x;
 
@@ -184,8 +208,12 @@ fn mandelbrot_perturbation(
     let best_ref_addr = glitch_count_addr + 1u32;    // local_id of best new reference
     // Per-pixel c from c_data buffer (absolute coordinates)
     let c_stride_px = 2u32 * n + 2u32;
-    proof { lemma_tid_cstride_safe(tid as int, c_stride_px as int, width as int * height as int); }
+    proof {
+        lemma_tid_cstride_safe(tid as int, c_stride_px as int, (width as int) * (height as int));
+        lemma_cdata_offset_safe(tid as int, c_stride_px as int, (width as int) * (height as int), c_data@.len() as int);
+    }
     let c_re_off = tid * c_stride_px;
+    // c_re_off + c_stride_px < u32_max, so c_re_off + n < u32_max (since n < c_stride_px)
     let c_re_sign_off = c_re_off + n;
     let c_im_off = c_re_sign_off + 1u32;
     let c_im_sign_off = c_im_off + n;
@@ -233,6 +261,9 @@ fn mandelbrot_perturbation(
     // #[gpu_local(4)]
     let mut ref_b: Vec<u32> = generic_zero_vec(n as usize);
 
+    // Ghost: capture the u32 overflow bound for use in invariants
+    let ghost wh_cs_bound: int = (width as int) * (height as int) * (c_stride_px as int);
+
     let mut escaped_iter = max_iters;
     let mut is_glitched = 1u32; // start as "needs computation"
     let mut glitch_iter = 0u32; // iteration where glitch was detected
@@ -241,6 +272,23 @@ fn mandelbrot_perturbation(
     // Iterative refinement loop
     // ═══════════════════════════════════════════════════
     let max_rounds = 5u32;
+
+    // Prove shared memory layout bounds before entering the loop
+    // Total layout: (max_iters+2)*z_stride + 10*n + 259 <= 8192
+    // So: best_ref_addr + 1 <= total <= 8192
+    // And: vote_base + 256 = glitch_count_addr <= best_ref_addr < 8192
+    // Layout: total = ref_c_base + z_stride + 10*n + 259
+    //       = (max_iters+2)*z_stride + 10*n + 259 <= 8192
+    // best_ref_addr = ref_c_base + z_stride + 10*n + 1 + 256 + 1
+    //               = ref_c_base + z_stride + 10*n + 258
+    // So best_ref_addr < total <= 8192.
+    // But Z3 needs explicit help with the chain of let bindings.
+    // t0_tmp_base = ref_c_base + z_stride
+    // ref_escape_addr = t0_tmp_base + 10*n = ref_c_base + z_stride + 10*n
+    // vote_base = ref_escape_addr + 1
+    // glitch_count_addr = vote_base + 256 = ref_escape_addr + 257
+    // best_ref_addr = glitch_count_addr + 1 = ref_escape_addr + 258
+    // = ref_c_base + z_stride + 10*n + 258 < total = ref_c_base + z_stride + 10*n + 259 <= 8192
 
     for round in 0u32..max_rounds
         invariant
@@ -264,14 +312,18 @@ fn mandelbrot_perturbation(
             old(wg_mem)@.len() >= 8192,
             iter_counts@.len() == old(iter_counts)@.len(),
             // c_data and iter_counts size
-            c_data@.len() as int >= width as int * height as int * (2 * n as int + 2),
+            c_data@.len() as int >= wh_cs_bound,
+            wh_cs_bound == (width as int) * (height as int) * (c_stride_px as int),
+            wh_cs_bound < u32_max(),
             iter_counts@.len() as int >= width as int * height as int,
             // params
             params@.len() as int >= 5 + n as int,
             // Shared memory address bounds
             vote_base + 256u32 < 8192u32,
+            glitch_count_addr < 8192u32,
             best_ref_addr < 8192u32,
-            ref_c_base < 8192u32,
+            ref_c_base + z_stride < 8192u32,
+            ref_escape_addr < 8192u32,
             c_stride_px == 2u32 * n + 2u32,
             // Local array sizes
             delta_re@.len() == n as int,
@@ -305,18 +357,21 @@ fn mandelbrot_perturbation(
                 let ref_y = gid_y - lid_y + 8u32;
                 let ref_x_c = if ref_x >= width { width - 1u32 } else { ref_x };
                 let ref_y_c = if ref_y >= height { height - 1u32 } else { ref_y };
-                proof { lemma_mul_u32_safe(ref_y_c as int, width as int); }
+                proof { lemma_tid_safe(ref_y_c as int, width as int, ref_x_c as int, height as int); }
                 let ref_tid_init = ref_y_c * width + ref_x_c;
-                proof { lemma_tid_cstride_safe(ref_tid_init as int, c_stride_px as int, width as int * height as int); }
+                proof {
+                    lemma_tid_cstride_safe(ref_tid_init as int, c_stride_px as int, (width as int) * (height as int));
+                    lemma_cdata_offset_safe(ref_tid_init as int, c_stride_px as int, (width as int) * (height as int), c_data@.len() as int);
+                }
                 let ref_c_off = ref_tid_init * c_stride_px;
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
                         ref_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
                         c_stride_px == 2 * n + 2,
                 { vset(wg_mem, ref_c_base + i, vget(c_data, ref_c_off + i)); }
                 vset(wg_mem, ref_c_base + n, vget(c_data, ref_c_off + n));
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
                         ref_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
                         c_stride_px == 2 * n + 2,
                 { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, ref_c_off + n + 1u32 + i)); }
@@ -345,7 +400,7 @@ fn mandelbrot_perturbation(
                     ((max_iters as int) + 1) * (z_stride as int) < 8192,
                     ref_a@.len() == n as int, ref_b@.len() == n as int,
                     frac_limbs <= n, frac_limbs + n <= 2 * n,
-                    ref_c_base < 8192u32,
+                    ref_c_base + z_stride < 8192u32,
                     ref_escaped <= max_iters,
             {
                 proof { lemma_iter_stride_safe(iter as int, z_stride as int, (max_iters as int) + 1); }
@@ -618,20 +673,26 @@ fn mandelbrot_perturbation(
 
             // Update ref_c to the best pixel's c value
             if g_count > 0u32 {
-                let best_gx = gid_x - lid_x + (best_idx % 16u32);
-                let best_gy = gid_y - lid_y + (best_idx / 16u32);
-                proof { lemma_mul_u32_safe(best_gy as int, width as int); }
+                let best_gx_raw = gid_x - lid_x + (best_idx % 16u32);
+                let best_gy_raw = gid_y - lid_y + (best_idx / 16u32);
+                // Clamp to grid bounds (border workgroups may exceed width/height)
+                let best_gx = if best_gx_raw >= width { width - 1u32 } else { best_gx_raw };
+                let best_gy = if best_gy_raw >= height { height - 1u32 } else { best_gy_raw };
+                proof { lemma_tid_safe(best_gy as int, width as int, best_gx as int, height as int); }
                 let best_tid = best_gy * width + best_gx;
-                proof { lemma_tid_cstride_safe(best_tid as int, c_stride_px as int, width as int * height as int); }
+                proof {
+                    lemma_tid_cstride_safe(best_tid as int, c_stride_px as int, (width as int) * (height as int));
+                    lemma_cdata_offset_safe(best_tid as int, c_stride_px as int, (width as int) * (height as int), c_data@.len() as int);
+                }
                 let best_c_off = best_tid * c_stride_px;
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
                         best_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
                         c_stride_px == 2 * n + 2,
                 { vset(wg_mem, ref_c_base + i, vget(c_data, best_c_off + i)); }
                 vset(wg_mem, ref_c_base + n, vget(c_data, best_c_off + n));
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
                         best_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
                         c_stride_px == 2 * n + 2,
                 { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, best_c_off + n + 1u32 + i)); }
