@@ -1,36 +1,43 @@
 /// GPU Mandelbrot kernel with perturbation theory.
+/// VERIFIED by Verus AND transpiled to WGSL.
 ///
-/// Architecture: each 16×16 workgroup:
-/// 1. Thread 0 computes reference orbit Z_0..Z_N → workgroup shared memory
+/// Architecture: each 16x16 workgroup:
+/// 1. Thread 0 computes reference orbit Z_0..Z_N in workgroup shared memory
 /// 2. workgroupBarrier()
-/// 3. All 256 threads compute perturbation δ using local arrays
-///
-/// Reference orbit uses shared memory (fast on-chip SRAM).
-/// Per-pixel δ uses thread-local arrays (registers via #[gpu_local]).
-/// Δc = c_pixel - c_ref computed once per pixel.
-///
-/// All arithmetic from verified verus-fixed-point (944 verified, 0 errors).
+/// 3. All 256 threads compute perturbation delta using local arrays
 
+use vstd::prelude::*;
 use verus_fixed_point::fixed_point::limb_ops::*;
 
-// Shared memory layout (for N=4, max_iters=200):
-//   orbit: max_iters * (2*N+2) = 200*10 = 2000 words (8KB)
-//   ref_c: 2*N+2 = 10 words
-//   tmp region for thread 0: ~50 words
-//   Total: ~2100 words ≈ 8.5KB (well within 16-48KB limit)
-//
-// We allocate 4096 words = 16KB to be safe.
-#[gpu_kernel(workgroup_size(16, 16, 1))]
+verus! {
+
+/// No-op barrier for Verus verification (GPU semantics handled by transpiler).
+#[verifier::external_body]
+fn gpu_workgroup_barrier() { }
+
+// #[gpu_kernel(workgroup_size(16, 16, 1))]
 fn mandelbrot_perturbation(
-    #[gpu_builtin(thread_id_x)] gid_x: u32,
-    #[gpu_builtin(thread_id_y)] gid_y: u32,
-    #[gpu_builtin(local_id_x)] lid_x: u32,
-    #[gpu_builtin(local_id_y)] lid_y: u32,
-    #[gpu_buffer(0, read)] c_data: &[u32],
-    #[gpu_shared(8192)] wg_mem: &mut [u32],
-    #[gpu_buffer(1, read_write)] iter_counts: &mut [u32],
-    #[gpu_buffer(2, read)] params: &[u32],
-) {
+    // #[gpu_builtin(thread_id_x)]
+    gid_x: u32,
+    // #[gpu_builtin(thread_id_y)]
+    gid_y: u32,
+    // #[gpu_builtin(local_id_x)]
+    lid_x: u32,
+    // #[gpu_builtin(local_id_y)]
+    lid_y: u32,
+    // #[gpu_buffer(0, read)]
+    c_data: &Vec<u32>,
+    // #[gpu_shared(8192)]
+    wg_mem: &mut Vec<u32>,
+    // #[gpu_buffer(1, read_write)]
+    iter_counts: &mut Vec<u32>,
+    // #[gpu_buffer(2, read)]
+    params: &Vec<u32>,
+)
+    requires
+        params@.len() >= 10,
+        params@[3].sem() > 0,  // n > 0
+{
     let width = params[0u32];
     let height = params[1u32];
     let max_iters = params[2u32];
@@ -239,8 +246,13 @@ fn mandelbrot_perturbation(
             let ref_escaped = wg_mem[ref_escape_addr];
 
             for iter in 0u32..max_iters {
-                // Stop if reference orbit escaped (Z values after this are garbage)
-                if iter >= ref_escaped { break; }
+                // If reference orbit escaped, Z values after this are garbage.
+                // Mark as glitched so refinement loop picks a new reference.
+                if iter >= ref_escaped {
+                    is_glitched = 1u32;
+                    glitch_iter = iter;
+                    break;
+                }
 
                 let zn = orbit_base + iter * z_stride;
                 let zn_re = zn;
@@ -372,3 +384,5 @@ fn mandelbrot_perturbation(
         iter_counts[tid] = alpha | (b << 16u32) | (g << 8u32) | r;
     }
 }
+
+} // verus!
