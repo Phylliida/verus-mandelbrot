@@ -40,10 +40,6 @@ fn vslice(v: &Vec<u32>, off: u32) -> (out: &[u32])
 /// Get mutable slice of Vec starting at u32 offset.
 #[verifier::external_body]
 #[inline]
-fn vslice_mut(v: &mut Vec<u32>, off: u32) -> (out: &mut [u32])
-    requires off <= old(v)@.len(),
-    ensures out@.len() == old(v)@.len() - off,
-{ &mut v.as_mut_slice()[(off as usize)..] }
 
 // #[gpu_kernel(workgroup_size(16, 16, 1))]
 fn mandelbrot_perturbation(
@@ -194,57 +190,57 @@ fn mandelbrot_perturbation(
                 let zk_im_sign = zk + 2u32 * n + 1u32;
 
                 // Z_{k+1} = Z_k^2 + c_ref (3-multiply complex square)
-                let re2_s = signed_mul_to(
+                let re2_s = signed_mul_to_buf(
                     vslice(wg_mem, zk_re), &vget(wg_mem, zk_re_sign),
                     vslice(wg_mem, zk_re), &vget(wg_mem, zk_re_sign),
-                    vslice_mut(wg_mem, t0_re2), vslice_mut(wg_mem, t0_prod), n as usize, frac_limbs as usize);
-                let im2_s = signed_mul_to(
+                    wg_mem, t0_re2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+                let im2_s = signed_mul_to_buf(
                     vslice(wg_mem, zk_im), &vget(wg_mem, zk_im_sign),
                     vslice(wg_mem, zk_im), &vget(wg_mem, zk_im_sign),
-                    vslice_mut(wg_mem, t0_im2), vslice_mut(wg_mem, t0_prod), n as usize, frac_limbs as usize);
-                let rpi_s = signed_add_to(
+                    wg_mem, t0_im2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+                let rpi_s = signed_add_to_buf(
                     vslice(wg_mem, zk_re), &vget(wg_mem, zk_re_sign),
                     vslice(wg_mem, zk_im), &vget(wg_mem, zk_im_sign),
-                    vslice_mut(wg_mem, t0_rpi), vslice_mut(wg_mem, t0_stmp1), vslice_mut(wg_mem, t0_stmp2), n as usize);
-                let sum2_s = signed_mul_to(
+                    wg_mem, t0_rpi as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+                let sum2_s = signed_mul_to_buf(
                     vslice(wg_mem, t0_rpi), &rpi_s,
                     vslice(wg_mem, t0_rpi), &rpi_s,
-                    vslice_mut(wg_mem, t0_sum2), vslice_mut(wg_mem, t0_prod), n as usize, frac_limbs as usize);
+                    wg_mem, t0_sum2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
 
                 let zn = orbit_base + (iter + 1u32) * z_stride;
 
                 // new_re = re^2 - im^2 + c_re
-                let diff_s = signed_sub_to(
+                let diff_s = signed_sub_to_buf(
                     vslice(wg_mem, t0_re2), &re2_s,
                     vslice(wg_mem, t0_im2), &im2_s,
-                    vslice_mut(wg_mem, t0_diff), vslice_mut(wg_mem, t0_stmp1), vslice_mut(wg_mem, t0_stmp2), n as usize);
-                let new_re_s = signed_add_to(
+                    wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+                let new_re_s = signed_add_to_buf(
                     vslice(wg_mem, t0_diff), &diff_s,
                     vslice(wg_mem, ref_c_base), &vget(wg_mem, (ref_c_base + n)),
-                    vslice_mut(wg_mem, zn), vslice_mut(wg_mem, t0_stmp1), vslice_mut(wg_mem, t0_stmp2), n as usize);
+                    wg_mem, zn as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
                 vset(wg_mem, zn + n, new_re_s);
 
                 // new_im = (re+im)^2 - re^2 - im^2 + c_im
-                let t1_s = signed_sub_to(
+                let t1_s = signed_sub_to_buf(
                     vslice(wg_mem, t0_sum2), &sum2_s,
                     vslice(wg_mem, t0_re2), &re2_s,
-                    vslice_mut(wg_mem, t0_diff), vslice_mut(wg_mem, t0_stmp1), vslice_mut(wg_mem, t0_stmp2), n as usize);
-                let t2_s = signed_sub_to(
+                    wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+                let t2_s = signed_sub_to_buf(
                     vslice(wg_mem, t0_diff), &t1_s,
                     vslice(wg_mem, t0_im2), &im2_s,
-                    vslice_mut(wg_mem, t0_stmp3), vslice_mut(wg_mem, t0_stmp1), vslice_mut(wg_mem, t0_stmp2), n as usize);
-                let new_im_s = signed_add_to(
+                    wg_mem, t0_stmp3 as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+                let new_im_s = signed_add_to_buf(
                     vslice(wg_mem, t0_stmp3), &t2_s,
                     vslice(wg_mem, (ref_c_base + n + 1u32)), &vget(wg_mem, (ref_c_base + 2u32 * n + 1u32)),
-                    vslice_mut(wg_mem, (zn + n + 1u32)), vslice_mut(wg_mem, t0_stmp1), vslice_mut(wg_mem, t0_stmp2), n as usize);
+                    wg_mem, (zn + n + 1u32) as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
                 vset(wg_mem, zn + 2u32 * n + 1u32, new_im_s);
 
                 // Check if reference escaped: |Z_{k+1}|² > 4
                 if ref_escaped == max_iters {
                     // re² + im² (reuse t0_re2 = re^2, t0_im2 = im^2 from above)
-                    add_limbs_to(vslice(wg_mem, t0_re2), vslice(wg_mem, t0_im2), vslice_mut(wg_mem, t0_diff), n as usize);
+                    add_limbs_to(vslice(wg_mem, t0_re2), vslice(wg_mem, t0_im2), wg_mem, t0_diff as usize, n as usize);
                     let thresh_off = 5u32;
-                    let esc_borrow = sub_limbs_to(vslice(wg_mem, t0_diff), vslice(params, thresh_off), vslice_mut(wg_mem, t0_stmp1), n as usize);
+                    let esc_borrow = sub_limbs_to(vslice(wg_mem, t0_diff), vslice(params, thresh_off), wg_mem, t0_stmp1 as usize, n as usize);
                     if esc_borrow == 0u32 {
                         ref_escaped = iter + 1u32;
                     }
@@ -261,11 +257,11 @@ fn mandelbrot_perturbation(
             dc_re_sign = signed_sub_to(
                 vslice(c_data, c_re_off), &vget(c_data, c_re_sign_off),
                 vslice(wg_mem, ref_c_base), &vget(wg_mem, (ref_c_base + n)),
-                &mut dc_re, &mut ls1, &mut ls2, n as usize);
+                &mut dc_re, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
             dc_im_sign = signed_sub_to(
                 vslice(c_data, c_im_off), &vget(c_data, c_im_sign_off),
                 vslice(wg_mem, (ref_c_base + n + 1u32)), &vget(wg_mem, (ref_c_base + 2u32 * n + 1u32)),
-                &mut dc_im, &mut ls1, &mut ls2, n as usize);
+                &mut dc_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
 
             // δ_0 = 0
             for i in 0u32..n { delta_re.set(i as usize, 0u32); delta_im.set(i as usize, 0u32); }
@@ -293,37 +289,37 @@ fn mandelbrot_perturbation(
                 // ── δ' = 2·Z_n·δ + δ² + Δc ──
 
                 // Part A: 2*Z*δ (4 multiplies)
-                let s1 = signed_mul_to(vslice(wg_mem, zn_re), &vget(wg_mem, zn_re_sign), &delta_re, &delta_re_sign, &mut t1, &mut lprod, n as usize, frac_limbs as usize);
-                let s2 = signed_mul_to(vslice(wg_mem, zn_im), &vget(wg_mem, zn_im_sign), &delta_im, &delta_im_sign, &mut t2, &mut lprod, n as usize, frac_limbs as usize);
-                let s3 = signed_mul_to(vslice(wg_mem, zn_re), &vget(wg_mem, zn_re_sign), &delta_im, &delta_im_sign, &mut t3, &mut lprod, n as usize, frac_limbs as usize);
-                let s4 = signed_mul_to(vslice(wg_mem, zn_im), &vget(wg_mem, zn_im_sign), &delta_re, &delta_re_sign, &mut t4, &mut lprod, n as usize, frac_limbs as usize);
+                let s1 = signed_mul_to(vslice(wg_mem, zn_re), &vget(wg_mem, zn_re_sign), &delta_re, &delta_re_sign, &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+                let s2 = signed_mul_to(vslice(wg_mem, zn_im), &vget(wg_mem, zn_im_sign), &delta_im, &delta_im_sign, &mut t2, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+                let s3 = signed_mul_to(vslice(wg_mem, zn_re), &vget(wg_mem, zn_re_sign), &delta_im, &delta_im_sign, &mut t3, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+                let s4 = signed_mul_to(vslice(wg_mem, zn_im), &vget(wg_mem, zn_im_sign), &delta_re, &delta_re_sign, &mut t4, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
 
                 // 2*Z*δ real = 2*(t1 - t2)
-                let d1_s = signed_sub_to(&t1, &s1, &t2, &s2, &mut t5, &mut ls1, &mut ls2, n as usize);
-                let tzd_re_s = signed_add_to(&t5, &d1_s, &t5, &d1_s, &mut t1, &mut ls1, &mut ls2, n as usize);
+                let d1_s = signed_sub_to(&t1, &s1, &t2, &s2, &mut t5, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                let tzd_re_s = signed_add_to(&t5, &d1_s, &t5, &d1_s, &mut t1, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
                 // 2*Z*δ imag = 2*(t3 + t4)
-                let d2_s = signed_add_to(&t3, &s3, &t4, &s4, &mut t5, &mut ls1, &mut ls2, n as usize);
-                let tzd_im_s = signed_add_to(&t5, &d2_s, &t5, &d2_s, &mut t2, &mut ls1, &mut ls2, n as usize);
+                let d2_s = signed_add_to(&t3, &s3, &t4, &s4, &mut t5, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                let tzd_im_s = signed_add_to(&t5, &d2_s, &t5, &d2_s, &mut t2, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
 
                 // Part B: δ² (3 multiplies, Karatsuba)
-                let drs_s = signed_mul_to(&delta_re, &delta_re_sign, &delta_re, &delta_re_sign, &mut t3, &mut lprod, n as usize, frac_limbs as usize);
-                let dis_s = signed_mul_to(&delta_im, &delta_im_sign, &delta_im, &delta_im_sign, &mut t4, &mut lprod, n as usize, frac_limbs as usize);
-                let dri_s = signed_add_to(&delta_re, &delta_re_sign, &delta_im, &delta_im_sign, &mut t5, &mut ls1, &mut ls2, n as usize);
-                let dri2_s = signed_mul_to(&t5, &dri_s, &t5, &dri_s, &mut ls1, &mut lprod, n as usize, frac_limbs as usize);
+                let drs_s = signed_mul_to(&delta_re, &delta_re_sign, &delta_re, &delta_re_sign, &mut t3, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+                let dis_s = signed_mul_to(&delta_im, &delta_im_sign, &delta_im, &delta_im_sign, &mut t4, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+                let dri_s = signed_add_to(&delta_re, &delta_re_sign, &delta_im, &delta_im_sign, &mut t5, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                let dri2_s = signed_mul_to(&t5, &dri_s, &t5, &dri_s, &mut ls1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
 
                 // δ² real = δ_re² - δ_im²
-                let dsq_re_s = signed_sub_to(&t3, &drs_s, &t4, &dis_s, &mut t5, &mut delta_re, &mut delta_im, n as usize);
+                let dsq_re_s = signed_sub_to(&t3, &drs_s, &t4, &dis_s, &mut t5, 0usize, &mut delta_re, 0usize, &mut delta_im, 0usize, n as usize);
                 // δ² imag = (δ_re+δ_im)² - δ_re² - δ_im²
-                let q1_s = signed_sub_to(&ls1, &dri2_s, &t3, &drs_s, &mut delta_re, &mut ls2, &mut delta_im, n as usize);
-                let dsq_im_s = signed_sub_to(&delta_re, &q1_s, &t4, &dis_s, &mut t3, &mut ls2, &mut delta_im, n as usize);
+                let q1_s = signed_sub_to(&ls1, &dri2_s, &t3, &drs_s, &mut delta_re, 0usize, &mut ls2, 0usize, &mut delta_im, 0usize, n as usize);
+                let dsq_im_s = signed_sub_to(&delta_re, &q1_s, &t4, &dis_s, &mut t3, 0usize, &mut ls2, 0usize, &mut delta_im, 0usize, n as usize);
 
                 // Part C: δ' = (2*Z*δ) + δ² + Δc
-                let p1_s = signed_add_to(&t1, &tzd_re_s, &t5, &dsq_re_s, &mut t4, &mut ls1, &mut ls2, n as usize);
-                let new_dr_s = signed_add_to(&t4, &p1_s, &dc_re, &dc_re_sign, &mut delta_re, &mut ls1, &mut ls2, n as usize);
+                let p1_s = signed_add_to(&t1, &tzd_re_s, &t5, &dsq_re_s, &mut t4, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                let new_dr_s = signed_add_to(&t4, &p1_s, &dc_re, &dc_re_sign, &mut delta_re, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
                 delta_re_sign = new_dr_s;
 
-                let p2_s = signed_add_to(&t2, &tzd_im_s, &t3, &dsq_im_s, &mut t4, &mut ls1, &mut ls2, n as usize);
-                let new_di_s = signed_add_to(&t4, &p2_s, &dc_im, &dc_im_sign, &mut delta_im, &mut ls1, &mut ls2, n as usize);
+                let p2_s = signed_add_to(&t2, &tzd_im_s, &t3, &dsq_im_s, &mut t4, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                let new_di_s = signed_add_to(&t4, &p2_s, &dc_im, &dc_im_sign, &mut delta_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
                 delta_im_sign = new_di_s;
 
                 // ── Glitch check: fixed-point overflow detection ──
@@ -337,14 +333,14 @@ fn mandelbrot_perturbation(
                 }
 
                 // ── Escape check: |Z_n + δ|² > 4 ──
-                let full_re_s = signed_add_to(vslice(wg_mem, zn_re), &vget(wg_mem, zn_re_sign), &delta_re, &delta_re_sign, &mut t1, &mut ls1, &mut ls2, n as usize);
-                let full_im_s = signed_add_to(vslice(wg_mem, zn_im), &vget(wg_mem, zn_im_sign), &delta_im, &delta_im_sign, &mut t2, &mut ls1, &mut ls2, n as usize);
-                let fr2_s = signed_mul_to(&t1, &full_re_s, &t1, &full_re_s, &mut t3, &mut lprod, n as usize, frac_limbs as usize);
-                let fi2_s = signed_mul_to(&t2, &full_im_s, &t2, &full_im_s, &mut t4, &mut lprod, n as usize, frac_limbs as usize);
-                add_limbs_to(&t3, &t4, &mut t5, n as usize);
+                let full_re_s = signed_add_to(vslice(wg_mem, zn_re), &vget(wg_mem, zn_re_sign), &delta_re, &delta_re_sign, &mut t1, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                let full_im_s = signed_add_to(vslice(wg_mem, zn_im), &vget(wg_mem, zn_im_sign), &delta_im, &delta_im_sign, &mut t2, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                let fr2_s = signed_mul_to(&t1, &full_re_s, &t1, &full_re_s, &mut t3, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+                let fi2_s = signed_mul_to(&t2, &full_im_s, &t2, &full_im_s, &mut t4, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+                add_limbs_to(&t3, &t4, &mut t5, 0usize, n as usize);
 
                 let thresh_off = 5u32;
-                let borrow = sub_limbs_to(&t5, vslice(params, thresh_off), &mut t1, n as usize);
+                let borrow = sub_limbs_to(&t5, vslice(params, thresh_off), &mut t1, 0usize, n as usize);
                 if borrow == 0u32 {
                     if escaped_iter == max_iters {
                         escaped_iter = iter;
