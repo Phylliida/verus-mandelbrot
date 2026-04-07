@@ -15,6 +15,21 @@ verus! {
 #[verifier::external_body]
 fn gpu_workgroup_barrier() { }
 
+/// Vec indexing with u32 (GPU uses u32 indices, Rust needs usize).
+/// Transparent to the transpiler (emits as v[i]).
+#[inline]
+fn vget(v: &Vec<u32>, i: u32) -> (out: u32)
+    requires i < v@.len(),
+    ensures out == v@[i as int],
+{ v[i as usize] }
+
+/// Vec mutable set with u32 index.
+#[inline]
+fn vset(v: &mut Vec<u32>, i: u32, val: u32)
+    requires i < old(v)@.len(),
+    ensures v@ == old(v)@.update(i as int, val), v@.len() == old(v)@.len(),
+{ v.set(i as usize, val) }
+
 // #[gpu_kernel(workgroup_size(16, 16, 1))]
 fn mandelbrot_perturbation(
     // #[gpu_builtin(thread_id_x)]
@@ -38,11 +53,11 @@ fn mandelbrot_perturbation(
         params@.len() >= 10,
         params@[3].sem() > 0,  // n > 0
 {
-    let width = params[0u32];
-    let height = params[1u32];
-    let max_iters = params[2u32];
-    let n = params[3u32];
-    let frac_limbs = params[4u32];
+    let width = vget(params, 0u32);
+    let height = vget(params, 1u32);
+    let max_iters = vget(params, 2u32);
+    let n = vget(params, 3u32);
+    let frac_limbs = vget(params, 4u32);
 
     if gid_x >= width { return; }
     if gid_y >= height { return; }
@@ -140,19 +155,19 @@ fn mandelbrot_perturbation(
                 let ref_y_c = if ref_y >= height { height - 1u32 } else { ref_y };
                 let ref_tid_init = ref_y_c * width + ref_x_c;
                 let ref_c_off = ref_tid_init * c_stride_px;
-                for i in 0u32..n { wg_mem[ref_c_base + i] = c_data[ref_c_off + i]; }
-                wg_mem[ref_c_base + n] = c_data[ref_c_off + n];
-                for i in 0u32..n { wg_mem[ref_c_base + n + 1u32 + i] = c_data[ref_c_off + n + 1u32 + i]; }
-                wg_mem[ref_c_base + 2u32 * n + 1u32] = c_data[ref_c_off + 2u32 * n + 1u32];
+                for i in 0u32..n { vset(wg_mem, ref_c_base + i, vget(c_data, ref_c_off + i)); }
+                vset(wg_mem, ref_c_base + n, vget(c_data, ref_c_off + n));
+                for i in 0u32..n { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, ref_c_off + n + 1u32 + i)); }
+                vset(wg_mem, ref_c_base + 2u32 * n + 1u32, vget(c_data, ref_c_off + 2u32 * n + 1u32));
             }
             // else: ref_c was already updated by glitch analysis below
 
             // Compute reference orbit Z_0..Z_{max_iters}
             let z0_off = orbit_base;
-            for i in 0u32..n { wg_mem[z0_off + i] = 0u32; }
-            wg_mem[z0_off + n] = 0u32;
-            for i in 0u32..n { wg_mem[z0_off + n + 1u32 + i] = 0u32; }
-            wg_mem[z0_off + 2u32 * n + 1u32] = 0u32;
+            for i in 0u32..n { vset(wg_mem, z0_off + i, 0u32); }
+            vset(wg_mem, z0_off + n, 0u32);
+            for i in 0u32..n { vset(wg_mem, z0_off + n + 1u32 + i, 0u32); }
+            vset(wg_mem, z0_off + 2u32 * n + 1u32, 0u32);
 
             let mut ref_escaped = max_iters;
 
@@ -192,7 +207,7 @@ fn mandelbrot_perturbation(
                     &wg_mem[t0_diff..], &diff_s,
                     &wg_mem[ref_c_base..], &wg_mem[ref_c_base + n],
                     &mut wg_mem[zn..], &mut wg_mem[t0_stmp1..], &mut wg_mem[t0_stmp2..], n);
-                wg_mem[zn + n] = new_re_s;
+                vset(wg_mem, zn + n, new_re_s);
 
                 // new_im = (re+im)^2 - re^2 - im^2 + c_im
                 let t1_s = signed_sub_to(
@@ -207,7 +222,7 @@ fn mandelbrot_perturbation(
                     &wg_mem[t0_stmp3..], &t2_s,
                     &wg_mem[ref_c_base + n + 1u32..], &wg_mem[ref_c_base + 2u32 * n + 1u32],
                     &mut wg_mem[zn + n + 1u32..], &mut wg_mem[t0_stmp1..], &mut wg_mem[t0_stmp2..], n);
-                wg_mem[zn + 2u32 * n + 1u32] = new_im_s;
+                vset(wg_mem, zn + 2u32 * n + 1u32, new_im_s);
 
                 // Check if reference escaped: |Z_{k+1}|² > 4
                 if ref_escaped == max_iters {
@@ -220,7 +235,7 @@ fn mandelbrot_perturbation(
                     }
                 }
             }
-            wg_mem[ref_escape_addr] = ref_escaped;
+            vset(wg_mem, ref_escape_addr, ref_escaped);
         }
 
         gpu_workgroup_barrier();
@@ -229,11 +244,11 @@ fn mandelbrot_perturbation(
         if is_glitched == 1u32 && escaped_iter == max_iters {
             // Compute Δc = c_pixel - c_ref
             dc_re_sign = signed_sub_to(
-                &c_data[c_re_off..], &c_data[c_re_sign_off],
+                &vget(c_data, c_re_off..), &vget(c_data, c_re_sign_off),
                 &wg_mem[ref_c_base..], &wg_mem[ref_c_base + n],
                 &mut dc_re, &mut ls1, &mut ls2, n);
             dc_im_sign = signed_sub_to(
-                &c_data[c_im_off..], &c_data[c_im_sign_off],
+                &vget(c_data, c_im_off..), &vget(c_data, c_im_sign_off),
                 &wg_mem[ref_c_base + n + 1u32..], &wg_mem[ref_c_base + 2u32 * n + 1u32],
                 &mut dc_im, &mut ls1, &mut ls2, n);
 
@@ -329,9 +344,9 @@ fn mandelbrot_perturbation(
         // Each thread votes: glitched pixels report their glitch iteration
         // (higher = iterated longer = better reference candidate)
         if is_glitched == 1u32 && escaped_iter == max_iters {
-            wg_mem[vote_base + local_id] = glitch_iter + 1u32; // +1 so 0 means "not glitched"
+            vset(wg_mem, vote_base + local_id, glitch_iter + 1u32); // +1 so 0 means "not glitched"
         } else {
-            wg_mem[vote_base + local_id] = 0u32;
+            vset(wg_mem, vote_base + local_id, 0u32);
         }
 
         gpu_workgroup_barrier();
@@ -350,8 +365,8 @@ fn mandelbrot_perturbation(
                     g_count = g_count + 1u32;
                 }
             }
-            wg_mem[glitch_count_addr] = g_count;
-            wg_mem[best_ref_addr] = best_idx;
+            vset(wg_mem, glitch_count_addr, g_count);
+            vset(wg_mem, best_ref_addr, best_idx);
 
             // Update ref_c to the best pixel's c value
             if g_count > 0u32 {
@@ -359,10 +374,10 @@ fn mandelbrot_perturbation(
                 let best_gy = gid_y - lid_y + (best_idx / 16u32);
                 let best_tid = best_gy * width + best_gx;
                 let best_c_off = best_tid * c_stride_px;
-                for i in 0u32..n { wg_mem[ref_c_base + i] = c_data[best_c_off + i]; }
-                wg_mem[ref_c_base + n] = c_data[best_c_off + n];
-                for i in 0u32..n { wg_mem[ref_c_base + n + 1u32 + i] = c_data[best_c_off + n + 1u32 + i]; }
-                wg_mem[ref_c_base + 2u32 * n + 1u32] = c_data[best_c_off + 2u32 * n + 1u32];
+                for i in 0u32..n { vset(wg_mem, ref_c_base + i, vget(c_data, best_c_off + i)); }
+                vset(wg_mem, ref_c_base + n, vget(c_data, best_c_off + n));
+                for i in 0u32..n { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, best_c_off + n + 1u32 + i)); }
+                vset(wg_mem, ref_c_base + 2u32 * n + 1u32, vget(c_data, best_c_off + 2u32 * n + 1u32));
             }
         }
 
@@ -375,13 +390,13 @@ fn mandelbrot_perturbation(
     // ── Colorize ──
     let alpha = 4278190080u32;
     if escaped_iter >= max_iters {
-        iter_counts[tid] = alpha;
+        vset(iter_counts, tid, alpha);
     } else {
         let t_col = escaped_iter * 255u32 / max_iters;
         let r = t_col;
         let g = t_col / 3u32;
         let b = 255u32 - t_col / 2u32;
-        iter_counts[tid] = alpha | (b << 16u32) | (g << 8u32) | r;
+        vset(iter_counts, tid, alpha | (b << 16u32) | (g << 8u32) | r);
     }
 }
 
