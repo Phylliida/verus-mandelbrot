@@ -70,6 +70,128 @@ proof fn lemma_mod_noop(x: int, m: int)
         requires x == m * (x / m) + x % m, x >= 0, x < m, x % m >= 0, m > 0;
 }
 
+/// Sign-magnitude truncation: -(|x|/S) vs (-|x|)/S differ by at most 1 ULP.
+/// The exec computes sign * floor(|product|/S), but the spec uses floor(product/S).
+/// These agree when the product is non-negative. When the product is negative,
+/// the exec result is 1 ULP larger (closer to zero) than the spec floor.
+proof fn lemma_signed_trunc_approx(product: int, abs_product: int, S: int)
+    requires
+        S > 0,
+        abs_product >= 0,
+        product == abs_product || product == -(abs_product as int),
+    ensures ({
+        let trunc = abs_product / S;
+        let signed_trunc: int = if product >= 0 { trunc } else { -trunc };
+        &&& signed_trunc >= product / S
+        &&& signed_trunc <= product / S + 1
+    })
+{
+    let trunc = abs_product / S;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(abs_product, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(product, S);
+    if product >= 0 {
+        // product == abs_product, signed_trunc = trunc = product/S
+        assert(product == abs_product);
+    } else {
+        // product = -abs_product < 0, signed_trunc = -trunc = -(abs_product/S)
+        assert(product == -(abs_product as int));
+        let signed_trunc: int = -trunc;
+        // abs_product = S * trunc + abs_product % S, 0 ≤ abs_product%S < S
+        // product = -S * trunc - abs_product%S
+        // product/S = -trunc when abs_product%S == 0
+        // product/S = -trunc - 1 when abs_product%S > 0
+        // So signed_trunc = -trunc ∈ {product/S, product/S + 1}
+        assert(signed_trunc >= product / S) by(nonlinear_arith)
+            requires
+                abs_product == S * trunc + abs_product % S,
+                abs_product % S >= 0,
+                product == -(abs_product as int),
+                product == S * (product / S) + product % S,
+                product % S >= 0, product % S < S,
+                signed_trunc == -trunc,
+                S > 0;
+        assert(signed_trunc <= product / S + 1) by(nonlinear_arith)
+            requires
+                abs_product == S * trunc + abs_product % S,
+                abs_product % S < S,
+                product == -(abs_product as int),
+                product == S * (product / S) + product % S,
+                product % S >= 0,
+                signed_trunc == -trunc,
+                S > 0;
+    }
+}
+
+/// floor(A/S) - floor(B/S) ∈ [floor((A-B)/S), floor((A-B)/S) + 1].
+/// Works for all integers A, B, S > 0.
+proof fn lemma_floor_diff_two(A: int, B: int, S: int)
+    requires S > 0,
+    ensures ({
+        let D = A - B;
+        &&& A / S - B / S >= D / S
+        &&& A / S - B / S <= D / S + 1
+    })
+{
+    let fA = A / S;
+    let fB = B / S;
+    let D = A - B;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(A, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(B, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(D, S);
+    // Establish bounds from div/mod
+    assert(A >= fA * S && A < (fA + 1) * S) by(nonlinear_arith)
+        requires A == S * fA + A % S, A % S >= 0, A % S < S, S > 0;
+    assert(B >= fB * S && B < (fB + 1) * S) by(nonlinear_arith)
+        requires B == S * fB + B % S, B % S >= 0, B % S < S, S > 0;
+    // Lower bound
+    assert(D < (fA - fB + 1) * S) by(nonlinear_arith)
+        requires A < (fA + 1) * S, B >= fB * S, D == A - B;
+    assert(D / S <= fA - fB) by(nonlinear_arith)
+        requires D == S * (D / S) + D % S, D < (fA - fB + 1) * S, D % S >= 0, S > 0;
+    // Upper bound
+    assert(D >= (fA - fB - 1) * S) by(nonlinear_arith)
+        requires A >= fA * S, B < (fB + 1) * S, D == A - B;
+    assert(D / S >= fA - fB - 1) by(nonlinear_arith)
+        requires D == S * (D / S) + D % S, D >= (fA - fB - 1) * S, D % S < S, S > 0;
+}
+
+/// floor(A/S) - floor(B/S) - floor(C/S) ∈ [floor((A-B-C)/S), floor((A-B-C)/S) + 2].
+/// Works for all integers A, B, C, S > 0.
+proof fn lemma_floor_diff_three(A: int, B: int, C: int, S: int)
+    requires S > 0,
+    ensures ({
+        let D = A - B - C;
+        &&& A / S - B / S - C / S >= D / S
+        &&& A / S - B / S - C / S <= D / S + 2
+    })
+{
+    let fA = A / S;
+    let fB = B / S;
+    let fC = C / S;
+    let D = A - B - C;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(A, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(B, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(C, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(D, S);
+    // Establish bounds from div/mod
+    assert(A >= fA * S && A < (fA + 1) * S) by(nonlinear_arith)
+        requires A == S * fA + A % S, A % S >= 0, A % S < S, S > 0;
+    assert(B >= fB * S && B < (fB + 1) * S) by(nonlinear_arith)
+        requires B == S * fB + B % S, B % S >= 0, B % S < S, S > 0;
+    assert(C >= fC * S && C < (fC + 1) * S) by(nonlinear_arith)
+        requires C == S * fC + C % S, C % S >= 0, C % S < S, S > 0;
+    // Lower bound
+    assert(D < (fA - fB - fC + 1) * S) by(nonlinear_arith)
+        requires A < (fA + 1) * S, B >= fB * S, C >= fC * S, D == A - B - C;
+    assert(D / S <= fA - fB - fC) by(nonlinear_arith)
+        requires D == S * (D / S) + D % S, D < (fA - fB - fC + 1) * S, D % S >= 0, S > 0;
+    // Upper bound
+    assert(D >= (fA - fB - fC - 2) * S) by(nonlinear_arith)
+        requires A >= fA * S, B < (fB + 1) * S, C < (fC + 1) * S, D == A - B - C;
+    assert(D / S >= fA - fB - fC - 2) by(nonlinear_arith)
+        requires D == S * (D / S) + D % S, D >= (fA - fB - fC - 2) * S, D % S < S, S > 0;
+}
+
 /// Complex squaring: z^2 = (re^2 - im^2, 2*re*im).
 /// Uses 3 multiplies: re^2, im^2, (re+im)^2.
 ///
@@ -292,10 +414,316 @@ pub fn complex_add<T: LimbOps>(a: &FpComplex<T>, b: &FpComplex<T>) -> (out: FpCo
     }
 }
 
+/// Proof helper for complex_mul: establishes k.sv ∈ [product/S, product/S+1]
+/// for a single signed multiplication result.
+proof fn lemma_signed_mul_product_bound<T: LimbOps>(
+    x: &GenericFixedPoint<T>, y: &GenericFixedPoint<T>,
+    out: &GenericFixedPoint<T>,
+    S: int, P: int, frac: nat, n: nat,
+)
+    requires
+        x.wf_spec(), y.wf_spec(), out.wf_spec(),
+        x.n_exec == y.n_exec, x.frac_exec == y.frac_exec,
+        out.n_exec == x.n_exec, out.frac_exec == x.frac_exec,
+        x.n_exec > 0, x.n_exec <= 0x1FFF_FFFF, x.frac_exec % 32 == 0,
+        S == limb_power(frac), P == limb_power(n),
+        frac == (x.frac_exec / 32) as nat, n == x.n_spec(),
+        S > 0, P > 0,
+        // signed_mul postconditions hold
+        out.unsigned_val() == GenericFixedPoint::<T>::truncated_product_spec(
+            x.unsigned_val(), y.unsigned_val(), frac, n),
+        (x.sign.sem() == y.sign.sem()) ==> out.sign.sem() == 0,
+        (x.sign.sem() != y.sign.sem()) ==> out.sign.sem() == 1,
+        // Bounded: product fits
+        x.unsigned_val() >= 0, y.unsigned_val() >= 0,
+        x.unsigned_val() * y.unsigned_val() / S < P,
+    ensures ({
+        let product_sv = x.signed_val() * y.signed_val();
+        &&& out.signed_val() >= product_sv / S
+        &&& out.signed_val() <= product_sv / S + 1
+        &&& out.unsigned_val() == x.unsigned_val() * y.unsigned_val() / S
+        &&& out.unsigned_val() < P
+    })
+{
+    let xu = x.unsigned_val();
+    let yu = y.unsigned_val();
+    let xs = x.signed_val();
+    let ys = y.signed_val();
+    let product_sv = xs * ys;
+
+    // Establish mag = xu*yu/S, out.uval = mag (bounded → mod no-op)
+    assert(xu * yu >= 0) by(nonlinear_arith) requires xu >= 0, yu >= 0;
+    let mag = xu * yu / S;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(xu * yu, S);
+    assert(mag >= 0) by(nonlinear_arith)
+        requires xu * yu >= 0, xu * yu == S * mag + (xu * yu) % S,
+                 (xu * yu) % S >= 0, S > 0;
+    lemma_mod_noop(mag, P);
+    assert(out.unsigned_val() == mag);
+
+    // Connect out.signed_val() to signed_trunc
+    // signed_trunc = if product_sv >= 0 { mag } else { -mag }
+    assert(xs == xu || xs == -(xu as int));
+    assert(ys == yu || ys == -(yu as int));
+
+    if x.sign.sem() == y.sign.sem() {
+        // Same sign: out.sign == 0, product_sv = xu*yu ≥ 0
+        assert(out.sign.sem() == 0);
+        assert(out.signed_val() == mag);
+        assert(product_sv == xu * yu) by(nonlinear_arith)
+            requires (xs == xu || xs == -(xu as int)),
+                     (ys == yu || ys == -(yu as int)),
+                     x.sign.sem() == y.sign.sem(),
+                     xs == (if x.sign.sem() == 0 { xu } else { -xu }),
+                     ys == (if y.sign.sem() == 0 { yu } else { -yu }),
+                     product_sv == xs * ys;
+        // out.sv = mag = xu*yu/S = product_sv/S. Bounds trivially hold.
+    } else {
+        // Diff sign: out.sign == 1, product_sv = -(xu*yu) ≤ 0
+        assert(out.sign.sem() == 1);
+        assert(out.signed_val() == -(mag as int));
+        assert(product_sv == -(xu * yu as int)) by(nonlinear_arith)
+            requires (xs == xu || xs == -(xu as int)),
+                     (ys == yu || ys == -(yu as int)),
+                     x.sign.sem() != y.sign.sem(),
+                     xs == (if x.sign.sem() == 0 { xu } else { -xu }),
+                     ys == (if y.sign.sem() == 0 { yu } else { -yu }),
+                     product_sv == xs * ys,
+                     (x.sign.sem() == 0 || x.sign.sem() == 1),
+                     (y.sign.sem() == 0 || y.sign.sem() == 1);
+        // out.sv = -mag, product_sv = -(xu*yu)
+        // Apply signed_trunc_approx: -(xu*yu/S) ∈ [-(xu*yu)/S, -(xu*yu)/S + 1]
+        lemma_signed_trunc_approx(product_sv, xu * yu, S);
+        // → signed_trunc = -mag (since product_sv < 0 or product_sv == 0)
+        // → -mag ∈ [product_sv/S, product_sv/S + 1]
+        // out.sv == -mag, so done
+        assert(out.signed_val() >= product_sv / S) by {
+            if xu * yu == 0 {
+                assert(mag == 0);
+                assert(product_sv == 0);
+            }
+        };
+    }
+}
+
+/// Proof helper: complex_mul spec connection for bounded inputs.
+/// Extracted to reduce Z3 context in the exec function.
+proof fn lemma_complex_mul_spec_connection<T: LimbOps>(
+    a: &FpComplex<T>, b: &FpComplex<T>,
+    k1: &GenericFixedPoint<T>, k2: &GenericFixedPoint<T>,
+    a_sum: &GenericFixedPoint<T>, b_sum: &GenericFixedPoint<T>,
+    k3: &GenericFixedPoint<T>,
+    new_re: &GenericFixedPoint<T>, t: &GenericFixedPoint<T>,
+    new_im: &GenericFixedPoint<T>,
+)
+    requires
+        a.wf(), b.wf(), a.same_format(b),
+        // signed_mul postconditions for k1, k2
+        k1.wf_spec(), k1.n_exec == a.re.n_exec, k1.frac_exec == a.re.frac_exec,
+        k1.unsigned_val() == GenericFixedPoint::<T>::truncated_product_spec(
+            a.re.unsigned_val(), b.re.unsigned_val(),
+            (a.re.frac_exec / 32) as nat, a.re.n_spec()),
+        (a.re.sign.sem() == b.re.sign.sem()) ==> k1.sign.sem() == 0,
+        (a.re.sign.sem() != b.re.sign.sem()) ==> k1.sign.sem() == 1,
+        k2.wf_spec(), k2.n_exec == a.re.n_exec, k2.frac_exec == a.re.frac_exec,
+        k2.unsigned_val() == GenericFixedPoint::<T>::truncated_product_spec(
+            a.im.unsigned_val(), b.im.unsigned_val(),
+            (a.re.frac_exec / 32) as nat, a.re.n_spec()),
+        (a.im.sign.sem() == b.im.sign.sem()) ==> k2.sign.sem() == 0,
+        (a.im.sign.sem() != b.im.sign.sem()) ==> k2.sign.sem() == 1,
+        // signed_add postconditions for a_sum, b_sum
+        a_sum.wf_spec(), a_sum.n_exec == a.re.n_exec, a_sum.frac_exec == a.re.frac_exec,
+        a_sum.signed_val() == a.re.signed_val() + a.im.signed_val()
+            || (a_sum.signed_val() == a.re.signed_val() + a.im.signed_val()
+                    - limb_power(a.re.n_spec())
+                && a.re.signed_val() + a.im.signed_val() >= limb_power(a.re.n_spec()))
+            || (a_sum.signed_val() == a.re.signed_val() + a.im.signed_val()
+                    + limb_power(a.re.n_spec())
+                && a.re.signed_val() + a.im.signed_val() <= -(limb_power(a.re.n_spec()) as int)),
+        b_sum.wf_spec(), b_sum.n_exec == a.re.n_exec, b_sum.frac_exec == a.re.frac_exec,
+        b_sum.signed_val() == b.re.signed_val() + b.im.signed_val()
+            || (b_sum.signed_val() == b.re.signed_val() + b.im.signed_val()
+                    - limb_power(a.re.n_spec())
+                && b.re.signed_val() + b.im.signed_val() >= limb_power(a.re.n_spec()))
+            || (b_sum.signed_val() == b.re.signed_val() + b.im.signed_val()
+                    + limb_power(a.re.n_spec())
+                && b.re.signed_val() + b.im.signed_val() <= -(limb_power(a.re.n_spec()) as int)),
+        // signed_mul postcondition for k3
+        k3.wf_spec(), k3.n_exec == a.re.n_exec, k3.frac_exec == a.re.frac_exec,
+        k3.unsigned_val() == GenericFixedPoint::<T>::truncated_product_spec(
+            a_sum.unsigned_val(), b_sum.unsigned_val(),
+            (a.re.frac_exec / 32) as nat, a.re.n_spec()),
+        (a_sum.sign.sem() == b_sum.sign.sem()) ==> k3.sign.sem() == 0,
+        (a_sum.sign.sem() != b_sum.sign.sem()) ==> k3.sign.sem() == 1,
+        // signed_sub postconditions for new_re, t, new_im
+        new_re.wf_spec(), new_re.n_exec == a.re.n_exec, new_re.frac_exec == a.re.frac_exec,
+        new_re.signed_val() == k1.signed_val() - k2.signed_val()
+            || (new_re.signed_val() == k1.signed_val() - k2.signed_val()
+                    - limb_power(a.re.n_spec())
+                && k1.signed_val() - k2.signed_val() >= limb_power(a.re.n_spec()))
+            || (new_re.signed_val() == k1.signed_val() - k2.signed_val()
+                    + limb_power(a.re.n_spec())
+                && k1.signed_val() - k2.signed_val() <= -(limb_power(a.re.n_spec()) as int)),
+        t.wf_spec(), t.n_exec == a.re.n_exec, t.frac_exec == a.re.frac_exec,
+        t.signed_val() == k3.signed_val() - k1.signed_val()
+            || (t.signed_val() == k3.signed_val() - k1.signed_val()
+                    - limb_power(a.re.n_spec())
+                && k3.signed_val() - k1.signed_val() >= limb_power(a.re.n_spec()))
+            || (t.signed_val() == k3.signed_val() - k1.signed_val()
+                    + limb_power(a.re.n_spec())
+                && k3.signed_val() - k1.signed_val() <= -(limb_power(a.re.n_spec()) as int)),
+        new_im.wf_spec(), new_im.n_exec == a.re.n_exec, new_im.frac_exec == a.re.frac_exec,
+        new_im.signed_val() == t.signed_val() - k2.signed_val()
+            || (new_im.signed_val() == t.signed_val() - k2.signed_val()
+                    - limb_power(a.re.n_spec())
+                && t.signed_val() - k2.signed_val() >= limb_power(a.re.n_spec()))
+            || (new_im.signed_val() == t.signed_val() - k2.signed_val()
+                    + limb_power(a.re.n_spec())
+                && t.signed_val() - k2.signed_val() <= -(limb_power(a.re.n_spec()) as int)),
+        // Bounded
+        ({
+            let S = limb_power((a.re.frac_exec / 32) as nat);
+            let P = limb_power(a.re.n_spec());
+            let ua_re = a.re.unsigned_val();
+            let ua_im = a.im.unsigned_val();
+            let ub_re = b.re.unsigned_val();
+            let ub_im = b.im.unsigned_val();
+            &&& ua_re + ua_im < P
+            &&& ub_re + ub_im < P
+            &&& ua_re * ub_re / S + ua_im * ub_im / S
+                + (ua_re + ua_im) * (ub_re + ub_im) / S < P
+        }),
+    ensures ({
+        let S = limb_power((a.re.frac_exec / 32) as nat);
+        let spec = spec_complex_mul(a.to_spec(), b.to_spec());
+        &&& new_re.signed_val() >= spec.re / S - 1
+        &&& new_re.signed_val() <= spec.re / S + 2
+        &&& new_im.signed_val() >= spec.im / S - 2
+        &&& new_im.signed_val() <= spec.im / S + 3
+    })
+{
+    let S = limb_power((a.re.frac_exec / 32) as nat);
+    let P = limb_power(a.re.n_spec());
+    let frac = (a.re.frac_exec / 32) as nat;
+    let n = a.re.n_spec();
+
+    lemma_limb_power_positive(frac);
+    lemma_limb_power_positive(n);
+
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(a.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(a.im.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(b.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(b.im.limbs@);
+
+    let ua_re = a.re.unsigned_val();
+    let ua_im = a.im.unsigned_val();
+    let ub_re = b.re.unsigned_val();
+    let ub_im = b.im.unsigned_val();
+    let sa_re = a.re.signed_val();
+    let sa_im = a.im.signed_val();
+    let sb_re = b.re.signed_val();
+    let sb_im = b.im.signed_val();
+
+    // Product bounds
+    let k1_bound = ua_re * ub_re / S;
+    let k2_bound = ua_im * ub_im / S;
+    let k3_bound = (ua_re + ua_im) * (ub_re + ub_im) / S;
+
+    // k1, k2 product bounds via helper
+    lemma_signed_mul_product_bound(&a.re, &b.re, k1, S, P, frac, n);
+    lemma_signed_mul_product_bound(&a.im, &b.im, k2, S, P, frac, n);
+    let P1 = sa_re * sb_re;
+    let P2 = sa_im * sb_im;
+
+    // signed_add exact for a_sum, b_sum
+    verus_fixed_point::runtime_fixed_point::lemma_signed_add_exact(
+        &a.re, &a.im, a_sum);
+    verus_fixed_point::runtime_fixed_point::lemma_signed_add_exact(
+        &b.re, &b.im, b_sum);
+
+    // k3 product bound
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(a_sum.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(b_sum.limbs@);
+    let a_sum_uv = a_sum.unsigned_val();
+    let b_sum_uv = b_sum.unsigned_val();
+    assert(a_sum_uv * b_sum_uv <= (ua_re + ua_im) * (ub_re + ub_im))
+        by(nonlinear_arith)
+        requires a_sum_uv >= 0, b_sum_uv >= 0,
+                 a_sum_uv <= ua_re + ua_im, b_sum_uv <= ub_re + ub_im;
+    // Establish a_sum.uval * b_sum.uval / S < P for k3's precondition
+    assert(a_sum_uv * b_sum_uv / S <= k3_bound) by {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(
+            a_sum_uv * b_sum_uv, S);
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(
+            (ua_re + ua_im) * (ub_re + ub_im), S);
+        assert(a_sum_uv * b_sum_uv / S <= k3_bound) by(nonlinear_arith)
+            requires a_sum_uv * b_sum_uv <= (ua_re + ua_im) * (ub_re + ub_im),
+                     a_sum_uv * b_sum_uv >= 0,
+                     a_sum_uv * b_sum_uv == S * (a_sum_uv * b_sum_uv / S)
+                         + (a_sum_uv * b_sum_uv) % S,
+                     (ua_re + ua_im) * (ub_re + ub_im) == S * k3_bound
+                         + ((ua_re + ua_im) * (ub_re + ub_im)) % S,
+                     (a_sum_uv * b_sum_uv) % S >= 0,
+                     ((ua_re + ua_im) * (ub_re + ub_im)) % S >= 0,
+                     S > 0;
+    };
+    assert(a_sum_uv * b_sum_uv / S < P);
+    lemma_signed_mul_product_bound(a_sum, b_sum, k3, S, P, frac, n);
+    let P3 = (sa_re + sa_im) * (sb_re + sb_im);
+    assert(P3 == a_sum.signed_val() * b_sum.signed_val());
+
+    // Subtraction exactness: from lemma postconditions, k.uval = ua*ub/S
+    // k1.uval = ua_re*ub_re/S, k2.uval = ua_im*ub_im/S, k3.uval ≤ k3_bound
+    assert(k1.unsigned_val() == k1_bound);
+    assert(k2.unsigned_val() == k2_bound);
+    assert(k3.unsigned_val() <= k3_bound);
+    assert(k1.unsigned_val() + k2.unsigned_val() + k3.unsigned_val() < P);
+
+    // |k.sv| ≤ k.uval → all pairwise differences < P → subs exact
+    assert(k1.signed_val() - k2.signed_val() < P
+        && k1.signed_val() - k2.signed_val() > -(P as int));
+    assert(k3.signed_val() - k1.signed_val() < P
+        && k3.signed_val() - k1.signed_val() > -(P as int));
+
+    // Real part
+    lemma_floor_diff_two(P1, P2, S);
+
+    // Imaginary part
+    assert((sa_re + sa_im) * (sb_re + sb_im)
+        == sa_re * sb_re + sa_re * sb_im + sa_im * sb_re + sa_im * sb_im)
+        by(nonlinear_arith);
+    assert(P3 - P1 - P2 == sa_re * sb_im + sa_im * sb_re);
+    lemma_floor_diff_three(P3, P1, P2, S);
+}
+
 /// Complex multiplication using 3-multiply Karatsuba trick.
+/// With bounded inputs, error is at most (-1,+2) ULPs for re, (-2,+3) for im.
+/// Wider than complex_square because cross-products have sign-truncation offset.
 pub fn complex_mul<T: LimbOps>(a: &FpComplex<T>, b: &FpComplex<T>) -> (out: FpComplex<T>)
     requires a.wf(), b.wf(), a.same_format(b),
     ensures out.wf(), out.same_format(a),
+        // Spec connection: conditional on bounded inputs
+        ({
+            let S = limb_power((a.re.frac_exec / 32) as nat);
+            let P = limb_power(a.re.n_spec());
+            let ua_re = a.re.unsigned_val();
+            let ua_im = a.im.unsigned_val();
+            let ub_re = b.re.unsigned_val();
+            let ub_im = b.im.unsigned_val();
+            // Sum-of-three-products bound ensures all intermediate subtractions exact
+            let bounded =
+                ua_re + ua_im < P
+                && ub_re + ub_im < P
+                && ua_re * ub_re / S + ua_im * ub_im / S
+                    + (ua_re + ua_im) * (ub_re + ub_im) / S < P;
+            let spec = spec_complex_mul(a.to_spec(), b.to_spec());
+            bounded ==> (
+                out.to_spec().re >= spec.re / S - 1
+                && out.to_spec().re <= spec.re / S + 2
+                && out.to_spec().im >= spec.im / S - 2
+                && out.to_spec().im <= spec.im / S + 3
+            )
+        }),
 {
     let k1 = a.re.signed_mul(&b.re);
     let k2 = a.im.signed_mul(&b.im);
@@ -305,6 +733,25 @@ pub fn complex_mul<T: LimbOps>(a: &FpComplex<T>, b: &FpComplex<T>) -> (out: FpCo
     let new_re = k1.signed_sub(&k2);
     let t = k3.signed_sub(&k1);
     let new_im = t.signed_sub(&k2);
+
+    proof {
+        let S = limb_power((a.re.frac_exec / 32) as nat);
+        let P = limb_power(a.re.n_spec());
+        let ua_re = a.re.unsigned_val();
+        let ua_im = a.im.unsigned_val();
+        let ub_re = b.re.unsigned_val();
+        let ub_im = b.im.unsigned_val();
+        let bounded =
+            ua_re + ua_im < P
+            && ub_re + ub_im < P
+            && ua_re * ub_re / S + ua_im * ub_im / S
+                + (ua_re + ua_im) * (ub_re + ub_im) / S < P;
+        if bounded {
+            lemma_complex_mul_spec_connection(a, b, &k1, &k2, &a_sum, &b_sum, &k3,
+                &new_re, &t, &new_im);
+        }
+    }
+
     FpComplex { re: new_re, im: new_im }
 }
 
@@ -380,6 +827,14 @@ pub open spec fn spec_complex_square(z: SpecComplex) -> SpecComplex {
     SpecComplex {
         re: z.re * z.re - z.im * z.im,
         im: 2 * z.re * z.im,
+    }
+}
+
+/// Complex multiplication: (a+bi)(c+di) = (ac-bd, ad+bc)
+pub open spec fn spec_complex_mul(a: SpecComplex, b: SpecComplex) -> SpecComplex {
+    SpecComplex {
+        re: a.re * b.re - a.im * b.im,
+        im: a.re * b.im + a.im * b.re,
     }
 }
 
