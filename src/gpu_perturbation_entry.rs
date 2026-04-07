@@ -12,6 +12,8 @@ use verus_fixed_point::fixed_point::limb_ops::*;
 
 verus! {
 
+pub open spec fn u32_max() -> int { 0x1_0000_0000 - 1 }
+
 /// No-op barrier for Verus verification (GPU semantics handled by transpiler).
 #[verifier::external_body]
 fn gpu_workgroup_barrier() { }
@@ -41,7 +43,7 @@ fn vslice(v: &Vec<u32>, off: u32) -> (out: &[u32])
 fn copy_limbs(src: &Vec<u32>, src_off: u32, dst: &mut Vec<u32>, n: u32)
     requires
         src_off + n <= src@.len(),
-        src_off + n < 0xFFFF_FFFF,
+        src_off + n < u32_max(),
         n <= old(dst)@.len(),
     ensures
         dst@.len() == old(dst)@.len(),
@@ -54,7 +56,7 @@ fn copy_limbs(src: &Vec<u32>, src_off: u32, dst: &mut Vec<u32>, n: u32)
         invariant
             dst@.len() == dst_len, dst_len >= n,
             src_off + n <= src@.len(),
-            src_off + n < 0xFFFF_FFFF,
+            src_off + n < u32_max(),
             forall |j: int| 0 <= j < i ==> (#[trigger] dst@[j]) == src@[(src_off as int + j) as int],
             forall |j: int| i as int <= j < dst_len ==> dst@[j] == old_dst[j],
     {
@@ -100,10 +102,10 @@ fn mandelbrot_perturbation(
         (params@[2] as int + 2) * (2 * params@[3] as int + 2) + 10 * params@[3] as int + 259 <= 8192,
         // c_data: per-pixel complex values (with u32 overflow bound)
         c_data@.len() as int >= (params@[0] as int) * (params@[1] as int) * (2 * (params@[3] as int) + 2),
-        (params@[0] as int) * (params@[1] as int) * (2 * params@[3] as int + 2) < 0xFFFF_FFFF,
+        (params@[0] as int) * (params@[1] as int) * (2 * params@[3] as int + 2) < u32_max(),
         // iter_counts: per-pixel output (with u32 overflow bound)
         old(iter_counts)@.len() as int >= (params@[0] as int) * (params@[1] as int),
-        (params@[0] as int) * (params@[1] as int) < 0xFFFF_FFFF,
+        (params@[0] as int) * (params@[1] as int) < u32_max(),
         // Escape threshold in params[5..5+n]
         params@.len() as int >= 5 + params@[3] as int,
 {
