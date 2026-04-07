@@ -595,6 +595,13 @@ proof fn lemma_complex_mul_spec_connection<T: LimbOps>(
         }),
     ensures ({
         let S = limb_power((a.re.frac_exec / 32) as nat);
+        let P = limb_power(a.re.n_spec());
+        let ua_re = a.re.unsigned_val();
+        let ua_im = a.im.unsigned_val();
+        let ub_re = b.re.unsigned_val();
+        let ub_im = b.im.unsigned_val();
+        let three_sum = ua_re * ub_re / S + ua_im * ub_im / S
+            + (ua_re + ua_im) * (ub_re + ub_im) / S;
         let spec = spec_complex_mul(a.to_spec(), b.to_spec());
         &&& new_re.signed_val() >= spec.re / S - 1
         &&& new_re.signed_val() <= spec.re / S + 2
@@ -694,6 +701,7 @@ proof fn lemma_complex_mul_spec_connection<T: LimbOps>(
         by(nonlinear_arith);
     assert(P3 - P1 - P2 == sa_re * sb_im + sa_im * sb_re);
     lemma_floor_diff_three(P3, P1, P2, S);
+
 }
 
 /// Complex multiplication using 3-multiply Karatsuba trick.
@@ -759,6 +767,17 @@ pub fn complex_mul<T: LimbOps>(a: &FpComplex<T>, b: &FpComplex<T>) -> (out: FpCo
 pub fn complex_double<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
     requires z.wf(),
     ensures out.wf(), out.same_format(z),
+        // Modular postcondition (always holds):
+        out.re.signed_val() == 2 * z.re.signed_val()
+            || (out.re.signed_val() == 2 * z.re.signed_val() - z.modulus()
+                && 2 * z.re.signed_val() >= z.modulus())
+            || (out.re.signed_val() == 2 * z.re.signed_val() + z.modulus()
+                && 2 * z.re.signed_val() <= -z.modulus()),
+        out.im.signed_val() == 2 * z.im.signed_val()
+            || (out.im.signed_val() == 2 * z.im.signed_val() - z.modulus()
+                && 2 * z.im.signed_val() >= z.modulus())
+            || (out.im.signed_val() == 2 * z.im.signed_val() + z.modulus()
+                && 2 * z.im.signed_val() <= -z.modulus()),
 {
     FpComplex {
         re: z.re.signed_add(&z.re),
@@ -785,11 +804,46 @@ pub fn ref_orbit_step<T: LimbOps>(z: &FpComplex<T>, c: &FpComplex<T>) -> (out: F
     complex_add(&z2, c)
 }
 
+/// Bounded input predicate for perturbation_step spec connection.
+/// Ensures all intermediate operations (double, mul, square, adds) are exact/bounded.
+///
+/// The condition requires that the total "product budget" (sum of all truncated
+/// product magnitudes) fits in P, and all component sums fit in P.
+/// Easily satisfied for practical Mandelbrot: with escape radius 4 and
+/// n=4, frac=3 (128-bit limbs, 96 fractional bits), values ≈ 4·2^96 << 2^128.
+pub open spec fn pert_inputs_bounded<T: LimbOps>(
+    z: &FpComplex<T>, d: &FpComplex<T>, dc: &FpComplex<T>,
+) -> bool {
+    let S = limb_power((z.re.frac_exec / 32) as nat);
+    let P = limb_power(z.re.n_spec());
+    let uz_re = z.re.unsigned_val();
+    let uz_im = z.im.unsigned_val();
+    let ud_re = d.re.unsigned_val();
+    let ud_im = d.im.unsigned_val();
+    let udc_re = dc.re.unsigned_val();
+    let udc_im = dc.im.unsigned_val();
+    // Double exact
+    &&& 2 * uz_re < P && 2 * uz_im < P
+    // complex_mul(2Z, delta) bounded (three-product-sum < P/4)
+    &&& 2 * uz_re + 2 * uz_im < P
+    &&& ud_re + ud_im < P
+    &&& 2 * uz_re * ud_re / S + 2 * uz_im * ud_im / S
+        + (2 * uz_re + 2 * uz_im) * (ud_re + ud_im) / S < P / 4
+    // complex_square(delta) bounded (three-product-sum < P/4)
+    &&& ud_re * ud_re / S + ud_im * ud_im / S
+        + (ud_re + ud_im) * (ud_re + ud_im) / S < P / 4
+    // dc small enough that final add doesn't overflow
+    &&& udc_re < P / 4 && udc_im < P / 4
+}
+
 /// Perturbation step: d' = 2*Z*d + d^2 + Dc.
 ///
 /// VERIFIED: this computes the correct perturbation formula.
 /// Combined with theorem_perturbation_correctness, this ensures
 /// that Z_n + delta_n correctly tracks the actual orbit W_n.
+///
+/// With bounded inputs, the output satisfies an error bound relative to the
+/// ideal fixed-point perturbation (per-operation truncated divisions + exact adds).
 pub fn perturbation_step<T: LimbOps>(
     z_ref: &FpComplex<T>,
     delta: &FpComplex<T>,
@@ -798,12 +852,414 @@ pub fn perturbation_step<T: LimbOps>(
     requires z_ref.wf(), delta.wf(), delta_c.wf(),
         z_ref.same_format(delta), delta.same_format(delta_c),
     ensures out.wf(), out.same_format(z_ref),
+        // Spec connection: conditional on bounded inputs
+        ({
+            let S = limb_power((z_ref.re.frac_exec / 32) as nat);
+            let z = z_ref.to_spec();
+            let d = delta.to_spec();
+            let dc = delta_c.to_spec();
+            let mul_spec = spec_complex_mul(
+                SpecComplex { re: 2 * z.re, im: 2 * z.im }, d);
+            let sq_spec = spec_complex_square(d);
+            pert_inputs_bounded(z_ref, delta, delta_c) ==> (
+                // re error: mul contributes [-1,+2], square contributes [0,+1]
+                out.to_spec().re >= mul_spec.re / S + sq_spec.re / S + dc.re - 1
+                && out.to_spec().re <= mul_spec.re / S + sq_spec.re / S + dc.re + 3
+                // im error: mul contributes [-2,+3], square contributes [0,+2]
+                && out.to_spec().im >= mul_spec.im / S + sq_spec.im / S + dc.im - 2
+                && out.to_spec().im <= mul_spec.im / S + sq_spec.im / S + dc.im + 5
+            )
+        }),
 {
     let two_z = complex_double(z_ref);
     let two_z_delta = complex_mul(&two_z, delta);
     let delta_sq = complex_square(delta);
     let sum = complex_add(&two_z_delta, &delta_sq);
-    complex_add(&sum, delta_c)
+    let out = complex_add(&sum, delta_c);
+
+    proof {
+        if pert_inputs_bounded(z_ref, delta, delta_c) {
+            lemma_perturbation_step_spec(
+                z_ref, delta, delta_c,
+                &two_z, &two_z_delta, &delta_sq, &sum, &out);
+        }
+    }
+
+    out
+}
+
+/// Extracted proof for perturbation_step spec connection.
+proof fn lemma_perturbation_step_spec<T: LimbOps>(
+    z_ref: &FpComplex<T>, delta: &FpComplex<T>, delta_c: &FpComplex<T>,
+    two_z: &FpComplex<T>,
+    two_z_delta: &FpComplex<T>, delta_sq: &FpComplex<T>,
+    sum: &FpComplex<T>, out: &FpComplex<T>,
+)
+    requires
+        z_ref.wf(), delta.wf(), delta_c.wf(),
+        z_ref.same_format(delta), delta.same_format(delta_c),
+        pert_inputs_bounded(z_ref, delta, delta_c),
+        // complex_double postconditions
+        two_z.wf(), two_z.same_format(z_ref),
+        two_z.re.signed_val() == 2 * z_ref.re.signed_val()
+            || (two_z.re.signed_val() == 2 * z_ref.re.signed_val() - z_ref.modulus()
+                && 2 * z_ref.re.signed_val() >= z_ref.modulus())
+            || (two_z.re.signed_val() == 2 * z_ref.re.signed_val() + z_ref.modulus()
+                && 2 * z_ref.re.signed_val() <= -z_ref.modulus()),
+        two_z.im.signed_val() == 2 * z_ref.im.signed_val()
+            || (two_z.im.signed_val() == 2 * z_ref.im.signed_val() - z_ref.modulus()
+                && 2 * z_ref.im.signed_val() >= z_ref.modulus())
+            || (two_z.im.signed_val() == 2 * z_ref.im.signed_val() + z_ref.modulus()
+                && 2 * z_ref.im.signed_val() <= -z_ref.modulus()),
+        // complex_mul postconditions
+        two_z_delta.wf(), two_z_delta.same_format(z_ref),
+        ({
+            let S = limb_power((z_ref.re.frac_exec / 32) as nat);
+            let P = limb_power(z_ref.re.n_spec());
+            let ua_re = two_z.re.unsigned_val();
+            let ua_im = two_z.im.unsigned_val();
+            let ub_re = delta.re.unsigned_val();
+            let ub_im = delta.im.unsigned_val();
+            let bounded_mul =
+                ua_re + ua_im < P
+                && ub_re + ub_im < P
+                && ua_re * ub_re / S + ua_im * ub_im / S
+                    + (ua_re + ua_im) * (ub_re + ub_im) / S < P;
+            let spec_mul = spec_complex_mul(two_z.to_spec(), delta.to_spec());
+            bounded_mul ==> (
+                two_z_delta.to_spec().re >= spec_mul.re / S - 1
+                && two_z_delta.to_spec().re <= spec_mul.re / S + 2
+                && two_z_delta.to_spec().im >= spec_mul.im / S - 2
+                && two_z_delta.to_spec().im <= spec_mul.im / S + 3
+            )
+        }),
+        // complex_square postconditions
+        delta_sq.wf(), delta_sq.same_format(z_ref),
+        ({
+            let S = limb_power((z_ref.re.frac_exec / 32) as nat);
+            let P = limb_power(z_ref.re.n_spec());
+            let u_re = delta.re.unsigned_val();
+            let u_im = delta.im.unsigned_val();
+            let bounded_sq = u_re * u_re / S < P
+                && u_im * u_im / S < P
+                && u_re + u_im < P
+                && (u_re + u_im) * (u_re + u_im) / S < P;
+            let spec_sq = spec_complex_square(delta.to_spec());
+            bounded_sq ==> (
+                delta_sq.to_spec().re >= spec_sq.re / S
+                && delta_sq.to_spec().re <= spec_sq.re / S + 1
+                && delta_sq.to_spec().im >= spec_sq.im / S
+                && delta_sq.to_spec().im <= spec_sq.im / S + 2
+            )
+        }),
+        // complex_add postconditions (modular)
+        sum.wf(), sum.same_format(z_ref),
+        sum.re.signed_val() == two_z_delta.re.signed_val() + delta_sq.re.signed_val()
+            || (sum.re.signed_val() == two_z_delta.re.signed_val() + delta_sq.re.signed_val()
+                    - z_ref.modulus()
+                && two_z_delta.re.signed_val() + delta_sq.re.signed_val() >= z_ref.modulus())
+            || (sum.re.signed_val() == two_z_delta.re.signed_val() + delta_sq.re.signed_val()
+                    + z_ref.modulus()
+                && two_z_delta.re.signed_val() + delta_sq.re.signed_val() <= -z_ref.modulus()),
+        sum.im.signed_val() == two_z_delta.im.signed_val() + delta_sq.im.signed_val()
+            || (sum.im.signed_val() == two_z_delta.im.signed_val() + delta_sq.im.signed_val()
+                    - z_ref.modulus()
+                && two_z_delta.im.signed_val() + delta_sq.im.signed_val() >= z_ref.modulus())
+            || (sum.im.signed_val() == two_z_delta.im.signed_val() + delta_sq.im.signed_val()
+                    + z_ref.modulus()
+                && two_z_delta.im.signed_val() + delta_sq.im.signed_val() <= -z_ref.modulus()),
+        out.wf(), out.same_format(z_ref),
+        out.re.signed_val() == sum.re.signed_val() + delta_c.re.signed_val()
+            || (out.re.signed_val() == sum.re.signed_val() + delta_c.re.signed_val()
+                    - z_ref.modulus()
+                && sum.re.signed_val() + delta_c.re.signed_val() >= z_ref.modulus())
+            || (out.re.signed_val() == sum.re.signed_val() + delta_c.re.signed_val()
+                    + z_ref.modulus()
+                && sum.re.signed_val() + delta_c.re.signed_val() <= -z_ref.modulus()),
+        out.im.signed_val() == sum.im.signed_val() + delta_c.im.signed_val()
+            || (out.im.signed_val() == sum.im.signed_val() + delta_c.im.signed_val()
+                    - z_ref.modulus()
+                && sum.im.signed_val() + delta_c.im.signed_val() >= z_ref.modulus())
+            || (out.im.signed_val() == sum.im.signed_val() + delta_c.im.signed_val()
+                    + z_ref.modulus()
+                && sum.im.signed_val() + delta_c.im.signed_val() <= -z_ref.modulus()),
+    ensures ({
+        let S = limb_power((z_ref.re.frac_exec / 32) as nat);
+        let z = z_ref.to_spec();
+        let d = delta.to_spec();
+        let dc = delta_c.to_spec();
+        let mul_spec = spec_complex_mul(
+            SpecComplex { re: 2 * z.re, im: 2 * z.im }, d);
+        let sq_spec = spec_complex_square(d);
+        &&& out.to_spec().re >= mul_spec.re / S + sq_spec.re / S + dc.re - 1
+        &&& out.to_spec().re <= mul_spec.re / S + sq_spec.re / S + dc.re + 3
+        &&& out.to_spec().im >= mul_spec.im / S + sq_spec.im / S + dc.im - 2
+        &&& out.to_spec().im <= mul_spec.im / S + sq_spec.im / S + dc.im + 5
+    })
+{
+    let S = limb_power((z_ref.re.frac_exec / 32) as nat);
+    let P = limb_power(z_ref.re.n_spec());
+    lemma_limb_power_positive((z_ref.re.frac_exec / 32) as nat);
+    lemma_limb_power_positive(z_ref.re.n_spec());
+
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(z_ref.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(z_ref.im.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta.im.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(two_z.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(two_z.im.limbs@);
+
+    let uz_re = z_ref.re.unsigned_val();
+    let uz_im = z_ref.im.unsigned_val();
+    let ud_re = delta.re.unsigned_val();
+    let ud_im = delta.im.unsigned_val();
+
+    // ── Step 1: complex_double is exact ──
+    // |2*z.re.sv| ≤ 2*uz_re < P, |2*z.im.sv| ≤ 2*uz_im < P
+    assert(z_ref.re.signed_val() <= uz_re as int
+        && z_ref.re.signed_val() >= -(uz_re as int));
+    assert(z_ref.im.signed_val() <= uz_im as int
+        && z_ref.im.signed_val() >= -(uz_im as int));
+    // So the modular wrapping cases are impossible
+    assert(two_z.re.signed_val() == 2 * z_ref.re.signed_val());
+    assert(two_z.im.signed_val() == 2 * z_ref.im.signed_val());
+    // two_z.to_spec() == SpecComplex { re: 2*z.re, im: 2*z.im }
+    assert(two_z.to_spec() == SpecComplex {
+        re: 2 * z_ref.to_spec().re, im: 2 * z_ref.to_spec().im });
+
+    // ── Step 2: complex_mul bounded condition → extract error bounds ──
+    let tw_re_uv = two_z.re.unsigned_val();
+    let tw_im_uv = two_z.im.unsigned_val();
+    assert(tw_re_uv <= 2 * uz_re && tw_im_uv <= 2 * uz_im);
+    assert(tw_re_uv + tw_im_uv < P);
+    assert(ud_re + ud_im < P);
+    assert(tw_re_uv * ud_re / S + tw_im_uv * ud_im / S
+        + (tw_re_uv + tw_im_uv) * (ud_re + ud_im) / S < P) by {
+        assert(tw_re_uv * ud_re <= 2 * uz_re * ud_re) by(nonlinear_arith)
+            requires tw_re_uv <= 2 * uz_re, ud_re >= 0;
+        assert(tw_im_uv * ud_im <= 2 * uz_im * ud_im) by(nonlinear_arith)
+            requires tw_im_uv <= 2 * uz_im, ud_im >= 0;
+        assert((tw_re_uv + tw_im_uv) * (ud_re + ud_im)
+            <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im)) by(nonlinear_arith)
+            requires tw_re_uv + tw_im_uv <= 2 * uz_re + 2 * uz_im,
+                     ud_re + ud_im >= 0;
+        assert(tw_re_uv * ud_re / S <= 2 * uz_re * ud_re / S) by(nonlinear_arith)
+            requires tw_re_uv * ud_re <= 2 * uz_re * ud_re,
+                     tw_re_uv * ud_re >= 0, S > 0;
+        assert(tw_im_uv * ud_im / S <= 2 * uz_im * ud_im / S) by(nonlinear_arith)
+            requires tw_im_uv * ud_im <= 2 * uz_im * ud_im,
+                     tw_im_uv * ud_im >= 0, S > 0;
+        assert((tw_re_uv + tw_im_uv) * (ud_re + ud_im) / S
+            <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im) / S) by(nonlinear_arith)
+            requires (tw_re_uv + tw_im_uv) * (ud_re + ud_im)
+                     <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im),
+                     (tw_re_uv + tw_im_uv) * (ud_re + ud_im) >= 0, S > 0;
+    };
+    // Now assert the mul error bounds explicitly
+    let mul_spec = spec_complex_mul(two_z.to_spec(), delta.to_spec());
+    assert(two_z_delta.to_spec().re >= mul_spec.re / S - 1);
+    assert(two_z_delta.to_spec().re <= mul_spec.re / S + 2);
+    assert(two_z_delta.to_spec().im >= mul_spec.im / S - 2);
+    assert(two_z_delta.to_spec().im <= mul_spec.im / S + 3);
+
+    // ── Step 3: complex_square bounded condition → extract error bounds ──
+    assert(ud_re * ud_re / S < P && ud_im * ud_im / S < P);
+    assert((ud_re + ud_im) * (ud_re + ud_im) / S < P);
+    let sq_spec = spec_complex_square(delta.to_spec());
+    assert(delta_sq.to_spec().re >= sq_spec.re / S);
+    assert(delta_sq.to_spec().re <= sq_spec.re / S + 1);
+    assert(delta_sq.to_spec().im >= sq_spec.im / S);
+    assert(delta_sq.to_spec().im <= sq_spec.im / S + 2);
+
+    // ── Step 4: Bound |signed_val| for add exactness using error bounds ──
+    let mul_3sum = 2 * uz_re * ud_re / S + 2 * uz_im * ud_im / S
+        + (2 * uz_re + 2 * uz_im) * (ud_re + ud_im) / S;
+    let sq_3sum = ud_re * ud_re / S + ud_im * ud_im / S
+        + (ud_re + ud_im) * (ud_re + ud_im) / S;
+    assert(mul_3sum < P / 4);
+    assert(sq_3sum < P / 4);
+
+    // From wf: |signed_val| = unsigned_val < P for all intermediates
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(two_z_delta.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(two_z_delta.im.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta_sq.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta_sq.im.limbs@);
+    // Use error bounds to get tighter magnitude constraints
+    // two_z_delta.re.sv ∈ [mul_spec.re/S - 1, mul_spec.re/S + 2]
+    // |two_z_delta.re.sv| ≤ max(|mul_spec.re/S - 1|, |mul_spec.re/S + 2|)
+    //                    ≤ |mul_spec.re/S| + 2
+    // |mul_spec.re| ≤ 2*uz_re*ud_re + 2*uz_im*ud_im (triangle ineq)
+    // |mul_spec.re/S| ≤ (2*uz_re*ud_re + 2*uz_im*ud_im)/S < mul_3sum
+    // So |two_z_delta.re.sv| < mul_3sum + 3 < P/4 + 3
+    assert(two_z_delta.re.signed_val() <= two_z_delta.re.unsigned_val() as int);
+    assert(two_z_delta.re.signed_val() >= -(two_z_delta.re.unsigned_val() as int));
+    assert(delta_sq.re.signed_val() <= delta_sq.re.unsigned_val() as int);
+    assert(delta_sq.re.signed_val() >= -(delta_sq.re.unsigned_val() as int));
+    assert(two_z_delta.im.signed_val() <= two_z_delta.im.unsigned_val() as int);
+    assert(two_z_delta.im.signed_val() >= -(two_z_delta.im.unsigned_val() as int));
+    assert(delta_sq.im.signed_val() <= delta_sq.im.unsigned_val() as int);
+    assert(delta_sq.im.signed_val() >= -(delta_sq.im.unsigned_val() as int));
+
+    // For delta_sq: use wf bounds (uval < P) — tighter bounds from sq postcondition
+    // need to derive from the sq conditional postcondition
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta_sq.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta_sq.im.limbs@);
+    assert(delta_sq.re.unsigned_val() < P);
+    assert(delta_sq.im.unsigned_val() < P);
+
+    // First add exact: |mul_sv| ≤ P/4 and |sq_sv| < P → sum < P/4 + P < 2P. Not tight enough.
+    // But we know |mul_sv| ≤ P/4 and |sq_sv| < P, and from sq bounds: |sq_sv| ≤ sq_3sum < P/4.
+    // Hmm, complex_square doesn't export unsigned_val bounds. Let me use wf bound.
+    // |mul_sv| ≤ P/4 and |sq_sv| < P → |sum| < P/4 + P. Too big!
+    // Actually need sq unsigned_val bound too. Let me use error bound + spec value.
+    // Or just assert from context: delta_sq.re.uval < P/4... this comes from the sq 3sum.
+
+    // Actually, I need to establish that the sq postcondition gives us the unsigned bound.
+    // The sq postcondition has: bounded_sq ==> (error bounds)
+    // But NOT unsigned_val bounds (we didn't add them to complex_square)
+    // The simplest fix: just use |mul_sv| ≤ P/4 and |sq_sv| < P, and note P/4 + P > P.
+    // So the first add might not be exact!
+
+    // Wait — the sq three_sum < P/4 from pert_inputs_bounded.
+    // And delta_sq.re.uval < P (from wf). But we need < P/4.
+    // We DID NOT add the unsigned bound to complex_square's postcondition.
+    // Let me use the error bound approach instead.
+    // delta_sq.to_spec().re ∈ [sq_spec.re/S, sq_spec.re/S + 1]
+    // So |delta_sq.to_spec().re| ≤ |sq_spec.re/S| + 1
+    // |sq_spec.re| = |d.re.sv² - d.im.sv²| ≤ d.re.uval² + d.im.uval²
+    // (d.re.uval² + d.im.uval²)/S ≤ d.re.uval²/S + d.im.uval²/S + 1 ≤ sq_3sum + 1
+    // So |delta_sq.to_spec().re| ≤ sq_3sum + 2 < P/4 + 2
+
+    // Need to prove: |sq_spec.re/S| ≤ sq_3sum + 1
+    // sq_spec.re = d.re.sv² - d.im.sv² → |sq_spec.re| ≤ d.re.sv² + d.im.sv² = d.re.uval² + d.im.uval²
+    verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(&delta.re);
+    verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(&delta.im);
+    let d = delta.to_spec();
+    assert(d.re * d.re == ud_re * ud_re) by {
+        assert(d.re * d.re == delta.re.signed_val() * delta.re.signed_val());
+    };
+    assert(d.im * d.im == ud_im * ud_im) by {
+        assert(d.im * d.im == delta.im.signed_val() * delta.im.signed_val());
+    };
+    // |sq_spec.re| = |d.re²-d.im²| ≤ d.re² + d.im² = ud_re² + ud_im²
+    // (ud_re²+ud_im²)/S ≤ ud_re²/S + ud_im²/S ≤ sq_3sum
+    assert(delta_sq.re.signed_val() <= sq_3sum as int + 1);
+    assert(delta_sq.re.signed_val() >= -(sq_3sum as int) - 1);
+    assert(delta_sq.im.signed_val() <= sq_3sum as int + 2);
+    assert(delta_sq.im.signed_val() >= -(sq_3sum as int));
+
+    // First add exact: |sv| < P (from wf), so |sv1 + sv2| < 2P.
+    // But we need < P. Since both uval < P, and |sv| = uval:
+    // |two_z_delta.re.sv + delta_sq.re.sv| ≤ two_z_delta.re.uval + delta_sq.re.uval < 2P
+    // This is NOT < P in general. We need the tighter bound.
+    // From pert_inputs_bounded: mul_3sum < P/4 and sq_3sum < P/4.
+    // combined: mul_3sum + sq_3sum < P/2.
+    // From error bounds: |two_z_delta.re.sv| ≤ |mul_spec.re/S| + 2 and |delta_sq.re.sv| ≤ |sq_spec.re/S| + 1.
+    // |mul_spec.re/S| ≤ 2*(uz_re*ud_re + uz_im*ud_im)/S < mul_3sum
+    // |sq_spec.re/S| ≤ (ud_re² + ud_im²)/S ≤ sq_3sum
+    // From mul postcondition: two_z_delta.to_spec().re ∈ [mul_spec.re/S - 1, mul_spec.re/S + 2]
+    // So two_z_delta.to_spec().re < mul_spec.re/S + 3... but mul_spec.re/S could be positive or negative.
+    // |two_z_delta.to_spec().re| ≤ |mul_spec.re/S| + 2 ≤ mul_3sum + 2 ← WAIT, I haven't proved |mul_spec.re/S| ≤ mul_3sum!
+
+    // Simpler approach: use uval < P from wf for both, and note they're individually < P.
+    // Then: sv ∈ (-(P-1), P-1). Sum ∈ (-2(P-1), 2(P-1)).
+    // For sum < P: need each individually < P/2. From wf: each < P, not P/2.
+
+    // The tighter bound comes from the error postcondition + the bounded condition.
+    // |two_z_delta.re.sv| ≤ |mul_spec.re/S| + 2.
+    // I need |mul_spec.re/S| < mul_3sum. Let me prove this.
+    // mul_spec.re = 2*z.re.sv*d.re.sv - 2*z.im.sv*d.im.sv
+    // But spec uses two_z: mul_spec.re = two_z.re.sv*d.re.sv - two_z.im.sv*d.im.sv
+    // = 2*z.re.sv*d.re.sv - 2*z.im.sv*d.im.sv (since two_z is exact double)
+
+    // |mul_spec.re| ≤ |2*z.re.sv*d.re.sv| + |2*z.im.sv*d.im.sv|
+    //              ≤ 2*uz_re*ud_re + 2*uz_im*ud_im
+    let z = z_ref.to_spec();
+    let d = delta.to_spec();
+    assert(mul_spec.re <= 2 * uz_re * ud_re + 2 * uz_im * ud_im
+        && mul_spec.re >= -(2 * uz_re * ud_re + 2 * uz_im * ud_im) as int) by {
+        assert(z.re <= uz_re as int && z.re >= -(uz_re as int));
+        assert(z.im <= uz_im as int && z.im >= -(uz_im as int));
+        assert(d.re <= ud_re as int && d.re >= -(ud_re as int));
+        assert(d.im <= ud_im as int && d.im >= -(ud_im as int));
+        assert(mul_spec.re == 2 * z.re * d.re - 2 * z.im * d.im);
+    };
+    // (2*uz_re*ud_re + 2*uz_im*ud_im)/S ≤ 2*uz_re*ud_re/S + 2*uz_im*ud_im/S + 1
+    //   ≤ mul_3sum + 1 (since the first two terms are part of the three sum)
+    // But mul_spec.re / S is floor division, so |mul_spec.re / S| ≤ |mul_spec.re| / S + 1
+    //   ≤ (2*uz_re*ud_re + 2*uz_im*ud_im)/S + 1 ≤ mul_3sum + 2
+    // → |two_z_delta.re.sv| ≤ mul_3sum + 4 < P/4 + 4
+
+    assert(two_z_delta.re.signed_val() < P / 4 + 4) by {
+        assert(two_z_delta.re.signed_val() <= mul_spec.re / S + 2);
+        assert(mul_spec.re / S <= (2 * uz_re * ud_re + 2 * uz_im * ud_im) / S)
+            by(nonlinear_arith)
+            requires mul_spec.re <= 2 * uz_re * ud_re + 2 * uz_im * ud_im,
+                     mul_spec.re >= 0, S > 0;
+    };
+    assert(two_z_delta.re.signed_val() > -(P / 4 + 3) as int) by {
+        assert(two_z_delta.re.signed_val() >= mul_spec.re / S - 1);
+        assert(mul_spec.re / S >= -((2 * uz_re * ud_re + 2 * uz_im * ud_im) / S) - 1)
+            by(nonlinear_arith)
+            requires mul_spec.re >= -(2 * uz_re * ud_re + 2 * uz_im * ud_im as int),
+                     S > 0;
+    };
+    // Similar for sq: |delta_sq.re.sv| < sq_3sum + 2 < P/4 + 2
+    // Sum: < P/4 + 4 + P/4 + 2 = P/2 + 6 < P for P > 12
+
+    // For the adds to be exact, we just need |sum| < P.
+    // Use P > 12 (which follows from P = limb_power(n) with n > 0 and LIMB_BASE = 2^32 >> 12)
+    assert(two_z_delta.re.signed_val() + delta_sq.re.signed_val() < P);
+    assert(two_z_delta.re.signed_val() + delta_sq.re.signed_val() > -(P as int));
+    assert(sum.re.signed_val()
+        == two_z_delta.re.signed_val() + delta_sq.re.signed_val());
+    assert(two_z_delta.im.signed_val() + delta_sq.im.signed_val() < P);
+    assert(two_z_delta.im.signed_val() + delta_sq.im.signed_val() > -(P as int));
+    assert(sum.im.signed_val()
+        == two_z_delta.im.signed_val() + delta_sq.im.signed_val());
+
+    // ── Step 5: Second add ──
+    let dc = delta_c.to_spec();
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta_c.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(delta_c.im.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(sum.re.limbs@);
+    verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(sum.im.limbs@);
+    // |sum.re.sv| < P (from wf of sum), |dc.re.sv| < P/4
+    assert(sum.re.signed_val() + delta_c.re.signed_val() < P) by(nonlinear_arith)
+        requires sum.re.signed_val() < P / 2 + 6,
+                 delta_c.re.signed_val() <= delta_c.re.unsigned_val(),
+                 delta_c.re.signed_val() >= -(delta_c.re.unsigned_val() as int),
+                 delta_c.re.unsigned_val() < P / 4, P > 0;
+    assert(sum.re.signed_val() + delta_c.re.signed_val() > -(P as int)) by(nonlinear_arith)
+        requires sum.re.signed_val() > -(P / 2 + 6) as int,
+                 delta_c.re.signed_val() >= -(delta_c.re.unsigned_val() as int),
+                 delta_c.re.unsigned_val() < P / 4, P > 0;
+    assert(out.re.signed_val() == sum.re.signed_val() + delta_c.re.signed_val());
+    assert(sum.im.signed_val() + delta_c.im.signed_val() < P) by(nonlinear_arith)
+        requires sum.im.signed_val() < P / 2 + 6,
+                 delta_c.im.signed_val() <= delta_c.im.unsigned_val(),
+                 delta_c.im.signed_val() >= -(delta_c.im.unsigned_val() as int),
+                 delta_c.im.unsigned_val() < P / 4, P > 0;
+    assert(sum.im.signed_val() + delta_c.im.signed_val() > -(P as int)) by(nonlinear_arith)
+        requires sum.im.signed_val() > -(P / 2 + 6) as int,
+                 delta_c.im.signed_val() >= -(delta_c.im.unsigned_val() as int),
+                 delta_c.im.unsigned_val() < P / 4, P > 0;
+    assert(out.im.signed_val() == sum.im.signed_val() + delta_c.im.signed_val());
+
+    // ── Step 6: Chain to postcondition ──
+    assert(mul_spec == spec_complex_mul(
+        SpecComplex { re: 2 * z.re, im: 2 * z.im }, d));
+
+    // out.re.sv = two_z_delta.re.sv + delta_sq.re.sv + dc.re.sv
+    //           = [mul_spec.re/S-1, +2] + [sq_spec.re/S, +1] + dc.re
+    assert(out.to_spec().re
+        == two_z_delta.to_spec().re + delta_sq.to_spec().re + dc.re);
+    assert(out.to_spec().re >= mul_spec.re / S + sq_spec.re / S + dc.re - 1);
+    assert(out.to_spec().re <= mul_spec.re / S + sq_spec.re / S + dc.re + 3);
+    assert(out.to_spec().im
+        == two_z_delta.to_spec().im + delta_sq.to_spec().im + dc.im);
+    assert(out.to_spec().im >= mul_spec.im / S + sq_spec.im / S + dc.im - 2);
+    assert(out.to_spec().im <= mul_spec.im / S + sq_spec.im / S + dc.im + 5);
 }
 
 /// Reference orbit step: Z' = Z^2 + c.
