@@ -14,6 +14,31 @@ verus! {
 
 pub open spec fn u32_max() -> int { 0x1_0000_0000 - 1 }
 
+proof fn lemma_mul_u32_safe(a: int, b: int)
+    requires 0 <= a, a <= 65535, 0 <= b, b <= 65535,
+    ensures a * b < 4294967296,
+{
+    assert(a * b <= 65535 * 65535) by(nonlinear_arith)
+        requires 0 <= a, a <= 65535, 0 <= b, b <= 65535;
+}
+
+proof fn lemma_iter_stride_safe(iter: int, z_stride: int, max_bound: int)
+    requires 0 <= iter, iter < max_bound, z_stride >= 4,
+             max_bound * z_stride < 8192,
+    ensures iter * z_stride < max_bound * z_stride,
+{
+    assert(iter * z_stride < max_bound * z_stride) by(nonlinear_arith)
+        requires 0 <= iter, iter < max_bound, z_stride >= 4;
+}
+
+proof fn lemma_tid_cstride_safe(tid: int, cs: int, wh: int)
+    requires 0 <= tid, tid < wh, 0 <= cs, wh * cs < u32_max(),
+    ensures tid * cs < u32_max(),
+{
+    assert(tid * cs < wh * cs) by(nonlinear_arith)
+        requires 0 <= tid, tid < wh, 0 <= cs;
+}
+
 /// No-op barrier for Verus verification (GPU semantics handled by transpiler).
 #[verifier::external_body]
 fn gpu_workgroup_barrier() { }
@@ -118,6 +143,7 @@ fn mandelbrot_perturbation(
     if gid_x >= width { return; }
     if gid_y >= height { return; }
 
+    proof { lemma_mul_u32_safe(gid_y as int, width as int); }
     let tid = gid_y * width + gid_x;
     let local_id = lid_y * 16u32 + lid_x;
 
@@ -125,8 +151,10 @@ fn mandelbrot_perturbation(
     let z_stride = 2u32 * n + 2u32;
 
     // Shared memory regions
-    let orbit_base = 0u32;                          // Z_0..Z_{max_iters}: (max_iters+1) * z_stride
+    let orbit_base = 0u32;
+    // Prove layout bounds BEFORE computing offsets
     proof {
+        assert((max_iters as int + 2) * (z_stride as int) + 10 * (n as int) + 259 <= 8192);
         assert((max_iters as int + 1) * (z_stride as int) < 8192) by(nonlinear_arith)
             requires
                 (max_iters as int + 2) * (2 * n as int + 2) + 10 * n as int + 259 <= 8192,
@@ -134,13 +162,7 @@ fn mandelbrot_perturbation(
                 max_iters as int >= 1,
                 n as int >= 1;
     }
-    // Prove layout bounds BEFORE computing offsets (so u32 overflow checks pass)
-    proof {
-        assert((max_iters as int + 2) * (z_stride as int) + 10 * (n as int) + 259 <= 8192);
-        // t0_tmp_base = (max_iters+2)*z_stride < 8192
-        // All subsequent offsets add at most 10*n + 259 < 8192
-    }
-    let ref_c_base = (max_iters + 1u32) * z_stride; // c_ref: z_stride words
+    let ref_c_base = (max_iters + 1u32) * z_stride;
     let t0_tmp_base = ref_c_base + z_stride;        // thread-0 temporaries
 
     // Thread-0 temporary offsets (for reference orbit computation)
@@ -161,6 +183,7 @@ fn mandelbrot_perturbation(
     let best_ref_addr = glitch_count_addr + 1u32;    // local_id of best new reference
     // Per-pixel c from c_data buffer (absolute coordinates)
     let c_stride_px = 2u32 * n + 2u32;
+    proof { lemma_tid_cstride_safe(tid as int, c_stride_px as int, width as int * height as int); }
     let c_re_off = tid * c_stride_px;
     let c_re_sign_off = c_re_off + n;
     let c_im_off = c_re_sign_off + 1u32;
@@ -244,6 +267,11 @@ fn mandelbrot_perturbation(
             iter_counts@.len() as int >= width as int * height as int,
             // params
             params@.len() as int >= 5 + n as int,
+            // Shared memory address bounds
+            vote_base + 256u32 < 8192u32,
+            best_ref_addr < 8192u32,
+            ref_c_base < 8192u32,
+            c_stride_px == 2u32 * n + 2u32,
             // Local array sizes
             delta_re@.len() == n as int,
             delta_im@.len() == n as int,
@@ -276,7 +304,9 @@ fn mandelbrot_perturbation(
                 let ref_y = gid_y - lid_y + 8u32;
                 let ref_x_c = if ref_x >= width { width - 1u32 } else { ref_x };
                 let ref_y_c = if ref_y >= height { height - 1u32 } else { ref_y };
+                proof { lemma_mul_u32_safe(ref_y_c as int, width as int); }
                 let ref_tid_init = ref_y_c * width + ref_x_c;
+                proof { lemma_tid_cstride_safe(ref_tid_init as int, c_stride_px as int, width as int * height as int); }
                 let ref_c_off = ref_tid_init * c_stride_px;
                 for i in 0u32..n
                     invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
@@ -309,14 +339,15 @@ fn mandelbrot_perturbation(
             for iter in 0u32..max_iters
                 invariant
                     wg_mem@.len() >= 8192, n >= 1, n <= 8,
-                    max_iters > 0, max_iters <= 0x1000,
-                    z_stride == 2 * n + 2,
-                    (max_iters as int + 2) * (2 * n as int + 2) + 10 * n as int + 259 <= 8192,
+                    max_iters > 0, max_iters <= 4096,
+                    z_stride == 2 * n + 2, orbit_base == 0u32,
+                    ((max_iters as int) + 1) * (z_stride as int) < 8192,
                     ref_a@.len() == n as int, ref_b@.len() == n as int,
                     frac_limbs <= n, frac_limbs + n <= 2 * n,
                     ref_c_base < 8192u32,
                     ref_escaped <= max_iters,
             {
+                proof { lemma_iter_stride_safe(iter as int, z_stride as int, (max_iters as int) + 1); }
                 let zk = orbit_base + iter * z_stride;
                 let zk_re = zk;
                 let zk_re_sign = zk + n;
@@ -588,7 +619,9 @@ fn mandelbrot_perturbation(
             if g_count > 0u32 {
                 let best_gx = gid_x - lid_x + (best_idx % 16u32);
                 let best_gy = gid_y - lid_y + (best_idx / 16u32);
+                proof { lemma_mul_u32_safe(best_gy as int, width as int); }
                 let best_tid = best_gy * width + best_gx;
+                proof { lemma_tid_cstride_safe(best_tid as int, c_stride_px as int, width as int * height as int); }
                 let best_c_off = best_tid * c_stride_px;
                 for i in 0u32..n
                     invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
