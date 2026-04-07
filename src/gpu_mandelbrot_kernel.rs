@@ -48,9 +48,11 @@ impl<T: LimbOps> FpComplex<T> {
 /// Complex squaring: z^2 = (re^2 - im^2, 2*re*im).
 /// Uses 3 multiplies: re^2, im^2, (re+im)^2.
 ///
-/// Truncation error: re ≤ 1 ULP, im ≤ 2 ULPs (from theorem_complex_square_error).
+/// With bounded inputs, the output is within (1, 2) ULPs of the exact spec
+/// (see bridge_complex_square_error for the truncation error theorem).
 pub fn complex_square<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
     requires z.wf(),
+        z.re.n_exec > 0, z.re.n_exec <= 0x1FFF_FFFF, z.re.frac_exec % 32 == 0,
     ensures out.wf(), out.same_format(z),
 {
     let re2 = z.re.signed_mul(&z.re);
