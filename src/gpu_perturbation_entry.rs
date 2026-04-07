@@ -280,24 +280,41 @@ fn mandelbrot_perturbation(
     // Layout chain proof: all shared memory offsets < 8192
     // Total = (max_iters+2)*z_stride + 10*n + 259 <= 8192
     // Each intermediate offset is strictly less.
+    // Assert layout bounds — Z3 should chain through the let bindings
+    // but may need help with the 10*n = sum of individual n's
     proof {
-        // Chain: ref_c_base + z_stride = t0_tmp_base
-        // t0_tmp_base + 10*n = ref_escape_addr (10 n-sized slots: re2,im2,rpi,sum2,diff,prod(2n),stmp1,stmp2,stmp3)
-        assert(t0_tmp_base as int == (ref_c_base + z_stride) as int);
-        assert(ref_escape_addr as int == (t0_tmp_base + 10 * n) as int);
-        assert(best_ref_addr as int == (ref_escape_addr + 258) as int);
-        // best_ref_addr + 1 = ref_escape_addr + 259 = t0_tmp_base + 10*n + 259
-        // = (max_iters+2)*z_stride + 10*n + 259 <= 8192
+        // The key insight: ref_escape_addr = t0_stmp3 + n
+        // t0_stmp3 = t0_stmp2 + n, t0_stmp2 = t0_stmp1 + n, t0_stmp1 = t0_prod + 2*n
+        // t0_prod = t0_diff + n, t0_diff = t0_sum2 + n, etc.
+        // Sum: t0_tmp_base + n + n + n + n + n + 2*n + n + n + n = t0_tmp_base + 10*n
+        // vote_base = ref_escape_addr + 1
+        // glitch_count_addr = vote_base + 256
+        // best_ref_addr = glitch_count_addr + 1
+        // So best_ref_addr = ref_escape_addr + 258 = t0_tmp_base + 10*n + 258
+        // And t0_tmp_base = ref_c_base + z_stride = (max_iters + 2) * z_stride
+        // Total: (max_iters + 2) * z_stride + 10*n + 258 < (max_iters + 2) * z_stride + 10*n + 259 <= 8192
+        assert(best_ref_addr < 8192u32) by {
+            assert(t0_prod == t0_tmp_base + 5 * n);
+            assert(t0_stmp1 == t0_tmp_base + 7 * n);
+            assert(ref_escape_addr == t0_tmp_base + 10 * n);
+        }
+        assert(vote_base + 256u32 < 8192u32);
+        assert(glitch_count_addr < 8192u32);
+        assert(ref_escape_addr < 8192u32);
+        assert(ref_c_base + z_stride < 8192u32);
     }
 
-    for round in 0u32..max_rounds
+    let mut round = 0u32;
+    while round < max_rounds
         invariant
+            round <= max_rounds,
+            max_rounds == 5u32,
             // Kernel parameters are unchanged
             n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
             frac_limbs <= n, frac_limbs + n <= 2 * n,
             width > 0, width <= 0xFFFF,
             height > 0, height <= 0xFFFF,
-            max_iters > 0, max_iters <= 0x1000,
+            max_iters > 0, max_iters <= 0x1000, orbit_base == 0u32,
             z_stride == 2 * n + 2,
             lid_x < 16, lid_y < 16,
             gid_x < width, gid_y < height,
@@ -348,6 +365,7 @@ fn mandelbrot_perturbation(
             delta_im_sign == 0u32 || delta_im_sign == 1u32,
             dc_re_sign == 0u32 || dc_re_sign == 1u32,
             dc_im_sign == 0u32 || dc_im_sign == 1u32,
+        decreases max_rounds - round,
     {
         // ── Step 1: Thread 0 selects reference and computes orbit ──
         if local_id == 0u32 {
@@ -517,8 +535,10 @@ fn mandelbrot_perturbation(
 
             let ref_escaped = vget(wg_mem, ref_escape_addr);
 
-            for iter in 0u32..max_iters
+            let mut iter = 0u32;
+            while iter < max_iters
                 invariant
+                    iter <= max_iters,
                     // Kernel params (carried from outer loop)
                     n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
                     frac_limbs <= n, frac_limbs + n <= 2 * n,
@@ -552,6 +572,7 @@ fn mandelbrot_perturbation(
                     // Valid limbs (needed by signed_mul_to/signed_add_to preconditions)
                     valid_limbs(delta_re@), valid_limbs(delta_im@),
                     valid_limbs(dc_re@), valid_limbs(dc_im@),
+                decreases max_iters - iter,
             {
                 // If reference orbit escaped, Z values after this are garbage.
                 // Mark as glitched so refinement loop picks a new reference.
@@ -627,6 +648,7 @@ fn mandelbrot_perturbation(
                         escaped_iter = iter;
                     }
                 }
+                iter = iter + 1u32;
             }
             // POST-LOOP INVARIANT: pixel must be in a valid state.
             // Either escaped (found iteration count), glitched (needs re-reference),
@@ -708,6 +730,7 @@ fn mandelbrot_perturbation(
 
         // If no glitches remain, stop refining
         if vget(wg_mem, glitch_count_addr) == 0u32 { break; }
+        round = round + 1u32;
     }
 
     // ── Colorize ──
