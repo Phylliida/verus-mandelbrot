@@ -191,6 +191,7 @@ fn mandelbrot_perturbation(
     let t0_tmp_base = ref_c_base + z_stride;        // thread-0 temporaries
 
     // Thread-0 temporary offsets (for reference orbit computation)
+    // Each is within the layout bound, so no u32 overflow.
     let t0_re2     = t0_tmp_base;
     let t0_im2     = t0_re2 + n;
     let t0_rpi     = t0_im2 + n;
@@ -202,10 +203,33 @@ fn mandelbrot_perturbation(
     let t0_stmp3   = t0_stmp2 + n;
 
     // Refinement shared slots (after thread-0 temporaries)
-    let ref_escape_addr = t0_stmp3 + n;             // iteration where reference orbit escaped
-    let vote_base = ref_escape_addr + 1u32;          // 256 words for glitch voting
-    let glitch_count_addr = vote_base + 256u32;      // count of glitched pixels
-    let best_ref_addr = glitch_count_addr + 1u32;    // local_id of best new reference
+    let ref_escape_addr = t0_stmp3 + n;             // = t0_tmp_base + 10*n
+    let vote_base = ref_escape_addr + 1u32;
+    let glitch_count_addr = vote_base + 256u32;
+    let best_ref_addr = glitch_count_addr + 1u32;
+    // Assert the chain: ref_escape_addr = t0_tmp_base + 10*n < total <= 8192
+    // Use int arithmetic to avoid u32 wrapping concerns in Z3
+    proof {
+        // Establish the chain in int arithmetic
+        assert(t0_tmp_base as int == (ref_c_base as int) + (z_stride as int));
+        assert(ref_c_base as int == ((max_iters as int) + 1) * (z_stride as int));
+        assert(t0_tmp_base as int == ((max_iters as int) + 2) * (z_stride as int)) by(nonlinear_arith)
+            requires
+                t0_tmp_base as int == (ref_c_base as int) + (z_stride as int),
+                ref_c_base as int == ((max_iters as int) + 1) * (z_stride as int);
+        assert(t0_prod as int == (t0_tmp_base as int) + 5 * (n as int));
+        assert(t0_stmp1 as int == (t0_tmp_base as int) + 7 * (n as int));
+        assert(ref_escape_addr as int == (t0_tmp_base as int) + 10 * (n as int));
+        assert(best_ref_addr as int == (ref_escape_addr as int) + 258);
+        // Layout bound: t0_tmp_base + 10*n + 259 <= 8192
+        assert((t0_tmp_base as int) + 10 * (n as int) + 259 <= 8192);
+        // Therefore all bounds hold
+        assert(best_ref_addr < 8192u32);
+        assert(glitch_count_addr < 8192u32);
+        assert(vote_base + 256u32 < 8192u32);
+        assert(ref_escape_addr < 8192u32);
+        assert(ref_c_base + z_stride < 8192u32);
+    }
     // Per-pixel c from c_data buffer (absolute coordinates)
     let c_stride_px = 2u32 * n + 2u32;
     proof {
@@ -280,33 +304,10 @@ fn mandelbrot_perturbation(
     // Layout chain proof: all shared memory offsets < 8192
     // Total = (max_iters+2)*z_stride + 10*n + 259 <= 8192
     // Each intermediate offset is strictly less.
-    // Assert layout bounds — Z3 should chain through the let bindings
-    // but may need help with the 10*n = sum of individual n's
-    proof {
-        // The key insight: ref_escape_addr = t0_stmp3 + n
-        // t0_stmp3 = t0_stmp2 + n, t0_stmp2 = t0_stmp1 + n, t0_stmp1 = t0_prod + 2*n
-        // t0_prod = t0_diff + n, t0_diff = t0_sum2 + n, etc.
-        // Sum: t0_tmp_base + n + n + n + n + n + 2*n + n + n + n = t0_tmp_base + 10*n
-        // vote_base = ref_escape_addr + 1
-        // glitch_count_addr = vote_base + 256
-        // best_ref_addr = glitch_count_addr + 1
-        // So best_ref_addr = ref_escape_addr + 258 = t0_tmp_base + 10*n + 258
-        // And t0_tmp_base = ref_c_base + z_stride = (max_iters + 2) * z_stride
-        // Total: (max_iters + 2) * z_stride + 10*n + 258 < (max_iters + 2) * z_stride + 10*n + 259 <= 8192
-        assert(best_ref_addr < 8192u32) by {
-            assert(t0_prod == t0_tmp_base + 5 * n);
-            assert(t0_stmp1 == t0_tmp_base + 7 * n);
-            assert(ref_escape_addr == t0_tmp_base + 10 * n);
-        }
-        assert(vote_base + 256u32 < 8192u32);
-        assert(glitch_count_addr < 8192u32);
-        assert(ref_escape_addr < 8192u32);
-        assert(ref_c_base + z_stride < 8192u32);
-    }
 
     let mut round = 0u32;
     while round < max_rounds
-        invariant
+        invariant_except_break
             round <= max_rounds,
             max_rounds == 5u32,
             // Kernel parameters are unchanged
@@ -341,6 +342,7 @@ fn mandelbrot_perturbation(
             best_ref_addr < 8192u32,
             ref_c_base + z_stride < 8192u32,
             ref_escape_addr < 8192u32,
+            ((max_iters as int) + 1) * (z_stride as int) < 8192,
             c_stride_px == 2u32 * n + 2u32,
             // Local array sizes
             delta_re@.len() == n as int,
@@ -543,6 +545,9 @@ fn mandelbrot_perturbation(
                     n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
                     frac_limbs <= n, frac_limbs + n <= 2 * n,
                     max_iters > 0, max_iters <= 0x1000,
+                    z_stride == 2u32 * n + 2u32, orbit_base == 0u32,
+                    ((max_iters as int) + 1) * (z_stride as int) < 8192,
+                    wg_mem@.len() >= 8192,
                     // KEY INVARIANT: at every break, either escaped or glitched.
                     escaped_iter <= max_iters,
                     is_glitched == 0u32 || is_glitched == 1u32,
@@ -582,6 +587,7 @@ fn mandelbrot_perturbation(
                     break;
                 }
 
+                proof { lemma_iter_stride_safe(iter as int, z_stride as int, (max_iters as int) + 1); }
                 let zn = orbit_base + iter * z_stride;
                 let zn_re = zn;
                 let zn_re_sign = zn + n;
@@ -738,10 +744,14 @@ fn mandelbrot_perturbation(
     if escaped_iter >= max_iters {
         vset(iter_counts, tid, alpha);
     } else {
+        // escaped_iter < max_iters <= 4096, so escaped_iter * 255 < 4096 * 255 < u32_max
+        // t_col = escaped_iter * 255 / max_iters <= 254 (since escaped_iter < max_iters)
         let t_col = escaped_iter * 255u32 / max_iters;
         let r = t_col;
         let g = t_col / 3u32;
-        let b = 255u32 - t_col / 2u32;
+        // t_col <= 254, so t_col/2 <= 127, so 255 - t_col/2 >= 128
+        let half_t = t_col / 2u32;
+        let b = 255u32 - half_t;
         vset(iter_counts, tid, alpha | (b << 16u32) | (g << 8u32) | r);
     }
 }
