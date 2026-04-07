@@ -277,18 +277,18 @@ fn mandelbrot_perturbation(
     // Total layout: (max_iters+2)*z_stride + 10*n + 259 <= 8192
     // So: best_ref_addr + 1 <= total <= 8192
     // And: vote_base + 256 = glitch_count_addr <= best_ref_addr < 8192
-    // Layout: total = ref_c_base + z_stride + 10*n + 259
-    //       = (max_iters+2)*z_stride + 10*n + 259 <= 8192
-    // best_ref_addr = ref_c_base + z_stride + 10*n + 1 + 256 + 1
-    //               = ref_c_base + z_stride + 10*n + 258
-    // So best_ref_addr < total <= 8192.
-    // But Z3 needs explicit help with the chain of let bindings.
-    // t0_tmp_base = ref_c_base + z_stride
-    // ref_escape_addr = t0_tmp_base + 10*n = ref_c_base + z_stride + 10*n
-    // vote_base = ref_escape_addr + 1
-    // glitch_count_addr = vote_base + 256 = ref_escape_addr + 257
-    // best_ref_addr = glitch_count_addr + 1 = ref_escape_addr + 258
-    // = ref_c_base + z_stride + 10*n + 258 < total = ref_c_base + z_stride + 10*n + 259 <= 8192
+    // Layout chain proof: all shared memory offsets < 8192
+    // Total = (max_iters+2)*z_stride + 10*n + 259 <= 8192
+    // Each intermediate offset is strictly less.
+    proof {
+        // Chain: ref_c_base + z_stride = t0_tmp_base
+        // t0_tmp_base + 10*n = ref_escape_addr (10 n-sized slots: re2,im2,rpi,sum2,diff,prod(2n),stmp1,stmp2,stmp3)
+        assert(t0_tmp_base as int == (ref_c_base + z_stride) as int);
+        assert(ref_escape_addr as int == (t0_tmp_base + 10 * n) as int);
+        assert(best_ref_addr as int == (ref_escape_addr + 258) as int);
+        // best_ref_addr + 1 = ref_escape_addr + 259 = t0_tmp_base + 10*n + 259
+        // = (max_iters+2)*z_stride + 10*n + 259 <= 8192
+    }
 
     for round in 0u32..max_rounds
         invariant
@@ -365,30 +365,32 @@ fn mandelbrot_perturbation(
                 }
                 let ref_c_off = ref_tid_init * c_stride_px;
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
-                        ref_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
-                        c_stride_px == 2 * n + 2,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2u32 * n + 2u32, n >= 1, n <= 8,
+                        (ref_c_off + c_stride_px) as int <= c_data@.len() as int,
+                        (ref_c_off + c_stride_px) < u32_max(),
+                        c_stride_px == 2u32 * n + 2u32,
                 { vset(wg_mem, ref_c_base + i, vget(c_data, ref_c_off + i)); }
                 vset(wg_mem, ref_c_base + n, vget(c_data, ref_c_off + n));
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
-                        ref_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
-                        c_stride_px == 2 * n + 2,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2u32 * n + 2u32, n >= 1, n <= 8,
+                        (ref_c_off + c_stride_px) as int <= c_data@.len() as int,
+                        (ref_c_off + c_stride_px) < u32_max(),
+                        c_stride_px == 2u32 * n + 2u32,
                 { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, ref_c_off + n + 1u32 + i)); }
                 vset(wg_mem, ref_c_base + 2u32 * n + 1u32, vget(c_data, ref_c_off + 2u32 * n + 1u32));
             }
             // else: ref_c was already updated by glitch analysis below
 
             // Compute reference orbit Z_0..Z_{max_iters}
-            let z0_off = orbit_base;
+            // Z_0 = 0 (orbit_base = 0, so z0_off = 0)
             for i in 0u32..n
-                invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, z0_off == 0u32,
-            { vset(wg_mem, z0_off + i, 0u32); }
-            vset(wg_mem, z0_off + n, 0u32);
+                invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, orbit_base == 0u32,
+            { vset(wg_mem, orbit_base + i, 0u32); }
+            vset(wg_mem, orbit_base + n, 0u32);
             for i in 0u32..n
-                invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, z0_off == 0u32,
-            { vset(wg_mem, z0_off + n + 1u32 + i, 0u32); }
-            vset(wg_mem, z0_off + 2u32 * n + 1u32, 0u32);
+                invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, orbit_base == 0u32,
+            { vset(wg_mem, orbit_base + n + 1u32 + i, 0u32); }
+            vset(wg_mem, orbit_base + 2u32 * n + 1u32, 0u32);
 
             let mut ref_escaped = max_iters;
 
@@ -686,15 +688,17 @@ fn mandelbrot_perturbation(
                 }
                 let best_c_off = best_tid * c_stride_px;
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
-                        best_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
-                        c_stride_px == 2 * n + 2,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2u32 * n + 2u32, n >= 1, n <= 8,
+                        (best_c_off + c_stride_px) as int <= c_data@.len() as int,
+                        (best_c_off + c_stride_px) < u32_max(),
+                        c_stride_px == 2u32 * n + 2u32,
                 { vset(wg_mem, ref_c_base + i, vget(c_data, best_c_off + i)); }
                 vset(wg_mem, ref_c_base + n, vget(c_data, best_c_off + n));
                 for i in 0u32..n
-                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2 * n + 2, n >= 1, n <= 8,
-                        best_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
-                        c_stride_px == 2 * n + 2,
+                    invariant wg_mem@.len() >= 8192, ref_c_base + z_stride < 8192u32, z_stride == 2u32 * n + 2u32, n >= 1, n <= 8,
+                        (best_c_off + c_stride_px) as int <= c_data@.len() as int,
+                        (best_c_off + c_stride_px) < u32_max(),
+                        c_stride_px == 2u32 * n + 2u32,
                 { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, best_c_off + n + 1u32 + i)); }
                 vset(wg_mem, ref_c_base + 2u32 * n + 1u32, vget(c_data, best_c_off + 2u32 * n + 1u32));
             }
