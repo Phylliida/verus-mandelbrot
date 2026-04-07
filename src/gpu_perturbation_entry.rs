@@ -37,9 +37,30 @@ fn vslice(v: &Vec<u32>, off: u32) -> (out: &[u32])
     ensures out@ == v@.subrange(off as int, v@.len() as int),
 { vstd::slice::slice_subrange(v.as_slice(), off as usize, v.len()) }
 
-/// Get mutable slice of Vec starting at u32 offset.
-#[verifier::external_body]
-#[inline]
+/// Copy n limbs from src buffer at src_off into dst starting at index 0.
+fn copy_limbs(src: &Vec<u32>, src_off: u32, dst: &mut Vec<u32>, n: u32)
+    requires
+        src_off + n <= src@.len(),
+        src_off + n < 0xFFFF_FFFF,
+        n <= old(dst)@.len(),
+    ensures
+        dst@.len() == old(dst)@.len(),
+        forall |j: int| 0 <= j < n ==> (#[trigger] dst@[j]) == src@[(src_off as int + j) as int],
+        forall |j: int| n as int <= j < dst@.len() ==> dst@[j] == old(dst)@[j],
+{
+    let ghost dst_len = dst@.len();
+    let ghost old_dst = dst@;
+    for i in 0u32..n
+        invariant
+            dst@.len() == dst_len, dst_len >= n,
+            src_off + n <= src@.len(),
+            src_off + n < 0xFFFF_FFFF,
+            forall |j: int| 0 <= j < i ==> (#[trigger] dst@[j]) == src@[(src_off as int + j) as int],
+            forall |j: int| i as int <= j < dst_len ==> dst@[j] == old_dst[j],
+    {
+        dst.set(i as usize, vget(src, src_off + i));
+    }
+}
 
 // #[gpu_kernel(workgroup_size(16, 16, 1))]
 fn mandelbrot_perturbation(
@@ -61,13 +82,25 @@ fn mandelbrot_perturbation(
     params: &Vec<u32>,
 )
     requires
+        // Params buffer layout
         params@.len() >= 10,
-        params@[3].sem() > 0,  // n > 0
-        params@[3].sem() <= 8, // n <= 8 limbs
-        // Buffer size requirements
+        // width, height, max_iters, n, frac_limbs bounds
+        params@[0] > 0, params@[0] <= 0xFFFF,   // width
+        params@[1] > 0, params@[1] <= 0xFFFF,   // height
+        params@[2] > 0, params@[2] <= 0x1000,   // max_iters <= 4096
+        params@[3] >= 1, params@[3] <= 8,        // n (limb count)
+        params@[4] <= params@[3],                 // frac_limbs <= n
+        // Thread coordinate bounds (GPU guarantees)
+        lid_x < 16, lid_y < 16,
+        gid_x <= 0xFFFF, gid_y <= 0xFFFF,
+        // Shared memory: orbit + ref_c + temporaries + voting
         old(wg_mem)@.len() >= 8192,
-        c_data@.len() > 0,
-        old(iter_counts)@.len() > 0,
+        // c_data: per-pixel complex values
+        c_data@.len() as int >= (params@[0] as int) * (params@[1] as int) * (2 * (params@[3] as int) + 2),
+        // iter_counts: per-pixel output
+        old(iter_counts)@.len() as int >= (params@[0] as int) * (params@[1] as int),
+        // Escape threshold in params[5..5+n]
+        params@.len() as int >= 5 + params@[3] as int,
 {
     let width = vget(params, 0u32);
     let height = vget(params, 1u32);
@@ -145,11 +178,16 @@ fn mandelbrot_perturbation(
     // #[gpu_local(4)]
     let mut t5: Vec<u32> = generic_zero_vec(n as usize);
     // #[gpu_local(8)]
-    let mut lprod: Vec<u32> = generic_zero_vec(n as usize);
+    let mut lprod: Vec<u32> = generic_zero_vec((2 * n) as usize);
     // #[gpu_local(4)]
     let mut ls1: Vec<u32> = generic_zero_vec(n as usize);
     // #[gpu_local(4)]
     let mut ls2: Vec<u32> = generic_zero_vec(n as usize);
+    // Local temps for reference orbit (avoid aliasing wg_mem reads with writes)
+    // #[gpu_local(4)]
+    let mut ref_a: Vec<u32> = generic_zero_vec(n as usize);
+    // #[gpu_local(4)]
+    let mut ref_b: Vec<u32> = generic_zero_vec(n as usize);
 
     let mut escaped_iter = max_iters;
     let mut is_glitched = 1u32; // start as "needs computation"
@@ -195,57 +233,76 @@ fn mandelbrot_perturbation(
                 let zk_im_sign = zk + 2u32 * n + 1u32;
 
                 // Z_{k+1} = Z_k^2 + c_ref (3-multiply complex square)
+                // Copy Z_k re from wg_mem to ref_a (avoids borrow aliasing)
+                copy_limbs(wg_mem, zk_re, &mut ref_a, n);
+                let zk_re_s = vget(wg_mem, zk_re_sign);
                 let re2_s = signed_mul_to_buf(
-                    vslice(wg_mem, zk_re), &vget(wg_mem, zk_re_sign),
-                    vslice(wg_mem, zk_re), &vget(wg_mem, zk_re_sign),
+                    &ref_a, &zk_re_s, &ref_a, &zk_re_s,
                     wg_mem, t0_re2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+
+                copy_limbs(wg_mem, zk_im, &mut ref_a, n);
+                let zk_im_s = vget(wg_mem, zk_im_sign);
                 let im2_s = signed_mul_to_buf(
-                    vslice(wg_mem, zk_im), &vget(wg_mem, zk_im_sign),
-                    vslice(wg_mem, zk_im), &vget(wg_mem, zk_im_sign),
+                    &ref_a, &zk_im_s, &ref_a, &zk_im_s,
                     wg_mem, t0_im2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+
+                // re + im
+                copy_limbs(wg_mem, zk_re, &mut ref_a, n);
+                copy_limbs(wg_mem, zk_im, &mut ref_b, n);
                 let rpi_s = signed_add_to_buf(
-                    vslice(wg_mem, zk_re), &vget(wg_mem, zk_re_sign),
-                    vslice(wg_mem, zk_im), &vget(wg_mem, zk_im_sign),
+                    &ref_a, &vget(wg_mem, zk_re_sign), &ref_b, &vget(wg_mem, zk_im_sign),
                     wg_mem, t0_rpi as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+                // (re+im)^2
+                copy_limbs(wg_mem, t0_rpi, &mut ref_a, n);
                 let sum2_s = signed_mul_to_buf(
-                    vslice(wg_mem, t0_rpi), &rpi_s,
-                    vslice(wg_mem, t0_rpi), &rpi_s,
+                    &ref_a, &rpi_s, &ref_a, &rpi_s,
                     wg_mem, t0_sum2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
 
                 let zn = orbit_base + (iter + 1u32) * z_stride;
 
                 // new_re = re^2 - im^2 + c_re
+                copy_limbs(wg_mem, t0_re2, &mut ref_a, n);
+                copy_limbs(wg_mem, t0_im2, &mut ref_b, n);
                 let diff_s = signed_sub_to_buf(
-                    vslice(wg_mem, t0_re2), &re2_s,
-                    vslice(wg_mem, t0_im2), &im2_s,
+                    &ref_a, &re2_s, &ref_b, &im2_s,
                     wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+                copy_limbs(wg_mem, t0_diff, &mut ref_a, n);
+                copy_limbs(wg_mem, ref_c_base, &mut ref_b, n);
                 let new_re_s = signed_add_to_buf(
-                    vslice(wg_mem, t0_diff), &diff_s,
-                    vslice(wg_mem, ref_c_base), &vget(wg_mem, (ref_c_base + n)),
+                    &ref_a, &diff_s, &ref_b, &vget(wg_mem, (ref_c_base + n)),
                     wg_mem, zn as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
                 vset(wg_mem, zn + n, new_re_s);
 
                 // new_im = (re+im)^2 - re^2 - im^2 + c_im
+                copy_limbs(wg_mem, t0_sum2, &mut ref_a, n);
+                copy_limbs(wg_mem, t0_re2, &mut ref_b, n);
                 let t1_s = signed_sub_to_buf(
-                    vslice(wg_mem, t0_sum2), &sum2_s,
-                    vslice(wg_mem, t0_re2), &re2_s,
+                    &ref_a, &sum2_s, &ref_b, &re2_s,
                     wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+                copy_limbs(wg_mem, t0_diff, &mut ref_a, n);
+                copy_limbs(wg_mem, t0_im2, &mut ref_b, n);
                 let t2_s = signed_sub_to_buf(
-                    vslice(wg_mem, t0_diff), &t1_s,
-                    vslice(wg_mem, t0_im2), &im2_s,
+                    &ref_a, &t1_s, &ref_b, &im2_s,
                     wg_mem, t0_stmp3 as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+                copy_limbs(wg_mem, t0_stmp3, &mut ref_a, n);
+                copy_limbs(wg_mem, (ref_c_base + n + 1u32), &mut ref_b, n);
                 let new_im_s = signed_add_to_buf(
-                    vslice(wg_mem, t0_stmp3), &t2_s,
-                    vslice(wg_mem, (ref_c_base + n + 1u32)), &vget(wg_mem, (ref_c_base + 2u32 * n + 1u32)),
+                    &ref_a, &t2_s, &ref_b, &vget(wg_mem, (ref_c_base + 2u32 * n + 1u32)),
                     wg_mem, (zn + n + 1u32) as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
                 vset(wg_mem, zn + 2u32 * n + 1u32, new_im_s);
 
                 // Check if reference escaped: |Z_{k+1}|² > 4
                 if ref_escaped == max_iters {
-                    // re² + im² (reuse t0_re2 = re^2, t0_im2 = im^2 from above)
-                    add_limbs_to(vslice(wg_mem, t0_re2), vslice(wg_mem, t0_im2), wg_mem, t0_diff as usize, n as usize);
+                    copy_limbs(wg_mem, t0_re2, &mut ref_a, n);
+                    copy_limbs(wg_mem, t0_im2, &mut ref_b, n);
+                    add_limbs_to(&ref_a, &ref_b, wg_mem, t0_diff as usize, n as usize);
                     let thresh_off = 5u32;
-                    let esc_borrow = sub_limbs_to(vslice(wg_mem, t0_diff), vslice(params, thresh_off), wg_mem, t0_stmp1 as usize, n as usize);
+                    copy_limbs(wg_mem, t0_diff, &mut ref_a, n);
+                    let esc_borrow = sub_limbs_to(&ref_a, vslice(params, thresh_off), wg_mem, t0_stmp1 as usize, n as usize);
                     if esc_borrow == 0u32 {
                         ref_escaped = iter + 1u32;
                     }
@@ -285,8 +342,6 @@ fn mandelbrot_perturbation(
                     is_glitched == 0u32 || is_glitched == 1u32,
                     // Buffer sizes preserved
                     wg_mem@.len() == old(wg_mem)@.len(),
-                    c_data@.len() == old(c_data)@.len(),
-                    params@.len() == old(params)@.len(),
                     // Local array sizes preserved
                     delta_re@.len() == n as int,
                     delta_im@.len() == n as int,
@@ -297,7 +352,9 @@ fn mandelbrot_perturbation(
                     t3@.len() == n as int,
                     t4@.len() == n as int,
                     t5@.len() == n as int,
-                    lprod@.len() == n as int, // actually 2*n for lprod
+                    lprod@.len() == 2 * n as int,
+                    ref_a@.len() == n as int,
+                    ref_b@.len() == n as int,
                     ls1@.len() == n as int,
                     ls2@.len() == n as int,
             {
