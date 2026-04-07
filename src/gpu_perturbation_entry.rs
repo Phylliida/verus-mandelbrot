@@ -93,12 +93,17 @@ fn mandelbrot_perturbation(
         // Thread coordinate bounds (GPU guarantees)
         lid_x < 16, lid_y < 16,
         gid_x <= 0xFFFF, gid_y <= 0xFFFF,
-        // Shared memory: orbit + ref_c + temporaries + voting
+        gid_x >= lid_x, gid_y >= lid_y,  // gid = workgroup_start + lid
+        // Shared memory layout: orbit(max_iters+1)*z_stride + ref_c(z_stride) + temps(10n) + voting(259)
+        // z_stride = 2n+2, so total = (max_iters+2)*(2n+2) + 10n + 259 <= wg_mem.len()
         old(wg_mem)@.len() >= 8192,
-        // c_data: per-pixel complex values
+        (params@[2] as int + 2) * (2 * params@[3] as int + 2) + 10 * params@[3] as int + 259 <= 8192,
+        // c_data: per-pixel complex values (with u32 overflow bound)
         c_data@.len() as int >= (params@[0] as int) * (params@[1] as int) * (2 * (params@[3] as int) + 2),
-        // iter_counts: per-pixel output
+        (params@[0] as int) * (params@[1] as int) * (2 * params@[3] as int + 2) < 0xFFFF_FFFF,
+        // iter_counts: per-pixel output (with u32 overflow bound)
         old(iter_counts)@.len() as int >= (params@[0] as int) * (params@[1] as int),
+        (params@[0] as int) * (params@[1] as int) < 0xFFFF_FFFF,
         // Escape threshold in params[5..5+n]
         params@.len() as int >= 5 + params@[3] as int,
 {
@@ -119,6 +124,20 @@ fn mandelbrot_perturbation(
 
     // Shared memory regions
     let orbit_base = 0u32;                          // Z_0..Z_{max_iters}: (max_iters+1) * z_stride
+    proof {
+        assert((max_iters as int + 1) * (z_stride as int) < 8192) by(nonlinear_arith)
+            requires
+                (max_iters as int + 2) * (2 * n as int + 2) + 10 * n as int + 259 <= 8192,
+                z_stride as int == 2 * n as int + 2,
+                max_iters as int >= 1,
+                n as int >= 1;
+    }
+    // Prove layout bounds BEFORE computing offsets (so u32 overflow checks pass)
+    proof {
+        assert((max_iters as int + 2) * (z_stride as int) + 10 * (n as int) + 259 <= 8192);
+        // t0_tmp_base = (max_iters+2)*z_stride < 8192
+        // All subsequent offsets add at most 10*n + 259 < 8192
+    }
     let ref_c_base = (max_iters + 1u32) * z_stride; // c_ref: z_stride words
     let t0_tmp_base = ref_c_base + z_stride;        // thread-0 temporaries
 
@@ -138,7 +157,6 @@ fn mandelbrot_perturbation(
     let vote_base = ref_escape_addr + 1u32;          // 256 words for glitch voting
     let glitch_count_addr = vote_base + 256u32;      // count of glitched pixels
     let best_ref_addr = glitch_count_addr + 1u32;    // local_id of best new reference
-
     // Per-pixel c from c_data buffer (absolute coordinates)
     let c_stride_px = 2u32 * n + 2u32;
     let c_re_off = tid * c_stride_px;
@@ -198,7 +216,56 @@ fn mandelbrot_perturbation(
     // ═══════════════════════════════════════════════════
     let max_rounds = 5u32;
 
-    for round in 0u32..max_rounds {
+    for round in 0u32..max_rounds
+        invariant
+            // Kernel parameters are unchanged
+            n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+            frac_limbs <= n, frac_limbs + n <= 2 * n,
+            width > 0, width <= 0xFFFF,
+            height > 0, height <= 0xFFFF,
+            max_iters > 0, max_iters <= 0x1000,
+            z_stride == 2 * n + 2,
+            lid_x < 16, lid_y < 16,
+            gid_x < width, gid_y < height,
+            gid_x >= lid_x, gid_y >= lid_y,
+            gid_x <= 0xFFFF, gid_y <= 0xFFFF,
+            local_id == lid_y * 16 + lid_x,
+            local_id < 256,
+            // Shared memory layout fits
+            (max_iters as int + 2) * (2 * n as int + 2) + 10 * n as int + 259 <= 8192,
+            // Buffer sizes preserved
+            wg_mem@.len() == old(wg_mem)@.len(),
+            old(wg_mem)@.len() >= 8192,
+            iter_counts@.len() == old(iter_counts)@.len(),
+            // c_data and iter_counts size
+            c_data@.len() as int >= width as int * height as int * (2 * n as int + 2),
+            iter_counts@.len() as int >= width as int * height as int,
+            // params
+            params@.len() as int >= 5 + n as int,
+            // Local array sizes
+            delta_re@.len() == n as int,
+            delta_im@.len() == n as int,
+            dc_re@.len() == n as int,
+            dc_im@.len() == n as int,
+            t1@.len() == n as int,
+            t2@.len() == n as int,
+            t3@.len() == n as int,
+            t4@.len() == n as int,
+            t5@.len() == n as int,
+            lprod@.len() == 2 * n as int,
+            ls1@.len() == n as int,
+            ls2@.len() == n as int,
+            ref_a@.len() == n as int,
+            ref_b@.len() == n as int,
+            // State tracking
+            escaped_iter <= max_iters,
+            is_glitched == 0u32 || is_glitched == 1u32,
+            // Sign values
+            delta_re_sign == 0u32 || delta_re_sign == 1u32,
+            delta_im_sign == 0u32 || delta_im_sign == 1u32,
+            dc_re_sign == 0u32 || dc_re_sign == 1u32,
+            dc_im_sign == 0u32 || dc_im_sign == 1u32,
+    {
         // ── Step 1: Thread 0 selects reference and computes orbit ──
         if local_id == 0u32 {
             if round == 0u32 {
@@ -209,23 +276,45 @@ fn mandelbrot_perturbation(
                 let ref_y_c = if ref_y >= height { height - 1u32 } else { ref_y };
                 let ref_tid_init = ref_y_c * width + ref_x_c;
                 let ref_c_off = ref_tid_init * c_stride_px;
-                for i in 0u32..n { vset(wg_mem, ref_c_base + i, vget(c_data, ref_c_off + i)); }
+                for i in 0u32..n
+                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                        ref_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
+                        c_stride_px == 2 * n + 2,
+                { vset(wg_mem, ref_c_base + i, vget(c_data, ref_c_off + i)); }
                 vset(wg_mem, ref_c_base + n, vget(c_data, ref_c_off + n));
-                for i in 0u32..n { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, ref_c_off + n + 1u32 + i)); }
+                for i in 0u32..n
+                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                        ref_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
+                        c_stride_px == 2 * n + 2,
+                { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, ref_c_off + n + 1u32 + i)); }
                 vset(wg_mem, ref_c_base + 2u32 * n + 1u32, vget(c_data, ref_c_off + 2u32 * n + 1u32));
             }
             // else: ref_c was already updated by glitch analysis below
 
             // Compute reference orbit Z_0..Z_{max_iters}
             let z0_off = orbit_base;
-            for i in 0u32..n { vset(wg_mem, z0_off + i, 0u32); }
+            for i in 0u32..n
+                invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, z0_off == 0u32,
+            { vset(wg_mem, z0_off + i, 0u32); }
             vset(wg_mem, z0_off + n, 0u32);
-            for i in 0u32..n { vset(wg_mem, z0_off + n + 1u32 + i, 0u32); }
+            for i in 0u32..n
+                invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, z0_off == 0u32,
+            { vset(wg_mem, z0_off + n + 1u32 + i, 0u32); }
             vset(wg_mem, z0_off + 2u32 * n + 1u32, 0u32);
 
             let mut ref_escaped = max_iters;
 
-            for iter in 0u32..max_iters {
+            for iter in 0u32..max_iters
+                invariant
+                    wg_mem@.len() >= 8192, n >= 1, n <= 8,
+                    max_iters > 0, max_iters <= 0x1000,
+                    z_stride == 2 * n + 2,
+                    (max_iters as int + 2) * (2 * n as int + 2) + 10 * n as int + 259 <= 8192,
+                    ref_a@.len() == n as int, ref_b@.len() == n as int,
+                    frac_limbs <= n, frac_limbs + n <= 2 * n,
+                    ref_c_base < 8192u32,
+                    ref_escaped <= max_iters,
+            {
                 let zk = orbit_base + iter * z_stride;
                 let zk_re = zk;
                 let zk_re_sign = zk + n;
@@ -326,7 +415,11 @@ fn mandelbrot_perturbation(
                 &mut dc_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
 
             // δ_0 = 0
-            for i in 0u32..n { delta_re.set(i as usize, 0u32); delta_im.set(i as usize, 0u32); }
+            for i in 0u32..n
+                invariant delta_re@.len() == n as int, delta_im@.len() == n as int, n >= 1, n <= 8,
+                    forall |j: int| 0 <= j < i ==> delta_re@[j] == 0u32,
+                    forall |j: int| 0 <= j < i ==> delta_im@[j] == 0u32,
+            { delta_re.set(i as usize, 0u32); delta_im.set(i as usize, 0u32); }
             delta_re_sign = 0u32;
             delta_im_sign = 0u32;
             is_glitched = 0u32;
@@ -335,13 +428,16 @@ fn mandelbrot_perturbation(
 
             for iter in 0u32..max_iters
                 invariant
+                    // Kernel params (carried from outer loop)
+                    n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+                    frac_limbs <= n, frac_limbs + n <= 2 * n,
+                    max_iters > 0, max_iters <= 0x1000,
                     // KEY INVARIANT: at every break, either escaped or glitched.
-                    // This catches the bug where break on ref escape left
-                    // is_glitched==0 and escaped_iter==max_iters (invalid state).
                     escaped_iter <= max_iters,
                     is_glitched == 0u32 || is_glitched == 1u32,
                     // Buffer sizes preserved
                     wg_mem@.len() == old(wg_mem)@.len(),
+                    old(wg_mem)@.len() >= 8192,
                     // Local array sizes preserved
                     delta_re@.len() == n as int,
                     delta_im@.len() == n as int,
@@ -357,6 +453,14 @@ fn mandelbrot_perturbation(
                     ref_b@.len() == n as int,
                     ls1@.len() == n as int,
                     ls2@.len() == n as int,
+                    // Sign tracking
+                    delta_re_sign == 0u32 || delta_re_sign == 1u32,
+                    delta_im_sign == 0u32 || delta_im_sign == 1u32,
+                    dc_re_sign == 0u32 || dc_re_sign == 1u32,
+                    dc_im_sign == 0u32 || dc_im_sign == 1u32,
+                    // Valid limbs (needed by signed_mul_to/signed_add_to preconditions)
+                    valid_limbs(delta_re@), valid_limbs(delta_im@),
+                    valid_limbs(dc_re@), valid_limbs(dc_im@),
             {
                 // If reference orbit escaped, Z values after this are garbage.
                 // Mark as glitched so refinement loop picks a new reference.
@@ -449,7 +553,7 @@ fn mandelbrot_perturbation(
         // Each thread votes: glitched pixels report their glitch iteration
         // (higher = iterated longer = better reference candidate)
         if is_glitched == 1u32 && escaped_iter == max_iters {
-            vset(wg_mem, vote_base + local_id, glitch_iter + 1u32); // +1 so 0 means "not glitched"
+            vset(wg_mem, vote_base + local_id, glitch_iter + 1u32);
         } else {
             vset(wg_mem, vote_base + local_id, 0u32);
         }
@@ -461,7 +565,12 @@ fn mandelbrot_perturbation(
             let mut best_vote = 0u32;
             let mut best_idx = 0u32;
             let mut g_count = 0u32;
-            for i in 0u32..256u32 {
+            for i in 0u32..256u32
+                invariant
+                    wg_mem@.len() >= 8192,
+                    vote_base + 256u32 < 8192u32,
+                    g_count <= i,
+            {
                 if vget(wg_mem, vote_base + i) > best_vote {
                     best_vote = vget(wg_mem, vote_base + i);
                     best_idx = i;
@@ -479,9 +588,17 @@ fn mandelbrot_perturbation(
                 let best_gy = gid_y - lid_y + (best_idx / 16u32);
                 let best_tid = best_gy * width + best_gx;
                 let best_c_off = best_tid * c_stride_px;
-                for i in 0u32..n { vset(wg_mem, ref_c_base + i, vget(c_data, best_c_off + i)); }
+                for i in 0u32..n
+                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                        best_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
+                        c_stride_px == 2 * n + 2,
+                { vset(wg_mem, ref_c_base + i, vget(c_data, best_c_off + i)); }
                 vset(wg_mem, ref_c_base + n, vget(c_data, best_c_off + n));
-                for i in 0u32..n { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, best_c_off + n + 1u32 + i)); }
+                for i in 0u32..n
+                    invariant wg_mem@.len() >= 8192, ref_c_base < 8192u32, n >= 1, n <= 8,
+                        best_c_off as int + 2 * n as int + 2 <= c_data@.len() as int,
+                        c_stride_px == 2 * n + 2,
+                { vset(wg_mem, ref_c_base + n + 1u32 + i, vget(c_data, best_c_off + n + 1u32 + i)); }
                 vset(wg_mem, ref_c_base + 2u32 * n + 1u32, vget(c_data, best_c_off + 2u32 * n + 1u32));
             }
         }
