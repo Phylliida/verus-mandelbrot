@@ -45,15 +45,59 @@ impl<T: LimbOps> FpComplex<T> {
     }
 }
 
+/// Helper: limb_power(n) > 0 for all n.
+proof fn lemma_limb_power_positive(n: nat)
+    ensures limb_power(n) > 0
+    decreases n
+{
+    if n > 0 {
+        lemma_limb_power_positive((n - 1) as nat);
+        assert(LIMB_BASE() > 0);
+        assert(limb_power(n) == LIMB_BASE() * limb_power((n - 1) as nat));
+        assert(limb_power(n) > 0) by(nonlinear_arith)
+            requires LIMB_BASE() > 0, limb_power((n - 1) as nat) > 0,
+                     limb_power(n) == LIMB_BASE() * limb_power((n - 1) as nat);
+    }
+}
+
+/// Helper: for non-negative x < m with m > 0, x % m == x.
+proof fn lemma_mod_noop(x: int, m: int)
+    requires x >= 0, x < m, m > 0,
+    ensures x % m == x,
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(x, m);
+    assert(x % m == x) by(nonlinear_arith)
+        requires x == m * (x / m) + x % m, x >= 0, x < m, x % m >= 0, m > 0;
+}
+
 /// Complex squaring: z^2 = (re^2 - im^2, 2*re*im).
 /// Uses 3 multiplies: re^2, im^2, (re+im)^2.
 ///
-/// With bounded inputs, the output is within (1, 2) ULPs of the exact spec
-/// (see bridge_complex_square_error for the truncation error theorem).
+/// With bounded inputs, the output is within (1, 2) ULPs of the exact spec.
+/// The spec-connection postcondition is conditional: it holds when inputs are
+/// small enough that truncated products don't wrap mod P.
 pub fn complex_square<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
     requires z.wf(),
         z.re.n_exec > 0, z.re.n_exec <= 0x1FFF_FFFF, z.re.frac_exec % 32 == 0,
     ensures out.wf(), out.same_format(z),
+        // Spec connection: conditional on bounded inputs
+        ({
+            let S = limb_power((z.re.frac_exec / 32) as nat);
+            let P = limb_power(z.re.n_spec());
+            let u_re = z.re.unsigned_val();
+            let u_im = z.im.unsigned_val();
+            let bounded = u_re * u_re / S < P
+                && u_im * u_im / S < P
+                && u_re + u_im < P
+                && (u_re + u_im) * (u_re + u_im) / S < P;
+            let spec = spec_complex_square(z.to_spec());
+            bounded ==> (
+                out.to_spec().re >= spec.re / S
+                && out.to_spec().re <= spec.re / S + 1
+                && out.to_spec().im >= spec.im / S
+                && out.to_spec().im <= spec.im / S + 2
+            )
+        }),
 {
     let re2 = z.re.signed_mul(&z.re);
     let im2 = z.im.signed_mul(&z.im);
@@ -64,12 +108,162 @@ pub fn complex_square<T: LimbOps>(z: &FpComplex<T>) -> (out: FpComplex<T>)
     let new_im = t.signed_sub(&im2);
 
     proof {
-        // re^2 sign is 0 (positive): re * re → same sign → sign = 0
+        let S = limb_power((z.re.frac_exec / 32) as nat);
+        let P = limb_power(z.re.n_spec());
+        let frac = (z.re.frac_exec / 32) as nat;
+        let n = z.re.n_spec();
+        let u_re = z.re.unsigned_val();
+        let u_im = z.im.unsigned_val();
+        let sv_re = z.re.signed_val();
+        let sv_im = z.im.signed_val();
+
+        // Establish base facts
+        lemma_limb_power_positive(frac);
+        lemma_limb_power_positive(n);
+        assert(S > 0);
+        assert(P > 0);
+
+        // Sign of squared products is 0 (positive)
         assert(re2.sign.sem() == 0);
-        // im^2 sign is 0 (positive): im * im → same sign → sign = 0
         assert(im2.sign.sem() == 0);
-        // sum^2 sign is 0 (positive): (re+im) * (re+im) → same sign → sign = 0
         assert(sum2.sign.sem() == 0);
+
+        // unsigned_val >= 0 from wf_spec + valid_limbs
+        verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(z.re.limbs@);
+        verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_bounded(z.im.limbs@);
+        assert(u_re >= 0);
+        assert(u_im >= 0);
+        assert(u_re * u_re >= 0) by(nonlinear_arith) requires u_re >= 0;
+        assert(u_im * u_im >= 0) by(nonlinear_arith) requires u_im >= 0;
+
+        let bounded = u_re * u_re / S < P
+            && u_im * u_im / S < P
+            && u_re + u_im < P
+            && (u_re + u_im) * (u_re + u_im) / S < P;
+
+        if bounded {
+            // sign 0 → signed_val == unsigned_val
+            assert(re2.signed_val() == re2.unsigned_val());
+            assert(im2.signed_val() == im2.unsigned_val());
+            assert(sum2.signed_val() == sum2.unsigned_val());
+
+            // signed_mul gives truncated_product_spec
+            assert(re2.unsigned_val()
+                == GenericFixedPoint::<T>::truncated_product_spec(u_re, u_re, frac, n));
+            assert(im2.unsigned_val()
+                == GenericFixedPoint::<T>::truncated_product_spec(u_im, u_im, frac, n));
+
+            // Bounded → mod P is no-op: u_re²/S < P → (u_re²/S) % P == u_re²/S
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(u_re * u_re, S);
+            let re2_val = u_re * u_re / S;
+            assert(re2_val >= 0) by(nonlinear_arith)
+                requires u_re * u_re >= 0,
+                         u_re * u_re == S * re2_val + (u_re * u_re) % S,
+                         (u_re * u_re) % S >= 0, S > 0;
+            lemma_mod_noop(re2_val, P);
+
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(u_im * u_im, S);
+            let im2_val = u_im * u_im / S;
+            assert(im2_val >= 0) by(nonlinear_arith)
+                requires u_im * u_im >= 0,
+                         u_im * u_im == S * im2_val + (u_im * u_im) % S,
+                         (u_im * u_im) % S >= 0, S > 0;
+            lemma_mod_noop(im2_val, P);
+
+            // re2.sv = u_re²/S, im2.sv = u_im²/S
+            assert(re2.signed_val() == u_re * u_re / S);
+            assert(im2.signed_val() == u_im * u_im / S);
+
+            // Connect unsigned_val² to signed_val² (sv² == uv²)
+            verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(&z.re);
+            verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(&z.im);
+            assert(re2.signed_val() == sv_re * sv_re / S);
+            assert(im2.signed_val() == sv_im * sv_im / S);
+
+            // signed_sub(re2, im2) is exact (both ≥ 0, < P)
+            assert(re2.signed_val() >= 0 && re2.signed_val() < P);
+            assert(im2.signed_val() >= 0 && im2.signed_val() < P);
+
+            // Apply theorem for real part: u_re²/S - u_im²/S ∈ [(re²-im²)/S, (re²-im²)/S+1]
+            theorem_complex_square_error(u_re as int, u_im as int, S as int);
+
+            // Handle imaginary part
+            // signed_add(re, im) is exact: |sv_re + sv_im| ≤ u_re + u_im < P
+            assert(sv_re <= u_re && sv_re >= -(u_re as int));
+            assert(sv_im <= u_im && sv_im >= -(u_im as int));
+
+            verus_fixed_point::runtime_fixed_point::lemma_signed_add_exact(
+                &z.re, &z.im, &re_plus_im);
+            assert(re_plus_im.signed_val() == sv_re + sv_im);
+
+            // sum2: truncated product, sign 0
+            assert(sum2.unsigned_val()
+                == GenericFixedPoint::<T>::truncated_product_spec(
+                    re_plus_im.unsigned_val(), re_plus_im.unsigned_val(), frac, n));
+            verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(&re_plus_im);
+            // re_plus_im.uval² == (sv_re + sv_im)²
+            assert(re_plus_im.unsigned_val() * re_plus_im.unsigned_val()
+                == (sv_re + sv_im) * (sv_re + sv_im));
+
+            // (sv_re+sv_im)² ≤ (u_re+u_im)²
+            assert((sv_re + sv_im) * (sv_re + sv_im)
+                <= (u_re + u_im) * (u_re + u_im)) by(nonlinear_arith)
+                requires sv_re <= u_re, sv_re >= -(u_re as int),
+                         sv_im <= u_im, sv_im >= -(u_im as int),
+                         u_re >= 0, u_im >= 0;
+
+            // (sv_re+sv_im)²/S < P → mod is no-op for sum2
+            assert((sv_re + sv_im) * (sv_re + sv_im) >= 0) by(nonlinear_arith);
+            assert((sv_re + sv_im) * (sv_re + sv_im) / S
+                <= (u_re + u_im) * (u_re + u_im) / S) by(nonlinear_arith)
+                requires
+                    (sv_re + sv_im) * (sv_re + sv_im) <= (u_re + u_im) * (u_re + u_im),
+                    (sv_re + sv_im) * (sv_re + sv_im) >= 0,
+                    S > 0;
+            assert((sv_re + sv_im) * (sv_re + sv_im) / S < P);
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(
+                (sv_re + sv_im) * (sv_re + sv_im), S);
+            let sum2_val = (sv_re + sv_im) * (sv_re + sv_im) / S;
+            assert(sum2_val >= 0) by(nonlinear_arith)
+                requires (sv_re + sv_im) * (sv_re + sv_im) >= 0,
+                         (sv_re + sv_im) * (sv_re + sv_im) == S * sum2_val
+                             + ((sv_re + sv_im) * (sv_re + sv_im)) % S,
+                         ((sv_re + sv_im) * (sv_re + sv_im)) % S >= 0, S > 0;
+            lemma_mod_noop(sum2_val, P);
+            assert(sum2.signed_val() == (sv_re + sv_im) * (sv_re + sv_im) / S);
+
+            // Subtraction chain for imaginary part is exact
+            assert(sum2.signed_val() >= 0 && sum2.signed_val() < P);
+
+            // re2.sv + im2.sv < P (needed for |t.sv - im2.sv| < P)
+            assert(re2.signed_val() + im2.signed_val() < P) by {
+                // floor(a/S) + floor(b/S) ≤ floor((a+b)/S) for a,b ≥ 0
+                vstd::arithmetic::div_mod::lemma_fundamental_div_mod(
+                    u_re * u_re + u_im * u_im, S);
+                assert(u_re * u_re / S + u_im * u_im / S
+                    <= (u_re * u_re + u_im * u_im) / S) by(nonlinear_arith)
+                    requires
+                        u_re * u_re == S * (u_re * u_re / S) + (u_re * u_re) % S,
+                        u_im * u_im == S * (u_im * u_im / S) + (u_im * u_im) % S,
+                        u_re * u_re + u_im * u_im
+                            == S * ((u_re * u_re + u_im * u_im) / S)
+                               + (u_re * u_re + u_im * u_im) % S,
+                        (u_re * u_re) % S >= 0, (u_im * u_im) % S >= 0,
+                        (u_re * u_re + u_im * u_im) % S >= 0,
+                        S > 0;
+                assert(u_re * u_re + u_im * u_im <= (u_re + u_im) * (u_re + u_im))
+                    by(nonlinear_arith) requires u_re >= 0, u_im >= 0;
+                assert((u_re * u_re + u_im * u_im) / S
+                    <= (u_re + u_im) * (u_re + u_im) / S) by(nonlinear_arith)
+                    requires
+                        u_re * u_re + u_im * u_im <= (u_re + u_im) * (u_re + u_im),
+                        u_re * u_re + u_im * u_im >= 0,
+                        S > 0;
+            };
+
+            // Apply Karatsuba im error for signed values
+            lemma_karatsuba_im_error_signed(sv_re, sv_im, S as int);
+        }
     }
 
     FpComplex { re: new_re, im: new_im }
@@ -877,6 +1071,100 @@ proof fn corollary_200_iter_error()
         200int * 4 == 800,   // im error bound
 {
     // Arithmetic facts
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LEMMA: Karatsuba imaginary error for signed values
+// ═══════════════════════════════════════════════════════════════
+
+/// The Karatsuba identity (a+b)² - a² - b² = 2ab holds for ALL integers.
+/// The truncation error bound floor((a+b)²/S) - floor(a²/S) - floor(b²/S)
+/// is within [floor(2ab/S), floor(2ab/S) + 2], regardless of sign.
+///
+/// This generalizes the imaginary part of theorem_complex_square_error
+/// to signed inputs, which is needed because the exec computes
+/// (re.sv + im.sv)² - re.sv² - im.sv² where sv can be negative.
+proof fn lemma_karatsuba_im_error_signed(a: int, b: int, S: int)
+    requires S > 0,
+    ensures ({
+        let a2 = a * a / S;
+        let b2 = b * b / S;
+        let sum2 = (a + b) * (a + b) / S;
+        let new_im = sum2 - a2 - b2;
+        let exact_im = (2 * a * b) / S;
+        &&& new_im >= exact_im
+        &&& new_im <= exact_im + 2
+    })
+{
+    // All squares are non-negative, so Euclidean division bounds hold.
+    // We use lemma_fundamental_div_mod directly on the non-negative squares.
+    assert(a * a >= 0) by(nonlinear_arith);
+    assert(b * b >= 0) by(nonlinear_arith);
+    assert((a + b) * (a + b) >= 0) by(nonlinear_arith);
+
+    let a2 = a * a / S;
+    let b2 = b * b / S;
+    let sum2 = (a + b) * (a + b) / S;
+    let new_im = sum2 - a2 - b2;
+    let exact_im = (2 * a * b) / S;
+
+    // Floor division bounds for non-negative numerators
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a * a, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(b * b, S);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod((a + b) * (a + b), S);
+
+    // Establish: X * S <= X_sq < (X+1) * S for each squared term
+    assert(a2 * S <= a * a) by(nonlinear_arith)
+        requires a * a == S * a2 + (a * a) % S, (a * a) % S >= 0, S > 0;
+    assert(a * a < (a2 + 1) * S) by(nonlinear_arith)
+        requires a * a == S * a2 + (a * a) % S, (a * a) % S < S, S > 0;
+    assert(b2 * S <= b * b) by(nonlinear_arith)
+        requires b * b == S * b2 + (b * b) % S, (b * b) % S >= 0, S > 0;
+    assert(b * b < (b2 + 1) * S) by(nonlinear_arith)
+        requires b * b == S * b2 + (b * b) % S, (b * b) % S < S, S > 0;
+    assert(sum2 * S <= (a + b) * (a + b)) by(nonlinear_arith)
+        requires (a + b) * (a + b) == S * sum2 + ((a + b) * (a + b)) % S,
+                 ((a + b) * (a + b)) % S >= 0, S > 0;
+    assert((a + b) * (a + b) < (sum2 + 1) * S) by(nonlinear_arith)
+        requires (a + b) * (a + b) == S * sum2 + ((a + b) * (a + b)) % S,
+                 ((a + b) * (a + b)) % S < S, S > 0;
+
+    // Algebraic identity: (a+b)² = a² + 2ab + b²
+    assert((a + b) * (a + b) == a * a + 2 * a * b + b * b) by(nonlinear_arith);
+
+    // Lower bound: new_im >= exact_im
+    assert(new_im >= exact_im) by {
+        assert(2 * a * b < (new_im + 1) * S) by(nonlinear_arith)
+            requires
+                (a + b) * (a + b) == a * a + 2 * a * b + b * b,
+                (a + b) * (a + b) < (sum2 + 1) * S,
+                a * a >= a2 * S,
+                b * b >= b2 * S,
+                new_im == sum2 - a2 - b2, S > 0;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(2 * a * b, S);
+        assert(exact_im <= new_im) by(nonlinear_arith)
+            requires
+                2 * a * b < (new_im + 1) * S,
+                2 * a * b == S * exact_im + (2 * a * b) % S,
+                (2 * a * b) % S >= 0, S > 0;
+    };
+
+    // Upper bound: new_im <= exact_im + 2
+    assert(new_im <= exact_im + 2) by {
+        assert(2 * a * b >= (new_im - 2) * S) by(nonlinear_arith)
+            requires
+                (a + b) * (a + b) == a * a + 2 * a * b + b * b,
+                (a + b) * (a + b) >= sum2 * S,
+                a * a < (a2 + 1) * S,
+                b * b < (b2 + 1) * S,
+                new_im == sum2 - a2 - b2, S > 0;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(2 * a * b, S);
+        assert(exact_im >= new_im - 2) by(nonlinear_arith)
+            requires
+                2 * a * b >= (new_im - 2) * S,
+                2 * a * b == S * exact_im + (2 * a * b) % S,
+                (2 * a * b) % S < S, S > 0;
+    };
 }
 
 // ═══════════════════════════════════════════════════════════════
