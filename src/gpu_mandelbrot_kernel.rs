@@ -1004,6 +1004,94 @@ pub fn perturbation_step<T: LimbOps>(
     out
 }
 
+/// Extracted: derive magnitude bounds on mul/sq outputs from spec value bounds.
+/// Proves |two_z_delta.sv| ≤ mul_3sum+3 (re) / mul_3sum+4 (im)
+/// and |delta_sq.sv| ≤ sq_3sum+2 for all components.
+proof fn lemma_pert_step_magnitude_bounds<T: LimbOps>(
+    uz_re: int, uz_im: int, ud_re: int, ud_im: int,
+    S: int, P: int,
+    z_re: int, z_im: int, d_re: int, d_im: int,
+    mul_spec: SpecComplex, sq_spec: SpecComplex,
+    mul_3sum: int, sq_3sum: int,
+    mul_out_re: int, mul_out_im: int,
+    sq_out_re: int, sq_out_im: int,
+    delta_re_fp: &GenericFixedPoint<T>, delta_im_fp: &GenericFixedPoint<T>,
+)
+    requires
+        S > 0, P > 0,
+        uz_re >= 0, uz_im >= 0, ud_re >= 0, ud_im >= 0,
+        mul_3sum == 2 * uz_re * ud_re / S + 2 * uz_im * ud_im / S
+            + (2 * uz_re + 2 * uz_im) * (ud_re + ud_im) / S,
+        sq_3sum == ud_re * ud_re / S + ud_im * ud_im / S
+            + (ud_re + ud_im) * (ud_re + ud_im) / S,
+        mul_3sum < P / 4, sq_3sum < P / 4,
+        // Spec values match
+        mul_spec == spec_complex_mul(
+            SpecComplex { re: 2 * z_re, im: 2 * z_im },
+            SpecComplex { re: d_re, im: d_im }),
+        sq_spec == spec_complex_square(SpecComplex { re: d_re, im: d_im }),
+        // Signed/unsigned relationships
+        z_re >= -(uz_re as int), z_re <= uz_re,
+        z_im >= -(uz_im as int), z_im <= uz_im,
+        d_re >= -(ud_re as int), d_re <= ud_re,
+        d_im >= -(ud_im as int), d_im <= ud_im,
+        // Mul error bounds
+        mul_out_re >= mul_spec.re / S - 1, mul_out_re <= mul_spec.re / S + 2,
+        mul_out_im >= mul_spec.im / S - 2, mul_out_im <= mul_spec.im / S + 3,
+        // Sq error bounds
+        sq_out_re >= sq_spec.re / S, sq_out_re <= sq_spec.re / S + 1,
+        sq_out_im >= sq_spec.im / S, sq_out_im <= sq_spec.im / S + 2,
+        // For lemma_signed_val_squared
+        delta_re_fp.wf_spec(), delta_im_fp.wf_spec(),
+        delta_re_fp.signed_val() == d_re, delta_im_fp.signed_val() == d_im,
+        delta_re_fp.unsigned_val() == ud_re, delta_im_fp.unsigned_val() == ud_im,
+    ensures
+        mul_out_re <= mul_3sum + 3, mul_out_re >= -(mul_3sum + 3),
+        mul_out_im <= mul_3sum + 4, mul_out_im >= -(mul_3sum + 4),
+        sq_out_re <= sq_3sum + 2, sq_out_re >= -(sq_3sum + 2),
+        sq_out_im <= sq_3sum + 2, sq_out_im >= -(sq_3sum + 2),
+{
+    // Bound |mul_spec.re/S| and |sq_spec.re/S| via helper lemmas
+    lemma_spec_mul_abs_bound(
+        2 * z_re, 2 * z_im, 2 * uz_re, 2 * uz_im,
+        d_re, d_im, ud_re, ud_im, S);
+    verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(delta_re_fp);
+    verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(delta_im_fp);
+    lemma_spec_sq_abs_bound(d_re, d_im, ud_re, ud_im, S);
+
+    // mul_abs_re/S ≤ mul_3sum + 1
+    let mul_abs_re = 2 * uz_re * ud_re + 2 * uz_im * ud_im;
+    lemma_floor_diff_two(mul_abs_re, 2 * uz_re * ud_re, S);
+    assert(mul_abs_re / S <= mul_3sum + 1);
+
+    // sq_abs_re/S ≤ sq_3sum + 1
+    let sq_abs_re = ud_re * ud_re + ud_im * ud_im;
+    lemma_floor_diff_two(sq_abs_re, ud_re * ud_re, S);
+    assert(sq_abs_re / S <= sq_3sum + 1);
+
+    // mul_abs_im/S ≤ mul_3sum
+    let mul_abs_im = 2 * uz_re * ud_im + 2 * uz_im * ud_re;
+    assert(2 * uz_re * ud_re >= 0) by(nonlinear_arith) requires uz_re >= 0, ud_re >= 0;
+    assert(2 * uz_im * ud_im >= 0) by(nonlinear_arith) requires uz_im >= 0, ud_im >= 0;
+    assert((2 * uz_re + 2 * uz_im) * (ud_re + ud_im)
+        == 2 * uz_re * ud_re + 2 * uz_re * ud_im + 2 * uz_im * ud_re + 2 * uz_im * ud_im)
+        by(nonlinear_arith);
+    assert(mul_abs_im / S <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im) / S)
+        by(nonlinear_arith) requires mul_abs_im >= 0,
+                 mul_abs_im <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im), S > 0;
+
+    // sq_abs_im/S ≤ sq_3sum
+    let sq_abs_im = 2 * ud_re * ud_im;
+    assert(ud_re * ud_re >= 0) by(nonlinear_arith) requires ud_re >= 0;
+    assert(ud_im * ud_im >= 0) by(nonlinear_arith) requires ud_im >= 0;
+    assert((ud_re + ud_im) * (ud_re + ud_im)
+        == ud_re * ud_re + 2 * ud_re * ud_im + ud_im * ud_im)
+        by(nonlinear_arith);
+    assert(sq_abs_im / S <= (ud_re + ud_im) * (ud_re + ud_im) / S)
+        by(nonlinear_arith) requires sq_abs_im >= 0,
+                 sq_abs_im <= (ud_re + ud_im) * (ud_re + ud_im), S > 0;
+}
+
 /// Extracted proof for perturbation_step spec connection.
 proof fn lemma_perturbation_step_spec<T: LimbOps>(
     z_ref: &FpComplex<T>, delta: &FpComplex<T>, delta_c: &FpComplex<T>,
@@ -1167,82 +1255,34 @@ proof fn lemma_perturbation_step_spec<T: LimbOps>(
     let sq_3sum = ud_re * ud_re / S + ud_im * ud_im / S
         + (ud_re + ud_im) * (ud_re + ud_im) / S;
 
-    // Step 3: Bound spec values via extracted helpers
-    lemma_spec_mul_abs_bound(
-        2 * z.re, 2 * z.im, 2 * uz_re, 2 * uz_im,
-        d.re, d.im, ud_re, ud_im, S);
-    // → mul_spec.re/S ∈ [-(2*uz_re*ud_re+2*uz_im*ud_im)/S - 1, (same)/S]
-    // → mul_spec.im/S ∈ [-(2*uz_re*ud_im+2*uz_im*ud_re)/S - 1, (same)/S]
-
-    verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(&delta.re);
-    verus_fixed_point::runtime_fixed_point::lemma_signed_val_squared(&delta.im);
-    lemma_spec_sq_abs_bound(d.re, d.im, ud_re, ud_im, S);
-    // → sq_spec.re/S ∈ [-(ud_re²+ud_im²)/S - 1, (same)/S]
-    // → sq_spec.im/S ∈ [-(2*ud_re*ud_im)/S - 1, (same)/S]
-
-    // The abs product bounds are ≤ the three-product-sums (they're subsets)
-    // mul: (2*uz_re*ud_re+2*uz_im*ud_im)/S ≤ mul_3sum (first two terms of sum)
-    // sq: (ud_re²+ud_im²)/S ≤ sq_3sum (first two terms)
-    // mul_im: (2*uz_re*ud_im+2*uz_im*ud_re)/S ≤ (2*uz_re+2*uz_im)*(ud_re+ud_im)/S ≤ mul_3sum
-    // sq_im: (2*ud_re*ud_im)/S ≤ (ud_re+ud_im)²/S ≤ sq_3sum
-
-    // Step 4: Derive explicit magnitude bounds on intermediates, then prove adds exact.
-    assert(mul_3sum < P / 4 && sq_3sum < P / 4);
-    let mul_abs_re = 2 * uz_re * ud_re + 2 * uz_im * ud_im;
-    let sq_abs_re = ud_re * ud_re + ud_im * ud_im;
-    // mul_abs_re/S ≤ mul_3sum + 1 (from (a+b)/S ≤ a/S + b/S + 1)
-    lemma_floor_diff_two(mul_abs_re, 2 * uz_re * ud_re, S);
-    // → mul_abs_re/S - 2*uz_re*ud_re/S ≤ 2*uz_im*ud_im/S + 1
-    // → mul_abs_re/S ≤ 2*uz_re*ud_re/S + 2*uz_im*ud_im/S + 1 ≤ mul_3sum + 1
-    assert(mul_abs_re / S <= mul_3sum + 1);
-    // sq_abs_re/S ≤ sq_3sum + 1 (same reasoning)
-    lemma_floor_diff_two(sq_abs_re, ud_re * ud_re, S);
-    assert(sq_abs_re / S <= sq_3sum + 1);
-
-    // From lemma_spec_mul_abs_bound: mul_spec.re/S ∈ [-mul_abs_re/S-1, mul_abs_re/S]
-    // From mul error postcondition: two_z_delta.re.sv ∈ [mul_spec.re/S-1, mul_spec.re/S+2]
-    // Chain: two_z_delta.re.sv ≤ mul_abs_re/S + 2 ≤ mul_3sum + 3
-    //        two_z_delta.re.sv ≥ -(mul_abs_re/S) - 2 ≥ -(mul_3sum+1) - 2 = -(mul_3sum+3)
-    assert(two_z_delta.to_spec().re <= mul_3sum + 3 as int);
-    assert(two_z_delta.to_spec().re >= -(mul_3sum + 3) as int);
-    // delta_sq.re.sv ∈ [sq_spec.re/S, sq_spec.re/S+1]
-    // sq_spec.re/S ∈ [-sq_abs_re/S-1, sq_abs_re/S]
-    // Chain: |delta_sq.re.sv| ≤ sq_abs_re/S + 2 ≤ sq_3sum + 3
-    assert(delta_sq.to_spec().re <= sq_3sum + 2 as int);
-    assert(delta_sq.to_spec().re >= -(sq_3sum + 2) as int);
-
-    // im: use (a*d+b*c)/S ≤ (a*d+b*c+a*c+b*d)/S = (a+b)*(c+d)/S ≤ mul_3sum
-    let mul_abs_im = 2 * uz_re * ud_im + 2 * uz_im * ud_re;
-    // (2a+2b)(c+d) = 2ac+2ad+2bc+2bd ≥ 2ad+2bc (since 2ac+2bd ≥ 0)
-    assert(2 * uz_re * ud_re >= 0) by(nonlinear_arith) requires uz_re >= 0, ud_re >= 0;
-    assert(2 * uz_im * ud_im >= 0) by(nonlinear_arith) requires uz_im >= 0, ud_im >= 0;
-    assert((2 * uz_re + 2 * uz_im) * (ud_re + ud_im)
-        == 2 * uz_re * ud_re + 2 * uz_re * ud_im + 2 * uz_im * ud_re + 2 * uz_im * ud_im)
-        by(nonlinear_arith);
-    assert(mul_abs_im <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im));
-    assert(mul_abs_im / S <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im) / S)
-        by(nonlinear_arith) requires mul_abs_im >= 0,
-                 mul_abs_im <= (2 * uz_re + 2 * uz_im) * (ud_re + ud_im), S > 0;
-    assert(mul_abs_im / S <= mul_3sum);
-    assert(two_z_delta.to_spec().im <= mul_3sum + 4 as int);
-    assert(two_z_delta.to_spec().im >= -(mul_3sum + 4) as int);
-    // sq im: 2*ud_re*ud_im ≤ ud_re²+ud_im² (from AM-GM: 2ab ≤ a²+b²)
-    //       ≤ (ud_re+ud_im)² = ud_re²+2*ud_re*ud_im+ud_im² (even easier)
-    let sq_abs_im = 2 * ud_re * ud_im;
-    assert(ud_re * ud_re >= 0) by(nonlinear_arith) requires ud_re >= 0;
-    assert(ud_im * ud_im >= 0) by(nonlinear_arith) requires ud_im >= 0;
-    assert((ud_re + ud_im) * (ud_re + ud_im)
-        == ud_re * ud_re + 2 * ud_re * ud_im + ud_im * ud_im)
-        by(nonlinear_arith);
-    assert(sq_abs_im <= (ud_re + ud_im) * (ud_re + ud_im));
-    assert(sq_abs_im / S <= (ud_re + ud_im) * (ud_re + ud_im) / S)
-        by(nonlinear_arith) requires sq_abs_im >= 0,
-                 sq_abs_im <= (ud_re + ud_im) * (ud_re + ud_im), S > 0;
-    assert(sq_abs_im / S <= sq_3sum);
-    assert(delta_sq.to_spec().im <= sq_3sum + 2 as int);
-    assert(delta_sq.to_spec().im >= -(sq_3sum + 2) as int);
-
-    // Now adds are exact
+    // Steps 3-4 extracted to reduce Z3 context
+    lemma_pert_step_magnitude_bounds(
+        uz_re, uz_im, ud_re, ud_im, S, P,
+        z.re, z.im, d.re, d.im,
+        mul_spec, sq_spec, mul_3sum, sq_3sum,
+        two_z_delta.to_spec().re, two_z_delta.to_spec().im,
+        delta_sq.to_spec().re, delta_sq.to_spec().im,
+        &delta.re, &delta.im,
+    );
+    // Derive 4*mul_3sum < P from mul_3sum < P/4 (avoiding division in nonlinear_arith)
+    assert(mul_3sum >= 0 && sq_3sum >= 0);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(P, 4);
+    assert(4 * mul_3sum < P) by(nonlinear_arith)
+        requires mul_3sum < P / 4, P == 4 * (P / 4) + P % 4, P % 4 >= 0;
+    assert(4 * sq_3sum < P) by(nonlinear_arith)
+        requires sq_3sum < P / 4, P == 4 * (P / 4) + P % 4, P % 4 >= 0;
+    // P ≥ LIMB_BASE = 2^32 >> 24, so P ≥ 24
+    // 4*(mul+sq+6) = 4*mul + 4*sq + 24 < P + P + 24 = 2P+24 ≤ 4P → mul+sq+6 < P
+    // P = limb_power(n) ≥ limb_power(1) = LIMB_BASE = 2^32 > 24
+    assert(P > 24) by {
+        lemma_limb_power_positive((z_ref.re.n_spec() - 1) as nat);
+        reveal_with_fuel(limb_power, 2);
+        assert(P == LIMB_BASE() * limb_power((z_ref.re.n_spec() - 1) as nat));
+        assert(LIMB_BASE() > 24);
+    };
+    assert(mul_3sum + sq_3sum + 6 < P) by(nonlinear_arith)
+        requires 4 * mul_3sum < P, 4 * sq_3sum < P, P > 24;
+    // First add exact
     lemma_sum_in_range(
         two_z_delta.to_spec().re, delta_sq.to_spec().re,
         mul_3sum + 3, sq_3sum + 2, P);
