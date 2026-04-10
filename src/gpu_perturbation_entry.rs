@@ -806,6 +806,29 @@ fn mandelbrot_perturbation(
 
             let ref_escaped = vget(wg_mem, ref_escape_addr);
 
+            // ── Task #78: Ghost value tracking for kernel spec connection ──
+            // ATTEMPTED: tracking delta_re_int, delta_im_int across iterations as
+            // ghost ints with a loop invariant. RESULT: even with rlimit(200), the
+            // perturbation while loop's Z3 context exceeded its budget. The two
+            // new ghost invariants for the signed-magnitude values were the
+            // straw that broke the camel's back.
+            //
+            // CONCLUSION: Task #78 cannot be done in-place. The perturbation
+            // loop body (~30 buffer ops, ~150 lines) must first be extracted
+            // into a focused helper function with explicit requires/ensures.
+            // The helper would have its own clean Z3 context and could carry
+            // the ghost invariants without polluting the kernel function.
+            //
+            // PLAN (for follow-up sessions):
+            //   1. Extract the perturbation iteration body into
+            //      `perturbation_iteration_step` helper
+            //   2. Helper takes the buffers + ghost δ_spec as preconditions
+            //   3. Helper proves the post-state matches spec_pert_step
+            //   4. Kernel calls the helper, carries ghost δ_spec across iters
+            //      via a much simpler loop invariant
+            //
+            // Documented in exec-verification-roadmap.md.
+
             let mut iter = 0u32;
             while iter < max_iters
                 invariant
