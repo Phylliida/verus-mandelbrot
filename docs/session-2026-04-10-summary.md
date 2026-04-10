@@ -272,11 +272,6 @@ sibling functions get loaded), restoring `mul2`'s verification.
 near its rlimit ceiling, expect context pollution. Plan to put new helpers
 in a `_proofs.rs` companion module from the start.
 
-## What Remains
-
-The buffer-to-FpComplex bridge is now fully closed. The remaining work falls
-into different categories.
-
 ## Escape Branch Fully Verified (#72 & #73)
 
 With #68–#71 in place, we connected the strengthened buffer ops directly
@@ -333,34 +328,109 @@ The kernel's escape branch is now fully verified at the buffer-value level:
 4. The complete chain (#73) connects squared magnitudes to the final
    compared value
 
-The remaining gap is the connection from `vec_val(t1)` (the magnitude
-returned by `signed_add_to`) back to the original `(Z_re + δ_re)` value
-via the 3-way modular disjunction from #71. That's a follow-up that would
-require carrying a `signed_val_of` chain through the proof, but the
-foundation for it is now in place.
+The remaining gap — connecting `vec_val(t1)` back to the original
+`(Z_re + δ_re)` signed inputs — is closed by #74 below.
+
+## Kernel Robustness (#74, #75, #76)
+
+After the escape branch was verified, we added three follow-up proofs
+that extend the kernel's verification to fully connect the math, the
+truncation error budget, and the glitch detection logic.
+
+### 12. Magnitudes Connected to Signed Inputs (#74)
+
+Extends #73 with the chain through `signed_val_of` and the #71 disjunction.
+
+The chain (now exposed at the assertion level):
+- **#71** disjunction (explicit): `signed_full_re == signed_zre + signed_dre`
+  (or ±P offset on overflow)
+- `(-x)² == x²` (nonlinear_arith): `signed_full_re² == vec_val(t1)²`
+- **#70**: `vec_val(t3) == trunc_sq(vec_val(t1))`
+- **#68**: `vec_val(t5) + carry*P == vec_val(t3) + vec_val(t4)`
+
+End state: the kernel's escape decision is verified end-to-end at the
+buffer-value level — from the original `Z_re`, `δ_re`, `Z_im`, `δ_im`
+inputs through the squaring + summing all the way to the borrow that
+decides escape (combined with #72's polarity proof).
+
+Imports `signed_val_of` from `limb_ops_proofs` (gated on `verus_keep_ghost`).
+
+### 13. Reference Orbit Error Accumulation (#75)
+
+Adds the linearized N-step error bound for the reference orbit
+`Z_{n+1} = Z_n² + c`, characterizing the geometric error growth.
+
+New definitions in `gpu_mandelbrot_kernel.rs`:
+
+```rust
+// Recursive bound: bound(0) = 0, bound(k+1) = m * bound(k) + epsilon
+pub open spec fn ref_orbit_error_bound(n: nat, m: int, epsilon: int) -> int
+
+proof fn lemma_ref_orbit_error_bound_nonneg(...)
+proof fn lemma_ref_orbit_error_bound_monotone(...)
+
+// Connects any sequence satisfying the linear recurrence to the spec fn
+proof fn theorem_ref_orbit_n_steps_error(
+    bounds: Seq<int>, n: nat, m: int, epsilon: int,
+) ...
+
+// Concrete values for Mandelbrot (m=4 from R=2, ε=2 from complex_square)
+proof fn corollary_mandelbrot_ref_orbit_bound() ...
+```
+
+The closed-form is `bound(N) = epsilon * (m^N - 1) / (m - 1)`. For
+Mandelbrot (m=4, ε=2): the bound exceeds 1.0 already at N≈45 — beyond
+that, the kernel relies on glitch detection rather than asymptotic
+accuracy of the reference orbit.
+
+Together with `theorem_ref_orbit_step_error` (per-step bound), this
+documents the complete error budget for the reference orbit:
+- per-step: ≤ 2 ULPs (re), ≤ 2 ULPs (im) [from `complex_square`]
+- N-step: `ref_orbit_error_bound(N, 4, 2)`
+
+### 14. Glitch Detection Completeness (#76)
+
+Adds `lemma_glitch_completeness_one` proving the converse direction
+of the kernel's glitch check:
+
+```
+vec_val(δ) >= 4 * BASE^(n-1)  ⟹  δ[n-1] > 3
+```
+
+Combined with the existing forward direction (the if-statement sets
+`is_glitched` when the check fires), this gives bidirectional
+correctness:
+
+- forward: `δ[n-1] > 3` → `is_glitched = 1` (kernel structure)
+- completeness: `vec_val(δ) >= 4 * BASE^(n-1)` → check fires (this proof)
+
+So all "value too large" δ values are caught by the glitch detection.
+
+The proof splits `vec_val(δ)` at index `n-1` using `lemma_vec_val_split`,
+shows that the lower part is bounded by `BASE^(n-1)`, then uses
+`nonlinear_arith` to derive the bound on the top limb.
+
+Per the rlimit tips, the proof was extracted to a helper lemma to avoid
+pushing the perturbation while loop's Z3 context over its rlimit. The
+kernel call site only invokes the helper.
 
 ## What Remains
 
 ### Kernel-Level Spec Connection
 
-With #68–#73 all done, the kernel loop could now carry ghost state tracking
+With #68–#76 all done, the kernel loop could now carry ghost state tracking
 the exact `FpComplex` values that the buffer operations represent, and
 connect them to the FpComplex-level error theorems. This would let the
 per-step error accumulation live inside the kernel loop invariant rather
 than as a standalone mathematical theorem.
 
-A more modest step in this direction: extend the magnitude full equation
-(#73) to also relate `vec_val(t1)` and `vec_val(t2)` back to the signed
-inputs `(Z_re + δ_re)` and `(Z_im + δ_im)` via `signed_val_of` and the
-disjunction from #71.
-
 ### Other Future Work
 
 Possible additional verification targets:
-- **Reference orbit accuracy** — track its own truncation error accumulation
-- **Glitch detection completeness** — prove that all glitches are detected,
-  not just that detected ones are handled
 - **Series approximation kernel** — additional optimization not yet verified
+- **Tighten reference orbit error bound** — currently the bound assumes
+  worst-case amplification at every step. A bound that uses the actual
+  `|Z_k|` at each step would be much tighter.
 
 ### TODO: Workgroup Barrier Semantics
 
@@ -394,10 +464,11 @@ re-proving the kernel's barrier-dependent invariants).
 - `verus-fixed-point/src/fixed_point/mod.rs` — register the new module
 - `verus-mandelbrot/src/gpu_mandelbrot_kernel.rs` — spec connection proofs
   for `complex_square`, `complex_mul`, `perturbation_step`; end-to-end escape
-  theorems; helper lemmas; rlimit fix
+  theorems; helper lemmas; rlimit fix; reference orbit error accumulation (#75)
 - `verus-mandelbrot/src/gpu_perturbation_entry.rs` — kernel invariants
   (delta init, magnitude signs, orbit slots, pixel correspondence);
-  escape check polarity (#72) and magnitude full equation (#73) proofs
+  escape check polarity (#72); magnitude full equation (#73);
+  signed-input chain (#74); glitch detection completeness helper (#76)
 
 ## Verification Counts
 
@@ -405,9 +476,9 @@ re-proving the kernel's barrier-dependent invariants).
 |-----------------------------------------------|----------|--------|
 | `verus-fixed-point/src/fixed_point/limb_ops`  | 194      | 0      |
 | `verus-fixed-point/src/fixed_point/limb_ops_proofs` | 15  | 0      |
-| `verus-mandelbrot/src/gpu_mandelbrot_kernel`  | 151      | 0      |
-| `verus-mandelbrot/src/gpu_perturbation_entry` | 44       | 0      |
-| **Total (this session)**                      | **404**  | **0**  |
+| `verus-mandelbrot/src/gpu_mandelbrot_kernel`  | 158      | 0      |
+| `verus-mandelbrot/src/gpu_perturbation_entry` | 49       | 0      |
+| **Total (this session)**                      | **416**  | **0**  |
 
 Plus ~800 verified across other modules in `verus-fixed-point` (all unchanged
 and still passing).
@@ -421,3 +492,8 @@ and still passing).
 - `5519340` — Add session 2026-04-10 summary
 - `69ba144` — Prove escape check polarity (#72)
 - `ab6e026` — Prove magnitude full equation (#73)
+- `3aa7698` — Update session summary with #72 and #73
+- `3089bba` — Add workgroup barrier semantics TODO
+- `cfc2b6e` — Connect magnitudes back to signed inputs (#74)
+- `1135093` — Reference orbit error accumulation (#75)
+- `af27fbc` — Glitch detection completeness (#76)
