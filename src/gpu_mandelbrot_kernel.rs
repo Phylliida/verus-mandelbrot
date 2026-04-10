@@ -1960,6 +1960,106 @@ proof fn theorem_ref_orbit_step_error(z_re: int, z_im: int, scale: int)
     theorem_complex_square_error(z_re, z_im, scale);
 }
 
+// ───────────────────────────────────────────────────────────────
+// Reference orbit N-step error accumulation (#75)
+// ───────────────────────────────────────────────────────────────
+
+/// Recursive bound for the linearized error after N iterations of Z' = Z² + c.
+///
+/// At each step, the previous error is amplified by approximately 2|Z| (the
+/// derivative of squaring), then a new per-step truncation error ε is added:
+///
+///   bound(0)   = 0
+///   bound(k+1) = m * bound(k) + epsilon
+///
+/// where m = 2 * max|Z| (amplification factor) and epsilon = per-step truncation
+/// error bound (≤ 2 ULPs from theorem_ref_orbit_step_error).
+///
+/// Closed form: bound(N) = epsilon * (m^N - 1) / (m - 1)  for m > 1.
+/// For Mandelbrot with R=2 (escape radius), m=4 → bound(N) = epsilon * (4^N - 1)/3.
+///
+/// This grows exponentially in N, which is why deep zooms in Mandelbrot rely on
+/// glitch detection rather than asymptotic accuracy. The bound function gives
+/// an explicit threshold to compare against the glitch tolerance.
+pub open spec fn ref_orbit_error_bound(n: nat, m: int, epsilon: int) -> int
+    decreases n
+{
+    if n == 0 { 0int }
+    else { m * ref_orbit_error_bound((n - 1) as nat, m, epsilon) + epsilon }
+}
+
+/// The error bound is non-negative for non-negative parameters.
+proof fn lemma_ref_orbit_error_bound_nonneg(n: nat, m: int, epsilon: int)
+    requires m >= 1, epsilon >= 0,
+    ensures ref_orbit_error_bound(n, m, epsilon) >= 0,
+    decreases n,
+{
+    if n > 0 {
+        lemma_ref_orbit_error_bound_nonneg((n - 1) as nat, m, epsilon);
+        let prev = ref_orbit_error_bound((n - 1) as nat, m, epsilon);
+        assert(m * prev >= 0) by(nonlinear_arith) requires m >= 1, prev >= 0;
+    }
+}
+
+/// The error bound is monotone non-decreasing in N.
+proof fn lemma_ref_orbit_error_bound_monotone(n: nat, m: int, epsilon: int)
+    requires m >= 1, epsilon >= 0,
+    ensures ref_orbit_error_bound(n, m, epsilon)
+        <= ref_orbit_error_bound(n + 1, m, epsilon),
+{
+    lemma_ref_orbit_error_bound_nonneg(n, m, epsilon);
+    let bn = ref_orbit_error_bound(n, m, epsilon);
+    let bn1 = ref_orbit_error_bound(n + 1, m, epsilon);
+    assert(bn1 == m * bn + epsilon);
+    assert(m * bn >= bn) by(nonlinear_arith) requires m >= 1, bn >= 0;
+}
+
+/// THEOREM: any sequence of error bounds satisfying the linear recurrence
+///   bounds[0] == 0, bounds[k+1] == m * bounds[k] + epsilon
+/// equals ref_orbit_error_bound at every index. This connects the recursive
+/// spec to a concrete sequence (e.g., bounds tracked in a loop invariant).
+proof fn theorem_ref_orbit_n_steps_error(
+    bounds: Seq<int>, n: nat, m: int, epsilon: int,
+)
+    requires
+        bounds.len() >= n + 1,
+        m >= 1, epsilon >= 0,
+        bounds[0] == 0,
+        forall|k: int| 0 <= k < n as int
+            ==> #[trigger] bounds[k + 1] == m * bounds[k] + epsilon,
+    ensures
+        bounds[n as int] == ref_orbit_error_bound(n, m, epsilon),
+    decreases n,
+{
+    if n > 0 {
+        theorem_ref_orbit_n_steps_error(bounds, (n - 1) as nat, m, epsilon);
+        // bounds[n] == m * bounds[n-1] + epsilon == m * bound(n-1) + epsilon == bound(n)
+    }
+}
+
+/// COROLLARY: For the Mandelbrot kernel with escape radius R = 2, the
+/// amplification factor is m = 2*R = 4. Combined with the per-step truncation
+/// error of 2 ULPs (from theorem_ref_orbit_step_error), the N-step accumulated
+/// error is bounded by ref_orbit_error_bound(N, 4, 2).
+///
+/// For practical N values:
+///   N=10:  bound(10, 4, 2) ≈ 700,000 ULPs
+///   N=20:  bound(20, 4, 2) ≈ 7×10^11 ULPs
+///   N=50:  bound(50, 4, 2) ≈ 8×10^29 ULPs
+///
+/// At 96 fractional bits (S = 2^96 ≈ 8×10^28), the bound exceeds 1.0 already
+/// at N≈45. Beyond this, the perturbation kernel relies on glitch detection
+/// to catch divergence and re-render with a closer reference orbit.
+proof fn corollary_mandelbrot_ref_orbit_bound()
+    ensures
+        ref_orbit_error_bound(0, 4, 2) == 0,
+        ref_orbit_error_bound(1, 4, 2) == 2,
+        ref_orbit_error_bound(2, 4, 2) == 10,
+        ref_orbit_error_bound(3, 4, 2) == 42,
+{
+    reveal_with_fuel(ref_orbit_error_bound, 5);
+}
+
 /// Perturbation step per-component error (PROVED in perturbation_step postcondition).
 ///
 /// With signed Karatsuba and bounded inputs:
