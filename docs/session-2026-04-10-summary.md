@@ -277,13 +277,82 @@ in a `_proofs.rs` companion module from the start.
 The buffer-to-FpComplex bridge is now fully closed. The remaining work falls
 into different categories.
 
+## Escape Branch Fully Verified (#72 & #73)
+
+With #68–#71 in place, we connected the strengthened buffer ops directly
+to the kernel's escape check.
+
+### 10. Escape Check Polarity (#72)
+
+Added a proof block right after `sub_limbs_to(t5, threshold, t1, ...)`:
+
+```
+borrow == 0  ⟺  vec_val(t5) ≥ vec_val(threshold)
+```
+
+The proof follows immediately from `sub_limbs_to`'s strengthened
+postcondition (#69):
+- `t1 + threshold == t5 + borrow * P`
+- `0 ≤ vec_val(t1) < P` (from `valid_limbs`)
+- `borrow ∈ {0, 1}`
+
+Both directions of the polarity follow by case analysis on `borrow`.
+Before this proof, the kernel's escape branch (`if borrow == 0u32`) was
+an opaque check. Now it's a verified test that the magnitude is at
+least the threshold at the limb-value level.
+
+### 11. Magnitude Full Equation (#73)
+
+Added a proof block in the escape check chaining the strengthened buffer
+ops through the squaring + summing:
+
+```
+vec_val(t5) + mag_carry * P
+    == trunc_sq(vec_val(t1)) + trunc_sq(vec_val(t2))
+```
+
+where `trunc_sq(x) = (x*x / BASE^frac) % BASE^n`, and `t1`, `t2` are the
+magnitudes of `(Z_re + δ_re)` and `(Z_im + δ_im)` produced by `signed_add_to`.
+
+The proof chains:
+- **#70** (`signed_mul_to`): `vec_val(t3) == trunc_sq(vec_val(t1))`,
+  similarly for `t4`
+- **#68** (`add_limbs_to`): `vec_val(t5) + carry*P == vec_val(t3) + vec_val(t4)`
+
+To enable this, the previously-discarded `add_limbs_to` carry is now bound
+to a local variable `mag_carry`.
+
+### Combined Effect
+
+The kernel's escape branch is now fully verified at the buffer-value level:
+
+1. Squaring uses verified truncated multiplication (#70)
+2. Summing uses the verified add equation (#68)
+3. Threshold comparison uses the verified subtract equation (#69) + the
+   polarity proof (#72)
+4. The complete chain (#73) connects squared magnitudes to the final
+   compared value
+
+The remaining gap is the connection from `vec_val(t1)` (the magnitude
+returned by `signed_add_to`) back to the original `(Z_re + δ_re)` value
+via the 3-way modular disjunction from #71. That's a follow-up that would
+require carrying a `signed_val_of` chain through the proof, but the
+foundation for it is now in place.
+
+## What Remains
+
 ### Kernel-Level Spec Connection
 
-With #68–#71 all done, the kernel loop could now carry ghost state tracking
+With #68–#73 all done, the kernel loop could now carry ghost state tracking
 the exact `FpComplex` values that the buffer operations represent, and
 connect them to the FpComplex-level error theorems. This would let the
 per-step error accumulation live inside the kernel loop invariant rather
 than as a standalone mathematical theorem.
+
+A more modest step in this direction: extend the magnitude full equation
+(#73) to also relate `vec_val(t1)` and `vec_val(t2)` back to the signed
+inputs `(Z_re + δ_re)` and `(Z_im + δ_im)` via `signed_val_of` and the
+disjunction from #71.
 
 ### Other Future Work
 
@@ -293,10 +362,6 @@ Possible additional verification targets:
   not just that detected ones are handled
 - **Workgroup barrier semantics** — currently trusted as `external_body`
 - **Series approximation kernel** — additional optimization not yet verified
-- **Magnitude full equation** — `t5 == (Z_re+δ_re)² + (Z_im+δ_im)²`
-  (now possible with #70)
-- **Escape check polarity** — `borrow == 0 ↔ magnitude ≥ threshold`
-  (now possible with #71)
 
 ## Files Changed
 
@@ -311,7 +376,8 @@ Possible additional verification targets:
   for `complex_square`, `complex_mul`, `perturbation_step`; end-to-end escape
   theorems; helper lemmas; rlimit fix
 - `verus-mandelbrot/src/gpu_perturbation_entry.rs` — kernel invariants
-  (delta init, magnitude signs, orbit slots, pixel correspondence)
+  (delta init, magnitude signs, orbit slots, pixel correspondence);
+  escape check polarity (#72) and magnitude full equation (#73) proofs
 
 ## Verification Counts
 
@@ -320,8 +386,8 @@ Possible additional verification targets:
 | `verus-fixed-point/src/fixed_point/limb_ops`  | 194      | 0      |
 | `verus-fixed-point/src/fixed_point/limb_ops_proofs` | 15  | 0      |
 | `verus-mandelbrot/src/gpu_mandelbrot_kernel`  | 151      | 0      |
-| `verus-mandelbrot/src/gpu_perturbation_entry` | 43       | 0      |
-| **Total (this session)**                      | **403**  | **0**  |
+| `verus-mandelbrot/src/gpu_perturbation_entry` | 44       | 0      |
+| **Total (this session)**                      | **404**  | **0**  |
 
 Plus ~800 verified across other modules in `verus-fixed-point` (all unchanged
 and still passing).
@@ -332,3 +398,6 @@ and still passing).
 - `1b10dc9` — Strengthen mul_schoolbook_to with value equation postcondition
 - `043eae2` — Strengthen signed_mul_to with truncated product value equation (#70)
 - `a50c660` — Strengthen signed_add_to with 3-way modular sum equation (#71)
+- `5519340` — Add session 2026-04-10 summary
+- `69ba144` — Prove escape check polarity (#72)
+- `ab6e026` — Prove magnitude full equation (#73)
