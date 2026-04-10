@@ -890,7 +890,30 @@ fn mandelbrot_perturbation(
                     assert(fr2_s.sem() == 0);  // same-sign multiply → sign 0
                     assert(fi2_s.sem() == 0);
                 }
-                add_limbs_to(&t3, &t4, &mut t5, 0usize, n as usize);
+                let ghost full_re_mag = vec_val(t1@.subrange(0, n as int));
+                let ghost full_im_mag = vec_val(t2@.subrange(0, n as int));
+                let ghost trunc_sq_re = ((full_re_mag * full_re_mag) / limb_power(frac_limbs as nat)) % limb_power(n as nat);
+                let ghost trunc_sq_im = ((full_im_mag * full_im_mag) / limb_power(frac_limbs as nat)) % limb_power(n as nat);
+                proof {
+                    // From signed_mul_to (#70): t3, t4 hold the truncated squared magnitudes
+                    assert(vec_val(t3@.subrange(0, n as int)) == trunc_sq_re);
+                    assert(vec_val(t4@.subrange(0, n as int)) == trunc_sq_im);
+                }
+                let mag_carry = add_limbs_to(&t3, &t4, &mut t5, 0usize, n as usize);
+                proof {
+                    // PROVED: magnitude full equation.
+                    // add_limbs_to (#68): t5 + carry*P == t3 + t4
+                    // Combined with signed_mul_to (#70):
+                    //   vec_val(t5) + carry*P == trunc_sq(|Z+δ|_re) + trunc_sq(|Z+δ|_im)
+                    // where trunc_sq(x) = (x*x / BASE^frac) % BASE^n.
+                    let P = limb_power(n as nat);
+                    assert(vec_val(t5@.subrange(0, n as int)) + mag_carry.sem() * P
+                        == vec_val(t3@.subrange(0, n as int)) + vec_val(t4@.subrange(0, n as int)));
+                    assert(vec_val(t5@.subrange(0, n as int)) + mag_carry.sem() * P
+                        == trunc_sq_re + trunc_sq_im);
+                    // mag_carry is bounded
+                    assert(mag_carry.sem() == 0 || mag_carry.sem() == 1);
+                }
 
                 let thresh_off = 5u32;
                 let ghost t5_val_pre_borrow = vec_val(t5@.subrange(0, n as int));
