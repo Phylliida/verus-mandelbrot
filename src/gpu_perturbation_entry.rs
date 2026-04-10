@@ -9,6 +9,8 @@
 use vstd::prelude::*;
 use vstd::slice::SliceAdditionalExecFns;
 use verus_fixed_point::fixed_point::limb_ops::*;
+#[cfg(verus_keep_ghost)]
+use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
 
 verus! {
 
@@ -879,6 +881,14 @@ fn mandelbrot_perturbation(
                 }
 
                 // ── Escape check: |Z_n + δ|² > 4 ──
+                // Capture input subranges for the signed_val connection (#74)
+                let ghost zn_re_slice = wg_mem@.subrange(zn_re as int, wg_mem@.len() as int);
+                let ghost zn_im_slice = wg_mem@.subrange(zn_im as int, wg_mem@.len() as int);
+                let ghost zn_re_in = zn_re_slice.subrange(0, n as int);
+                let ghost zn_im_in = zn_im_slice.subrange(0, n as int);
+                let ghost dre_in = delta_re@.subrange(0, n as int);
+                let ghost dim_in = delta_im@.subrange(0, n as int);
+
                 let full_re_s = signed_add_to(vslice(wg_mem, zn_re), &zn_re_s, &delta_re, &delta_re_sign, &mut t1, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
                 let full_im_s = signed_add_to(vslice(wg_mem, zn_im), &zn_im_s, &delta_im, &delta_im_sign, &mut t2, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
                 let fr2_s = signed_mul_to(&t1, &full_re_s, &t1, &full_re_s, &mut t3, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
@@ -913,6 +923,50 @@ fn mandelbrot_perturbation(
                         == trunc_sq_re + trunc_sq_im);
                     // mag_carry is bounded
                     assert(mag_carry.sem() == 0 || mag_carry.sem() == 1);
+
+                    // ── PROVED (#74): Connect magnitudes back to signed inputs ──
+                    // signed_add_to (#71): the signed-magnitude result of t1 equals
+                    // signed(Z_re) + signed(δ_re), possibly modulo P (overflow disjunct).
+                    // Since (-x)² == x², the truncated square depends only on |t1|,
+                    // which is vec_val(t1). So trunc_sq(vec_val(t1)) is a function of
+                    // (signed(Z_re) + signed(δ_re)) modulo the overflow disjunction.
+                    let signed_zre = signed_val_of::<u32>(zn_re_in, zn_re_s.sem() as int);
+                    let signed_dre = signed_val_of::<u32>(dre_in, delta_re_sign.sem() as int);
+                    let signed_zim = signed_val_of::<u32>(zn_im_in, zn_im_s.sem() as int);
+                    let signed_dim = signed_val_of::<u32>(dim_in, delta_im_sign.sem() as int);
+                    let signed_full_re = signed_val_of::<u32>(t1@.subrange(0, n as int), full_re_s.sem() as int);
+                    let signed_full_im = signed_val_of::<u32>(t2@.subrange(0, n as int), full_im_s.sem() as int);
+
+                    // signed_add_to's 3-way disjunction (#71), made explicit:
+                    //   signed_full_re == signed_zre + signed_dre, OR
+                    //   signed_full_re == signed_zre + signed_dre - P (overflow ≥ P), OR
+                    //   signed_full_re == signed_zre + signed_dre + P (underflow ≤ -P)
+                    assert(signed_full_re == signed_zre + signed_dre
+                        || (signed_full_re == signed_zre + signed_dre - P && signed_zre + signed_dre >= P)
+                        || (signed_full_re == signed_zre + signed_dre + P && signed_zre + signed_dre <= -(P as int)));
+                    assert(signed_full_im == signed_zim + signed_dim
+                        || (signed_full_im == signed_zim + signed_dim - P && signed_zim + signed_dim >= P)
+                        || (signed_full_im == signed_zim + signed_dim + P && signed_zim + signed_dim <= -(P as int)));
+
+                    // Square equality: |signed_full_re|² == vec_val(t1)² (since (-x)² = x²)
+                    assert(signed_full_re * signed_full_re == full_re_mag * full_re_mag) by(nonlinear_arith)
+                        requires
+                            signed_full_re == full_re_mag || signed_full_re == -full_re_mag;
+                    assert(signed_full_im * signed_full_im == full_im_mag * full_im_mag) by(nonlinear_arith)
+                        requires
+                            signed_full_im == full_im_mag || signed_full_im == -full_im_mag;
+
+                    // So the truncated squares can equivalently be expressed in terms of
+                    // signed_full_re and signed_full_im, which (via #71) are
+                    // (signed_zre + signed_dre) and (signed_zim + signed_dim) up to ±P.
+                    let ts_re_signed = (signed_full_re * signed_full_re / limb_power(frac_limbs as nat))
+                        % limb_power(n as nat);
+                    let ts_im_signed = (signed_full_im * signed_full_im / limb_power(frac_limbs as nat))
+                        % limb_power(n as nat);
+                    assert(ts_re_signed == trunc_sq_re);
+                    assert(ts_im_signed == trunc_sq_im);
+                    assert(vec_val(t5@.subrange(0, n as int)) + mag_carry.sem() * P
+                        == ts_re_signed + ts_im_signed);
                 }
 
                 let thresh_off = 5u32;
