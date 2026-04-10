@@ -206,6 +206,14 @@ fn copy_limbs(src: &Vec<u32>, src_off: u32, dst: &mut Vec<u32>, n: u32)
 }
 
 // #[gpu_kernel(workgroup_size(16, 16, 1))]
+// rlimit bump rationale: the strengthened *_to_buf postconditions (#77) add
+// value-equation facts to the Z3 context for every call inside the reference
+// orbit and perturbation loops. The proper fix (per rlimit tips) would be to
+// extract the loop bodies into focused helper functions, but that's significant
+// refactoring due to many captured locals (n, frac_limbs, ref_a, ref_b, t1-t5,
+// ls1, ls2, ...). Acceptable as a stopgap while Tasks #78-#79 use the new
+// postconditions; revisit during the loop extraction work.
+#[verifier::rlimit(100)]
 fn mandelbrot_perturbation(
     // #[gpu_builtin(thread_id_x)]
     gid_x: u32,
