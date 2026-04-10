@@ -14,6 +14,55 @@ use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
 
 verus! {
 
+/// PROOF (#76): glitch detection completeness for one component.
+/// If vec_val(δ_full) >= 4 * BASE^(n-1), then the top limb is > 3.
+/// This means the kernel's `δ[n-1] > 3` check will fire — i.e., the
+/// glitch detection catches all "value too large" overflows.
+proof fn lemma_glitch_completeness_one(delta: Seq<u32>, n: nat)
+    requires
+        n >= 1,
+        delta.len() == n as int,
+        valid_limbs(delta),
+    ensures
+        vec_val(delta) >= 4 * limb_power((n - 1) as nat)
+            ==> delta[(n - 1) as int].sem() > 3,
+{
+    let s_top = limb_power((n - 1) as nat);
+    let dre_lo = delta.subrange(0, (n - 1) as int);
+
+    assert(valid_limbs(dre_lo)) by {
+        assert forall |k: int| 0 <= k < dre_lo.len()
+            implies 0 <= (#[trigger] dre_lo[k]).sem()
+                && dre_lo[k].sem() < LIMB_BASE() by {
+            assert(dre_lo[k] == delta[k]);
+        }
+    }
+    lemma_vec_val_split::<u32>(delta, (n - 1) as nat);
+    let lo_v = vec_val(dre_lo);
+    let top_v = delta[(n - 1) as int].sem();
+    let hi_seq = delta.subrange((n - 1) as int, n as int);
+    assert(hi_seq.len() == 1);
+    assert(hi_seq[0] == delta[(n - 1) as int]);
+    reveal_with_fuel(limbs_val, 2);
+    assert(sem_seq(hi_seq).len() == 1);
+    assert(sem_seq(hi_seq)[0] == top_v);
+    assert(sem_seq(hi_seq).subrange(1, 1) =~= Seq::<int>::empty());
+    assert(vec_val(hi_seq) == top_v);
+    assert(vec_val(delta) == lo_v + top_v * s_top);
+    lemma_vec_val_bounded::<u32>(dre_lo);
+    assert(lo_v < s_top);
+    assert(s_top > 0) by { reveal_with_fuel(limb_power, 2); }
+
+    if vec_val(delta) >= 4 * s_top {
+        assert(top_v * s_top >= 4 * s_top - lo_v);
+        assert(top_v * s_top > 3 * s_top) by(nonlinear_arith)
+            requires top_v * s_top >= 4 * s_top - lo_v,
+                     lo_v < s_top, s_top > 0;
+        assert(top_v > 3) by(nonlinear_arith)
+            requires top_v * s_top > 3 * s_top, s_top > 0;
+    }
+}
+
 pub open spec fn u32_max() -> int { 0x1_0000_0000 - 1 }
 
 proof fn lemma_mul_u32_safe(a: int, b: int)
@@ -874,6 +923,28 @@ fn mandelbrot_perturbation(
                 // With multi-precision fixed-point, perturbation stays accurate even
                 // when |δ| > |Z| (unlike float). Only detect actual overflow:
                 // if integer limb exceeds escape radius (~4), δ has blown up.
+                //
+                // PROVED (#76): completeness via lemma_glitch_completeness_one —
+                // if vec_val(δ_re) >= 4 * BASE^(n-1), the kernel's `δ[n-1] > 3`
+                // check WILL fire. So all "value too large" δ values are caught.
+                proof {
+                    let dre_seq = delta_re@.subrange(0, n as int);
+                    let dim_seq = delta_im@.subrange(0, n as int);
+                    assert(dre_seq =~= delta_re@);
+                    assert(dim_seq =~= delta_im@);
+                    assert(valid_limbs(delta_re@)) by {
+                        assert forall |k: int| 0 <= k < delta_re@.len()
+                            implies 0 <= (#[trigger] delta_re@[k]).sem()
+                                && delta_re@[k].sem() < LIMB_BASE() by { }
+                    }
+                    assert(valid_limbs(delta_im@)) by {
+                        assert forall |k: int| 0 <= k < delta_im@.len()
+                            implies 0 <= (#[trigger] delta_im@[k]).sem()
+                                && delta_im@[k].sem() < LIMB_BASE() by { }
+                    }
+                    lemma_glitch_completeness_one(delta_re@, n as nat);
+                    lemma_glitch_completeness_one(delta_im@, n as nat);
+                }
                 if delta_re[(n - 1u32) as usize] > 3u32 || delta_im[(n - 1u32) as usize] > 3u32 {
                     is_glitched = 1u32;
                     glitch_iter = iter;
