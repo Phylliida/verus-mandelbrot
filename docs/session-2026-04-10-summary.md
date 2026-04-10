@@ -360,8 +360,28 @@ Possible additional verification targets:
 - **Reference orbit accuracy** — track its own truncation error accumulation
 - **Glitch detection completeness** — prove that all glitches are detected,
   not just that detected ones are handled
-- **Workgroup barrier semantics** — currently trusted as `external_body`
 - **Series approximation kernel** — additional optimization not yet verified
+
+### TODO: Workgroup Barrier Semantics
+
+The `gpu_workgroup_barrier()` is currently trusted as `#[verifier::external_body]`.
+Modeling it properly would require a GPU memory model that captures:
+- Memory ordering across threads in a workgroup
+- The "happens-before" relationship that the barrier establishes
+- Visibility of writes from one thread to others after the barrier
+
+This is a foundational gap — every kernel that uses workgroup memory currently
+relies on this assumption. Filling it would unlock end-to-end verification of
+the workgroup-shared parts of the perturbation kernel (vote tabulation, best
+reference selection, shared-memory orbit reads).
+
+Worth doing because:
+1. It removes one of the few `external_body` dependencies in the verified path
+2. It would catch potential race-condition bugs that are currently invisible
+3. The same model would benefit any future GPU kernel work in this codebase
+
+Effort estimate: high (requires designing/adopting a memory model and
+re-proving the kernel's barrier-dependent invariants).
 
 ## Files Changed
 
