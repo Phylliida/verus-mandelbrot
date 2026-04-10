@@ -893,7 +893,46 @@ fn mandelbrot_perturbation(
                 add_limbs_to(&t3, &t4, &mut t5, 0usize, n as usize);
 
                 let thresh_off = 5u32;
+                let ghost t5_val_pre_borrow = vec_val(t5@.subrange(0, n as int));
+                let ghost thresh_seq = params@.subrange(thresh_off as int, params@.len() as int);
+                let ghost thresh_val = vec_val(thresh_seq.subrange(0, n as int));
                 let borrow = sub_limbs_to(&t5, vslice(params, thresh_off), &mut t1, 0usize, n as usize);
+                proof {
+                    // PROVED: escape check polarity.
+                    // sub_limbs_to ensures: t1 + threshold == t5 + borrow * P
+                    // borrow ∈ {0,1}; vec_val(t1) ∈ [0, P)
+                    // Hence: borrow == 0  ⟺  vec_val(t5) ≥ vec_val(threshold)
+                    let t1_val = vec_val(t1@.subrange(0, n as int));
+                    let P = limb_power(n as nat);
+                    let bv = borrow.sem();
+                    // Establish the difference equation in our local variables
+                    assert(t1_val + thresh_val == t5_val_pre_borrow + bv * P);
+                    // Bounds
+                    assert(valid_limbs(t1@.subrange(0, n as int))) by {
+                        assert forall |k: int| 0 <= k < n as int
+                            implies 0 <= (#[trigger] t1@.subrange(0, n as int)[k]).sem()
+                                && t1@.subrange(0, n as int)[k].sem() < LIMB_BASE() by {
+                            assert(t1@.subrange(0, n as int)[k] == t1@[k]);
+                        }
+                    }
+                    lemma_vec_val_bounded::<u32>(t1@.subrange(0, n as int));
+                    assert(0 <= t1_val && t1_val < P);
+                    assert(bv == 0 || bv == 1);
+                    // Polarity
+                    if bv == 0 {
+                        assert(t1_val + thresh_val == t5_val_pre_borrow);
+                        assert(t5_val_pre_borrow >= thresh_val);
+                    } else {
+                        assert(bv == 1);
+                        assert(t1_val + thresh_val == t5_val_pre_borrow + P);
+                        assert(t5_val_pre_borrow == t1_val + thresh_val - P);
+                        assert(t5_val_pre_borrow < thresh_val) by(nonlinear_arith)
+                            requires t5_val_pre_borrow == t1_val + thresh_val - P,
+                                     t1_val < P;
+                    }
+                    // Both directions captured:
+                    assert((bv == 0) <==> (t5_val_pre_borrow >= thresh_val));
+                }
                 if borrow == 0u32 {
                     if escaped_iter == max_iters {
                         escaped_iter = iter;
