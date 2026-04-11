@@ -7,7 +7,8 @@
 
 use vstd::prelude::*;
 use verus_fixed_point::fixed_point::limb_ops::{
-    LIMB_BASE, LimbOps, limb_power, vec_val, valid_limbs, lemma_vec_val_bounded,
+    LIMB_BASE, LimbOps, limb_power, limbs_val, sem_seq, vec_val, valid_limbs,
+    lemma_vec_val_bounded, lemma_vec_val_split,
 };
 use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
 use crate::gpu_mandelbrot_kernel::{SpecComplex, spec_pert_step};
@@ -795,6 +796,214 @@ pub proof fn lemma_pert_step_buf_matches_spec(
         by(nonlinear_arith)
         requires new_dim == 2 * (s3 + s4) + 2 * dre * dim + dcim,
                  s3 == z_re * dim, s4 == z_im * dre;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Task #80: Relational glitch criterion + soundness
+// ═══════════════════════════════════════════════════════════════
+
+/// Linearization-invalid criterion: the perturbation δ has grown too large
+/// relative to the reference Z for the perturbation theory linearization
+/// `(Z+δ)² ≈ Z² + 2Zδ` to be a good approximation.
+///
+/// Formula: `4 * |δ|² ≥ tolerance * |Z|²`. Larger `tolerance` ⇒ stricter
+/// (harder to fire). Some calibrations:
+///   * tolerance == 1: |δ| ≥ |Z|/2
+///   * tolerance == 4: |δ| ≥ |Z|
+///   * tolerance == 16: |δ| ≥ 2|Z|
+pub open spec fn is_glitch(z: SpecComplex, delta: SpecComplex, tolerance: int) -> bool {
+    let z_mag_sq = z.re * z.re + z.im * z.im;
+    let delta_mag_sq = delta.re * delta.re + delta.im * delta.im;
+    4 * delta_mag_sq >= tolerance * z_mag_sq
+}
+
+/// Building block: if either component magnitude exceeds k, then
+/// `4 * delta_mag_sq >= 4 * k²`.
+pub proof fn lemma_glitch_magnitude_lower_bound(delta: SpecComplex, k: int)
+    requires
+        k >= 0,
+        delta.re * delta.re >= k * k || delta.im * delta.im >= k * k,
+    ensures
+        4 * (delta.re * delta.re + delta.im * delta.im) >= 4 * k * k,
+{
+    assert(delta.re * delta.re >= 0) by(nonlinear_arith);
+    assert(delta.im * delta.im >= 0) by(nonlinear_arith);
+    let sum = delta.re * delta.re + delta.im * delta.im;
+    if delta.re * delta.re >= k * k {
+        assert(sum >= k * k);
+    } else {
+        assert(delta.im * delta.im >= k * k);
+        assert(sum >= k * k);
+    }
+    assert(4 * sum >= 4 * (k * k)) by(nonlinear_arith)
+        requires sum >= k * k;
+    assert(4 * (k * k) == 4 * k * k) by(nonlinear_arith);
+}
+
+/// Soundness, integer level: given a magnitude lower bound on δ and a
+/// tolerance/Z bound, is_glitch holds.
+pub proof fn lemma_glitch_soundness_int(
+    z: SpecComplex,
+    delta: SpecComplex,
+    k: int,
+    tolerance: int,
+)
+    requires
+        k >= 0,
+        delta.re * delta.re >= k * k || delta.im * delta.im >= k * k,
+        tolerance * (z.re * z.re + z.im * z.im) <= 4 * k * k,
+    ensures
+        is_glitch(z, delta, tolerance),
+{
+    lemma_glitch_magnitude_lower_bound(delta, k);
+    let z_mag_sq = z.re * z.re + z.im * z.im;
+    let delta_mag_sq = delta.re * delta.re + delta.im * delta.im;
+    assert(4 * delta_mag_sq >= 4 * k * k);
+    assert(4 * delta_mag_sq >= tolerance * z_mag_sq);
+}
+
+/// Limb-level helper: if the top limb of δ is greater than 3, then
+/// `vec_val(δ) >= 4 * limb_power(n - 1)`. This is the converse direction
+/// of `lemma_glitch_completeness_one` (#76).
+pub proof fn lemma_glitch_top_implies_magnitude<T: LimbOps>(
+    delta: Seq<T>, n: nat,
+)
+    requires
+        n >= 1,
+        delta.len() == n as int,
+        valid_limbs(delta),
+        delta[(n - 1) as int].sem() > 3,
+    ensures
+        vec_val(delta) >= 4 * limb_power((n - 1) as nat),
+{
+    let s_top = limb_power((n - 1) as nat);
+    let lo = delta.subrange(0, (n - 1) as int);
+    assert(valid_limbs(lo)) by {
+        assert forall |k: int| 0 <= k < lo.len()
+            implies 0 <= (#[trigger] lo[k]).sem() && lo[k].sem() < LIMB_BASE() by {
+            assert(lo[k] == delta[k]);
+        }
+    }
+    lemma_vec_val_split::<T>(delta, (n - 1) as nat);
+    let lo_v = vec_val(lo);
+    let top_v = delta[(n - 1) as int].sem();
+    let hi_seq = delta.subrange((n - 1) as int, n as int);
+    assert(hi_seq.len() == 1);
+    assert(hi_seq[0] == delta[(n - 1) as int]);
+    reveal_with_fuel(limbs_val, 2);
+    assert(sem_seq(hi_seq).len() == 1);
+    assert(sem_seq(hi_seq)[0] == top_v);
+    assert(sem_seq(hi_seq).subrange(1, 1) =~= Seq::<int>::empty());
+    assert(vec_val(hi_seq) == top_v);
+    assert(vec_val(delta) == lo_v + top_v * s_top);
+    lemma_limb_power_pos((n - 1) as nat);
+    assert(s_top > 0);
+    lemma_vec_val_bounded::<T>(lo);
+    assert(lo_v >= 0);
+    // top_v > 3 ⇒ top_v >= 4 ⇒ top_v * s_top >= 4 * s_top
+    assert(top_v >= 4);
+    assert(top_v * s_top >= 4 * s_top) by(nonlinear_arith)
+        requires top_v >= 4, s_top > 0;
+    assert(vec_val(delta) >= 4 * s_top);
+}
+
+/// SOUNDNESS: when the kernel's per-component check fires
+/// (`δ_re[n-1] > 3` OR `δ_im[n-1] > 3`), `is_glitch(z, delta, tolerance)`
+/// holds for any tolerance T such that
+/// `T * |Z|² <= 64 * limb_power(2*(n-1))`.
+///
+/// The 64 comes from: `4 * |δ|² >= 4 * (4*P^(n-1))² = 64 * P^(2*(n-1))`
+/// where the inner `4 * P^(n-1)` is the magnitude lower bound from
+/// `top > 3` and `4*` is from the is_glitch formula's leading coefficient.
+pub proof fn lemma_glitch_check_implies_is_glitch<T: LimbOps>(
+    z: SpecComplex,
+    dre_seq: Seq<T>, dre_sign: int,
+    dim_seq: Seq<T>, dim_sign: int,
+    n: nat,
+    tolerance: int,
+)
+    requires
+        n >= 1,
+        dre_seq.len() == n as int,
+        dim_seq.len() == n as int,
+        valid_limbs(dre_seq),
+        valid_limbs(dim_seq),
+        dre_sign == 0 || dre_sign == 1,
+        dim_sign == 0 || dim_sign == 1,
+        // Kernel check fires
+        dre_seq[(n - 1) as int].sem() > 3 || dim_seq[(n - 1) as int].sem() > 3,
+        // Tolerance bound
+        tolerance * (z.re * z.re + z.im * z.im)
+            <= 64 * limb_power((2 * (n - 1)) as nat),
+    ensures
+        is_glitch(
+            z,
+            SpecComplex {
+                re: signed_val_of(dre_seq, dre_sign),
+                im: signed_val_of(dim_seq, dim_sign),
+            },
+            tolerance,
+        ),
+{
+    let pn1 = limb_power((n - 1) as nat);
+    lemma_limb_power_pos((n - 1) as nat);
+    assert(pn1 > 0);
+
+    // limb_power(2*(n-1)) == pn1 * pn1, via lemma_limb_power_add(n-1, n-1).
+    verus_fixed_point::fixed_point::limb_ops::lemma_limb_power_add(
+        (n - 1) as nat, (n - 1) as nat);
+    assert(((n - 1) as nat) + ((n - 1) as nat) == (2 * (n - 1)) as nat);
+    assert(limb_power((2 * (n - 1)) as nat) == pn1 * pn1);
+    let p2n1 = limb_power((2 * (n - 1)) as nat);
+    assert(p2n1 == pn1 * pn1);
+
+    let dre_int = signed_val_of(dre_seq, dre_sign);
+    let dim_int = signed_val_of(dim_seq, dim_sign);
+    let delta = SpecComplex { re: dre_int, im: dim_int };
+
+    // signed_val_of squared equals vec_val squared (since (-x)² = x²).
+    let dre_v = vec_val(dre_seq);
+    let dim_v = vec_val(dim_seq);
+    assert(dre_int == dre_v || dre_int == -dre_v);
+    assert(dim_int == dim_v || dim_int == -dim_v);
+    assert(dre_int * dre_int == dre_v * dre_v) by(nonlinear_arith)
+        requires dre_int == dre_v || dre_int == -dre_v;
+    assert(dim_int * dim_int == dim_v * dim_v) by(nonlinear_arith)
+        requires dim_int == dim_v || dim_int == -dim_v;
+
+    // Either the re or im top limb exceeds 3 → its vec_val >= 4 * P^(n-1).
+    if dre_seq[(n - 1) as int].sem() > 3 {
+        lemma_glitch_top_implies_magnitude::<T>(dre_seq, n);
+        assert(dre_v >= 4 * pn1);
+        // dre_v² >= 16 * pn1²
+        assert(dre_v * dre_v >= 16 * (pn1 * pn1)) by(nonlinear_arith)
+            requires dre_v >= 4 * pn1, pn1 > 0;
+        assert(dre_v * dre_v >= 16 * p2n1);
+        assert(dre_int * dre_int >= 16 * p2n1);
+    } else {
+        assert(dim_seq[(n - 1) as int].sem() > 3);
+        lemma_glitch_top_implies_magnitude::<T>(dim_seq, n);
+        assert(dim_v >= 4 * pn1);
+        assert(dim_v * dim_v >= 16 * (pn1 * pn1)) by(nonlinear_arith)
+            requires dim_v >= 4 * pn1, pn1 > 0;
+        assert(dim_v * dim_v >= 16 * p2n1);
+        assert(dim_int * dim_int >= 16 * p2n1);
+    }
+
+    // Now apply lemma_glitch_soundness_int with k² = 16 * p2n1 = (4*pn1)².
+    let k = 4 * pn1;
+    assert(k >= 0);
+    assert(k * k == 16 * (pn1 * pn1)) by(nonlinear_arith) requires k == 4 * pn1;
+    assert(k * k == 16 * p2n1);
+    assert(delta.re * delta.re >= k * k || delta.im * delta.im >= k * k);
+
+    // The soundness precondition: tolerance * |Z|² <= 4 * k² = 64 * p2n1.
+    assert(4 * (k * k) == 64 * p2n1) by(nonlinear_arith)
+        requires k * k == 16 * p2n1;
+    assert(4 * k * k == 4 * (k * k)) by(nonlinear_arith);
+    assert(tolerance * (z.re * z.re + z.im * z.im) <= 4 * k * k);
+
+    lemma_glitch_soundness_int(z, delta, k, tolerance);
 }
 
 } // verus!
