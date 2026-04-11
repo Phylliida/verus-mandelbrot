@@ -11,7 +11,10 @@ use verus_fixed_point::fixed_point::limb_ops::{
     lemma_vec_val_bounded, lemma_vec_val_split,
 };
 use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
-use crate::gpu_mandelbrot_kernel::{SpecComplex, spec_pert_step};
+use crate::gpu_mandelbrot_kernel::{
+    SpecComplex, spec_ref_step, spec_pert_step,
+    perturbation_step_correct, theorem_perturbation_n_steps,
+};
 
 verus! {
 
@@ -1813,6 +1816,188 @@ pub proof fn lemma_glitch_is_glitch_implies_check<T: LimbOps>(
         lemma_magnitude_implies_top::<T>(dim_seq, n);
         assert(dim_seq[(n - 1) as int].sem() > 3);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Stage F: spec orbit constructors + perturbation theorem wrapper
+// ═══════════════════════════════════════════════════════════════
+
+/// Reference orbit iterated by `spec_ref_step`: Z_k given Z_0 and c_ref.
+pub open spec fn spec_ref_orbit(
+    z0: SpecComplex, c_ref: SpecComplex, k: nat,
+) -> SpecComplex
+    decreases k,
+{
+    if k == 0 {
+        z0
+    } else {
+        spec_ref_step(spec_ref_orbit(z0, c_ref, (k - 1) as nat), c_ref)
+    }
+}
+
+/// Perturbation orbit iterated by `spec_pert_step`: δ_k given δ_0, reference
+/// orbit `z_orbit`, and `dc`. The k-th iterate uses the reference orbit's
+/// k-1-th value as its Z input.
+pub open spec fn spec_pert_orbit(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    k: nat,
+) -> SpecComplex
+    decreases k,
+{
+    if k == 0 {
+        d0
+    } else {
+        let k1 = (k - 1) as nat;
+        spec_pert_step(
+            spec_ref_orbit(z0, c_ref, k1),
+            spec_pert_orbit(z0, c_ref, d0, dc, k1),
+            dc,
+        )
+    }
+}
+
+/// Predicate: a `Seq<SpecComplex>` satisfies the reference-orbit recurrence.
+pub open spec fn is_spec_ref_orbit(
+    z_orbit: Seq<SpecComplex>, c_ref: SpecComplex, n: nat,
+) -> bool {
+    &&& z_orbit.len() >= n + 1
+    &&& forall|k: int|
+        0 <= k < n as int
+            ==> (#[trigger] z_orbit[k + 1]) == spec_ref_step(z_orbit[k], c_ref)
+}
+
+/// Predicate: a `Seq<SpecComplex>` satisfies the perturbation-orbit recurrence
+/// w.r.t. the given reference orbit.
+pub open spec fn is_spec_pert_orbit(
+    z_orbit: Seq<SpecComplex>,
+    d_orbit: Seq<SpecComplex>,
+    dc: SpecComplex,
+    n: nat,
+) -> bool {
+    &&& z_orbit.len() >= n + 1
+    &&& d_orbit.len() >= n + 1
+    &&& forall|k: int|
+        0 <= k < n as int
+            ==> (#[trigger] d_orbit[k + 1])
+                == spec_pert_step(z_orbit[k], d_orbit[k], dc)
+}
+
+/// Wrapper: given any sequences satisfying the spec recurrences,
+/// `theorem_perturbation_n_steps` gives `perturbation_step_correct` for
+/// all `k` in `[0, n)`. This packages the theorem application for use
+/// from the kernel.
+pub proof fn lemma_perturbation_correctness_via_orbits(
+    z_orbit: Seq<SpecComplex>,
+    d_orbit: Seq<SpecComplex>,
+    c_ref: SpecComplex,
+    dc: SpecComplex,
+    n: nat,
+)
+    requires
+        is_spec_ref_orbit(z_orbit, c_ref, n),
+        is_spec_pert_orbit(z_orbit, d_orbit, dc, n),
+    ensures
+        forall|k: int| 0 <= k < n as int
+            ==> #[trigger] perturbation_step_correct(z_orbit, d_orbit, c_ref, dc, k),
+{
+    theorem_perturbation_n_steps(z_orbit, d_orbit, c_ref, dc, n);
+}
+
+/// Constructor: build a reference-orbit `Seq` of length `n + 1` from
+/// `spec_ref_orbit`.
+pub open spec fn spec_ref_orbit_seq(
+    z0: SpecComplex, c_ref: SpecComplex, n: nat,
+) -> Seq<SpecComplex> {
+    Seq::new((n + 1) as nat, |k: int| spec_ref_orbit(z0, c_ref, k as nat))
+}
+
+/// Constructor: build a perturbation-orbit `Seq` of length `n + 1`.
+pub open spec fn spec_pert_orbit_seq(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    n: nat,
+) -> Seq<SpecComplex> {
+    Seq::new((n + 1) as nat, |k: int| spec_pert_orbit(z0, c_ref, d0, dc, k as nat))
+}
+
+/// Lemma: the constructed reference-orbit Seq satisfies `is_spec_ref_orbit`.
+pub proof fn lemma_spec_ref_orbit_seq_correct(
+    z0: SpecComplex, c_ref: SpecComplex, n: nat,
+)
+    ensures
+        is_spec_ref_orbit(spec_ref_orbit_seq(z0, c_ref, n), c_ref, n),
+{
+    let orbit = spec_ref_orbit_seq(z0, c_ref, n);
+    assert(orbit.len() == n + 1);
+    assert forall|k: int| 0 <= k < n as int
+        implies (#[trigger] orbit[k + 1]) == spec_ref_step(orbit[k], c_ref) by {
+        // orbit[k] == spec_ref_orbit(z0, c_ref, k as nat)
+        // orbit[k+1] == spec_ref_orbit(z0, c_ref, (k+1) as nat)
+        //             == spec_ref_step(spec_ref_orbit(z0, c_ref, k as nat), c_ref)
+        //             == spec_ref_step(orbit[k], c_ref)
+        assert(orbit[k] == spec_ref_orbit(z0, c_ref, k as nat));
+        assert(orbit[k + 1] == spec_ref_orbit(z0, c_ref, (k + 1) as nat));
+        // Unfold spec_ref_orbit at (k+1):
+        assert((k + 1) as nat > 0);
+        assert(((k + 1) as nat - 1) as nat == k as nat);
+    }
+}
+
+/// Lemma: the constructed perturbation-orbit Seq satisfies
+/// `is_spec_pert_orbit` w.r.t. the reference-orbit Seq.
+pub proof fn lemma_spec_pert_orbit_seq_correct(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    n: nat,
+)
+    ensures
+        is_spec_pert_orbit(
+            spec_ref_orbit_seq(z0, c_ref, n),
+            spec_pert_orbit_seq(z0, c_ref, d0, dc, n),
+            dc,
+            n,
+        ),
+{
+    let z_orbit = spec_ref_orbit_seq(z0, c_ref, n);
+    let d_orbit = spec_pert_orbit_seq(z0, c_ref, d0, dc, n);
+    assert(z_orbit.len() == n + 1);
+    assert(d_orbit.len() == n + 1);
+    assert forall|k: int| 0 <= k < n as int
+        implies (#[trigger] d_orbit[k + 1])
+            == spec_pert_step(z_orbit[k], d_orbit[k], dc) by {
+        assert(d_orbit[k] == spec_pert_orbit(z0, c_ref, d0, dc, k as nat));
+        assert(d_orbit[k + 1] == spec_pert_orbit(z0, c_ref, d0, dc, (k + 1) as nat));
+        assert(z_orbit[k] == spec_ref_orbit(z0, c_ref, k as nat));
+        assert((k + 1) as nat > 0);
+        assert(((k + 1) as nat - 1) as nat == k as nat);
+    }
+}
+
+/// End-to-end Stage F theorem: for any initial state, the constructed
+/// spec orbit satisfies `perturbation_step_correct` for all iterations.
+///
+/// This is the theorem you apply in the kernel (or in a harness) once
+/// you've established a correspondence between the buffer state and a
+/// spec orbit via the scaled bridge lemma (Stage E).
+pub proof fn lemma_spec_orbit_end_to_end_correct(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    n: nat,
+)
+    ensures
+        ({
+            let z_orbit = spec_ref_orbit_seq(z0, c_ref, n);
+            let d_orbit = spec_pert_orbit_seq(z0, c_ref, d0, dc, n);
+            forall|k: int| 0 <= k < n as int
+                ==> #[trigger] perturbation_step_correct(z_orbit, d_orbit, c_ref, dc, k)
+        }),
+{
+    lemma_spec_ref_orbit_seq_correct(z0, c_ref, n);
+    lemma_spec_pert_orbit_seq_correct(z0, c_ref, d0, dc, n);
+    let z_orbit = spec_ref_orbit_seq(z0, c_ref, n);
+    let d_orbit = spec_pert_orbit_seq(z0, c_ref, d0, dc, n);
+    lemma_perturbation_correctness_via_orbits(z_orbit, d_orbit, c_ref, dc, n);
 }
 
 } // verus!

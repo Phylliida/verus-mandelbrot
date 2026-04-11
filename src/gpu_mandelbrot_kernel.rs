@@ -1472,7 +1472,7 @@ pub open spec fn perturbation_step_correct(
 
 /// Corollary: perturbation is correct for N iterations.
 /// If delta_0 = W_0 - Z_0, then delta_n = W_n - Z_n for all n.
-proof fn theorem_perturbation_n_steps(
+pub proof fn theorem_perturbation_n_steps(
     z_orbit: Seq<SpecComplex>,     // Z_0, Z_1, ..., Z_n
     delta_orbit: Seq<SpecComplex>, // δ_0, δ_1, ..., δ_n
     c_ref: SpecComplex,
