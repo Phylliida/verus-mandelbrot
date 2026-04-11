@@ -10,6 +10,7 @@ use verus_fixed_point::fixed_point::limb_ops::{
     LIMB_BASE, LimbOps, limb_power, vec_val, valid_limbs, lemma_vec_val_bounded,
 };
 use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
+use crate::gpu_mandelbrot_kernel::{SpecComplex, spec_pert_step};
 
 verus! {
 
@@ -383,6 +384,417 @@ pub proof fn lemma_signed_mul_postcond_to_buf<T: LimbOps>(
             assert(so == -vo);
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// No-wrap lemmas: signed_*_buf reduces to ordinary integer arithmetic
+// when the result fits in (-limb_power(n), limb_power(n)).
+// ═══════════════════════════════════════════════════════════════
+
+/// `signed_add_buf` returns `a + b` exactly when no wrap occurs.
+pub proof fn lemma_signed_add_buf_no_wrap(a: int, b: int, n: nat)
+    requires
+        n >= 1,
+        a + b > -(limb_power(n) as int),
+        a + b < limb_power(n) as int,
+    ensures
+        signed_add_buf(a, b, n) == a + b,
+{
+    lemma_limb_power_pos(n);
+}
+
+/// `signed_sub_buf` returns `a - b` exactly when no wrap occurs.
+pub proof fn lemma_signed_sub_buf_no_wrap(a: int, b: int, n: nat)
+    requires
+        n >= 1,
+        a - b > -(limb_power(n) as int),
+        a - b < limb_power(n) as int,
+    ensures
+        signed_sub_buf(a, b, n) == a - b,
+{
+    lemma_limb_power_pos(n);
+    lemma_signed_add_buf_no_wrap(a, -b, n);
+}
+
+/// `signed_mul_buf` with `frac_limbs == 0` returns `a * b` exactly when no wrap occurs.
+pub proof fn lemma_signed_mul_buf_no_wrap(a: int, b: int, n: nat)
+    requires
+        n >= 1,
+        a * b > -(limb_power(n) as int),
+        a * b < limb_power(n) as int,
+    ensures
+        signed_mul_buf(a, b, n, 0) == a * b,
+{
+    lemma_limb_power_pos(n);
+    let prod = a * b;
+    let abs_prod = if prod < 0 { -prod } else { prod };
+    // limb_power(0) == 1, so abs_prod / 1 == abs_prod.
+    assert(limb_power(0) == 1) by { reveal_with_fuel(limb_power, 1); }
+    assert(abs_prod / 1 == abs_prod);
+    // abs_prod < limb_power(n), so abs_prod % limb_power(n) == abs_prod.
+    assert(abs_prod < limb_power(n));
+    assert(abs_prod >= 0);
+    assert(abs_prod % limb_power(n) == abs_prod) by(nonlinear_arith)
+        requires 0 <= abs_prod, abs_prod < limb_power(n), limb_power(n) > 0;
+    // Putting it together: signed_mul_buf returns ±abs_prod which equals prod.
+    if prod < 0 {
+        assert(abs_prod == -prod);
+        assert(signed_mul_buf(a, b, n, 0) == -abs_prod);
+        assert(-abs_prod == prod);
+    } else {
+        assert(abs_prod == prod);
+        assert(signed_mul_buf(a, b, n, 0) == abs_prod);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Bridge lemma: pert_step_buf_int matches spec_pert_step under bounds
+// ═══════════════════════════════════════════════════════════════
+
+/// Single-bound predicate: every intermediate value in the perturbation step
+/// chain stays within (-limb_power(n), limb_power(n)) when this holds.
+///
+/// `R` bounds |z_re|, |z_im|, |dre|, |dim|; `E` bounds |dcre|, |dcim|.
+/// The chain's max intermediate is bounded by `12*R*R + E` (the imaginary
+/// branch), so requiring `12*R*R + E < limb_power(n)` is sufficient.
+pub open spec fn pert_step_no_overflow(
+    z_re: int, z_im: int,
+    dre: int, dim: int,
+    dcre: int, dcim: int,
+    r: int, e: int,
+    n: nat,
+) -> bool {
+    &&& -r <= z_re && z_re <= r
+    &&& -r <= z_im && z_im <= r
+    &&& -r <= dre && dre <= r
+    &&& -r <= dim && dim <= r
+    &&& -e <= dcre && dcre <= e
+    &&& -e <= dcim && dcim <= e
+    &&& r >= 0 && e >= 0
+    &&& 12 * r * r + e < limb_power(n)
+}
+
+/// Bridge lemma: when no wrap/truncation occurs, the buffer-level
+/// perturbation step equals the spec-level (mathematical) one.
+///
+/// Restricted to `frac_limbs == 0` (integer arithmetic). The kernel uses
+/// `frac_limbs > 0` (fixed-point), but the integer case is sufficient to
+/// validate the structural correspondence — the fixed-point case follows
+/// by linear scaling once a separate fixed-point bridge is proven.
+pub proof fn lemma_pert_step_buf_matches_spec(
+    z_re: int, z_im: int,
+    dre: int, dim: int,
+    dcre: int, dcim: int,
+    r: int, e: int,
+    n: nat,
+)
+    requires
+        n >= 1,
+        pert_step_no_overflow(z_re, z_im, dre, dim, dcre, dcim, r, e, n),
+    ensures
+        ({
+            let buf_result = pert_step_buf_int(z_re, z_im, dre, dim, dcre, dcim, n, 0);
+            let spec_result = spec_pert_step(
+                SpecComplex { re: z_re, im: z_im },
+                SpecComplex { re: dre, im: dim },
+                SpecComplex { re: dcre, im: dcim },
+            );
+            buf_result.0 == spec_result.re && buf_result.1 == spec_result.im
+        }),
+{
+    lemma_limb_power_pos(n);
+    let p = limb_power(n) as int;
+    assert(p > 0);
+
+    // Establish r*r >= 0 (non-negative bound).
+    assert(r * r >= 0) by(nonlinear_arith);
+    assert(12 * r * r >= 0) by(nonlinear_arith) requires r * r >= 0;
+    // Helpful product bounds derived from -r <= x <= r and -r <= y <= r:
+    //   |x*y| <= r*r
+    // We'll establish these for each pair we need.
+
+    // ── Part A: 4 multiplies — all bounded by r*r ──
+    assert(z_re * dre <= r * r) by(nonlinear_arith)
+        requires -r <= z_re, z_re <= r, -r <= dre, dre <= r;
+    assert(-(r * r) <= z_re * dre) by(nonlinear_arith)
+        requires -r <= z_re, z_re <= r, -r <= dre, dre <= r;
+    assert(z_re * dre < p) by(nonlinear_arith)
+        requires z_re * dre <= r * r, 12 * r * r + e < p, e >= 0;
+    assert(z_re * dre > -p) by(nonlinear_arith)
+        requires -(r * r) <= z_re * dre, 12 * r * r + e < p, e >= 0;
+    lemma_signed_mul_buf_no_wrap(z_re, dre, n);
+    let s1 = signed_mul_buf(z_re, dre, n, 0);
+    assert(s1 == z_re * dre);
+
+    assert(z_im * dim <= r * r) by(nonlinear_arith)
+        requires -r <= z_im, z_im <= r, -r <= dim, dim <= r;
+    assert(-(r * r) <= z_im * dim) by(nonlinear_arith)
+        requires -r <= z_im, z_im <= r, -r <= dim, dim <= r;
+    assert(z_im * dim < p) by(nonlinear_arith)
+        requires z_im * dim <= r * r, 12 * r * r + e < p, e >= 0;
+    assert(z_im * dim > -p) by(nonlinear_arith)
+        requires -(r * r) <= z_im * dim, 12 * r * r + e < p, e >= 0;
+    lemma_signed_mul_buf_no_wrap(z_im, dim, n);
+    let s2 = signed_mul_buf(z_im, dim, n, 0);
+    assert(s2 == z_im * dim);
+
+    assert(z_re * dim <= r * r) by(nonlinear_arith)
+        requires -r <= z_re, z_re <= r, -r <= dim, dim <= r;
+    assert(-(r * r) <= z_re * dim) by(nonlinear_arith)
+        requires -r <= z_re, z_re <= r, -r <= dim, dim <= r;
+    assert(z_re * dim < p) by(nonlinear_arith)
+        requires z_re * dim <= r * r, 12 * r * r + e < p, e >= 0;
+    assert(z_re * dim > -p) by(nonlinear_arith)
+        requires -(r * r) <= z_re * dim, 12 * r * r + e < p, e >= 0;
+    lemma_signed_mul_buf_no_wrap(z_re, dim, n);
+    let s3 = signed_mul_buf(z_re, dim, n, 0);
+    assert(s3 == z_re * dim);
+
+    assert(z_im * dre <= r * r) by(nonlinear_arith)
+        requires -r <= z_im, z_im <= r, -r <= dre, dre <= r;
+    assert(-(r * r) <= z_im * dre) by(nonlinear_arith)
+        requires -r <= z_im, z_im <= r, -r <= dre, dre <= r;
+    assert(z_im * dre < p) by(nonlinear_arith)
+        requires z_im * dre <= r * r, 12 * r * r + e < p, e >= 0;
+    assert(z_im * dre > -p) by(nonlinear_arith)
+        requires -(r * r) <= z_im * dre, 12 * r * r + e < p, e >= 0;
+    lemma_signed_mul_buf_no_wrap(z_im, dre, n);
+    let s4 = signed_mul_buf(z_im, dre, n, 0);
+    assert(s4 == z_im * dre);
+
+    // d1 = s1 - s2, |d1| <= 2*r*r
+    assert(s1 - s2 <= 2 * r * r) by(nonlinear_arith)
+        requires s1 == z_re * dre, s2 == z_im * dim,
+                 z_re * dre <= r * r, z_im * dim >= -(r * r);
+    assert(s1 - s2 >= -(2 * r * r)) by(nonlinear_arith)
+        requires s1 == z_re * dre, s2 == z_im * dim,
+                 z_re * dre >= -(r * r), z_im * dim <= r * r;
+    assert(s1 - s2 < p) by(nonlinear_arith)
+        requires s1 - s2 <= 2 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(s1 - s2 > -p) by(nonlinear_arith)
+        requires s1 - s2 >= -(2 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_sub_buf_no_wrap(s1, s2, n);
+    let d1 = signed_sub_buf(s1, s2, n);
+    assert(d1 == s1 - s2);
+
+    // tzd_re = d1 + d1, |tzd_re| <= 4*r*r
+    assert(d1 + d1 <= 4 * r * r) by(nonlinear_arith)
+        requires d1 == s1 - s2, s1 - s2 <= 2 * r * r;
+    assert(d1 + d1 >= -(4 * r * r)) by(nonlinear_arith)
+        requires d1 == s1 - s2, s1 - s2 >= -(2 * r * r);
+    assert(d1 + d1 < p) by(nonlinear_arith)
+        requires d1 + d1 <= 4 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(d1 + d1 > -p) by(nonlinear_arith)
+        requires d1 + d1 >= -(4 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_add_buf_no_wrap(d1, d1, n);
+    let tzd_re = signed_add_buf(d1, d1, n);
+    assert(tzd_re == 2 * (s1 - s2));
+
+    // d2 = s3 + s4, |d2| <= 2*r*r
+    assert(s3 + s4 <= 2 * r * r) by(nonlinear_arith)
+        requires s3 == z_re * dim, s4 == z_im * dre,
+                 z_re * dim <= r * r, z_im * dre <= r * r;
+    assert(s3 + s4 >= -(2 * r * r)) by(nonlinear_arith)
+        requires s3 == z_re * dim, s4 == z_im * dre,
+                 z_re * dim >= -(r * r), z_im * dre >= -(r * r);
+    assert(s3 + s4 < p) by(nonlinear_arith)
+        requires s3 + s4 <= 2 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(s3 + s4 > -p) by(nonlinear_arith)
+        requires s3 + s4 >= -(2 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_add_buf_no_wrap(s3, s4, n);
+    let d2 = signed_add_buf(s3, s4, n);
+    assert(d2 == s3 + s4);
+
+    // tzd_im = d2 + d2, |tzd_im| <= 4*r*r
+    assert(d2 + d2 <= 4 * r * r) by(nonlinear_arith)
+        requires d2 == s3 + s4, s3 + s4 <= 2 * r * r;
+    assert(d2 + d2 >= -(4 * r * r)) by(nonlinear_arith)
+        requires d2 == s3 + s4, s3 + s4 >= -(2 * r * r);
+    assert(d2 + d2 < p) by(nonlinear_arith)
+        requires d2 + d2 <= 4 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(d2 + d2 > -p) by(nonlinear_arith)
+        requires d2 + d2 >= -(4 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_add_buf_no_wrap(d2, d2, n);
+    let tzd_im = signed_add_buf(d2, d2, n);
+    assert(tzd_im == 2 * (s3 + s4));
+
+    // ── Part B: δ² ──
+    // drs = dre * dre, |drs| <= r*r
+    assert(dre * dre <= r * r) by(nonlinear_arith)
+        requires -r <= dre, dre <= r;
+    assert(dre * dre >= 0) by(nonlinear_arith);
+    assert(dre * dre < p) by(nonlinear_arith)
+        requires dre * dre <= r * r, 12 * r * r + e < p, e >= 0;
+    assert(dre * dre > -p) by(nonlinear_arith)
+        requires dre * dre >= 0, p > 0;
+    lemma_signed_mul_buf_no_wrap(dre, dre, n);
+    let drs = signed_mul_buf(dre, dre, n, 0);
+    assert(drs == dre * dre);
+
+    // dis = dim * dim, |dis| <= r*r
+    assert(dim * dim <= r * r) by(nonlinear_arith)
+        requires -r <= dim, dim <= r;
+    assert(dim * dim >= 0) by(nonlinear_arith);
+    assert(dim * dim < p) by(nonlinear_arith)
+        requires dim * dim <= r * r, 12 * r * r + e < p, e >= 0;
+    assert(dim * dim > -p) by(nonlinear_arith)
+        requires dim * dim >= 0, p > 0;
+    lemma_signed_mul_buf_no_wrap(dim, dim, n);
+    let dis = signed_mul_buf(dim, dim, n, 0);
+    assert(dis == dim * dim);
+
+    // dri = dre + dim, |dri| <= 2*r
+    assert(dre + dim <= 2 * r) by(nonlinear_arith)
+        requires -r <= dre, dre <= r, -r <= dim, dim <= r;
+    assert(dre + dim >= -(2 * r)) by(nonlinear_arith)
+        requires -r <= dre, dre <= r, -r <= dim, dim <= r;
+    // |dre+dim| <= 2*r, but we need < p. From 12*r*r + e < p, r >= 0, e >= 0:
+    // 2*r could exceed p? No: if r >= 1, then 12*r*r >= 12*r >= 2*r, so 2*r < p.
+    // If r == 0, then dre+dim == 0 < p.
+    assert(dre + dim < p) by(nonlinear_arith)
+        requires dre + dim <= 2 * r, r >= 0, 12 * r * r + e < p, e >= 0;
+    assert(dre + dim > -p) by(nonlinear_arith)
+        requires dre + dim >= -(2 * r), r >= 0, 12 * r * r + e < p, e >= 0;
+    lemma_signed_add_buf_no_wrap(dre, dim, n);
+    let dri = signed_add_buf(dre, dim, n);
+    assert(dri == dre + dim);
+
+    // dri2 = dri * dri = (dre + dim)², |dri2| <= 4*r*r
+    assert(dri * dri <= 4 * r * r) by(nonlinear_arith)
+        requires dri == dre + dim, dre + dim <= 2 * r, dre + dim >= -(2 * r);
+    assert(dri * dri >= 0) by(nonlinear_arith);
+    assert(dri * dri < p) by(nonlinear_arith)
+        requires dri * dri <= 4 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(dri * dri > -p) by(nonlinear_arith)
+        requires dri * dri >= 0, p > 0;
+    lemma_signed_mul_buf_no_wrap(dri, dri, n);
+    let dri2 = signed_mul_buf(dri, dri, n, 0);
+    assert(dri2 == (dre + dim) * (dre + dim));
+
+    // dsq_re = drs - dis = dre² - dim², |dsq_re| <= 2*r*r
+    assert(drs - dis <= 2 * r * r) by(nonlinear_arith)
+        requires drs == dre * dre, dis == dim * dim,
+                 dre * dre <= r * r, dim * dim >= 0;
+    assert(drs - dis >= -(2 * r * r)) by(nonlinear_arith)
+        requires drs == dre * dre, dis == dim * dim,
+                 dre * dre >= 0, dim * dim <= r * r;
+    assert(drs - dis < p) by(nonlinear_arith)
+        requires drs - dis <= 2 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(drs - dis > -p) by(nonlinear_arith)
+        requires drs - dis >= -(2 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_sub_buf_no_wrap(drs, dis, n);
+    let dsq_re = signed_sub_buf(drs, dis, n);
+    assert(dsq_re == dre * dre - dim * dim);
+
+    // q1 = dri2 - drs = (dre+dim)² - dre², |q1| <= 5*r*r
+    assert(dri2 - drs <= 5 * r * r) by(nonlinear_arith)
+        requires dri2 == (dre + dim) * (dre + dim), drs == dre * dre,
+                 dri2 <= 4 * r * r, drs >= 0;
+    assert(dri2 - drs >= -(5 * r * r)) by(nonlinear_arith)
+        requires dri2 == (dre + dim) * (dre + dim), drs == dre * dre,
+                 dri2 >= 0, drs <= r * r;
+    assert(dri2 - drs < p) by(nonlinear_arith)
+        requires dri2 - drs <= 5 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(dri2 - drs > -p) by(nonlinear_arith)
+        requires dri2 - drs >= -(5 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_sub_buf_no_wrap(dri2, drs, n);
+    let q1 = signed_sub_buf(dri2, drs, n);
+    assert(q1 == (dre + dim) * (dre + dim) - dre * dre);
+
+    // dsq_im = q1 - dis = (dre+dim)² - dre² - dim² = 2*dre*dim, |dsq_im| <= 6*r*r
+    assert(q1 - dis <= 6 * r * r) by(nonlinear_arith)
+        requires q1 == (dre + dim) * (dre + dim) - dre * dre, dis == dim * dim,
+                 q1 <= 5 * r * r, dis >= 0;
+    assert(q1 - dis >= -(6 * r * r)) by(nonlinear_arith)
+        requires q1 == (dre + dim) * (dre + dim) - dre * dre, dis == dim * dim,
+                 q1 >= -(5 * r * r), dis <= r * r;
+    assert(q1 - dis < p) by(nonlinear_arith)
+        requires q1 - dis <= 6 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(q1 - dis > -p) by(nonlinear_arith)
+        requires q1 - dis >= -(6 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_sub_buf_no_wrap(q1, dis, n);
+    let dsq_im = signed_sub_buf(q1, dis, n);
+    assert(dsq_im == (dre + dim) * (dre + dim) - dre * dre - dim * dim);
+    // Algebraic simplification: (dre+dim)² - dre² - dim² == 2*dre*dim
+    assert(dsq_im == 2 * dre * dim) by(nonlinear_arith)
+        requires dsq_im == (dre + dim) * (dre + dim) - dre * dre - dim * dim;
+
+    // ── Part C: δ' = (2*Z*δ) + δ² + Δc ──
+    // p1 = tzd_re + dsq_re, |p1| <= 4*r*r + 2*r*r = 6*r*r
+    assert(tzd_re + dsq_re <= 6 * r * r) by(nonlinear_arith)
+        requires tzd_re == 2 * (s1 - s2), s1 - s2 <= 2 * r * r,
+                 dsq_re == dre * dre - dim * dim, dre * dre - dim * dim <= 2 * r * r;
+    assert(tzd_re + dsq_re >= -(6 * r * r)) by(nonlinear_arith)
+        requires tzd_re == 2 * (s1 - s2), s1 - s2 >= -(2 * r * r),
+                 dsq_re == dre * dre - dim * dim, dre * dre - dim * dim >= -(2 * r * r);
+    assert(tzd_re + dsq_re < p) by(nonlinear_arith)
+        requires tzd_re + dsq_re <= 6 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(tzd_re + dsq_re > -p) by(nonlinear_arith)
+        requires tzd_re + dsq_re >= -(6 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_add_buf_no_wrap(tzd_re, dsq_re, n);
+    let p1 = signed_add_buf(tzd_re, dsq_re, n);
+    assert(p1 == 2 * (s1 - s2) + (dre * dre - dim * dim));
+
+    // new_dre = p1 + dcre, |new_dre| <= 6*r*r + e
+    assert(p1 + dcre <= 6 * r * r + e) by(nonlinear_arith)
+        requires p1 <= 6 * r * r, dcre <= e;
+    assert(p1 + dcre >= -(6 * r * r) - e) by(nonlinear_arith)
+        requires p1 >= -(6 * r * r), dcre >= -e;
+    assert(p1 + dcre < p) by(nonlinear_arith)
+        requires p1 + dcre <= 6 * r * r + e, 12 * r * r + e < p;
+    assert(p1 + dcre > -p) by(nonlinear_arith)
+        requires p1 + dcre >= -(6 * r * r) - e, 12 * r * r + e < p;
+    lemma_signed_add_buf_no_wrap(p1, dcre, n);
+    let new_dre = signed_add_buf(p1, dcre, n);
+    assert(new_dre == 2 * (s1 - s2) + (dre * dre - dim * dim) + dcre);
+
+    // p2 = tzd_im + dsq_im, |p2| <= 4*r*r + 6*r*r = 10*r*r
+    assert(tzd_im + dsq_im <= 10 * r * r) by(nonlinear_arith)
+        requires tzd_im == 2 * (s3 + s4), s3 + s4 <= 2 * r * r,
+                 dsq_im == 2 * dre * dim, q1 - dis <= 6 * r * r,
+                 dsq_im == q1 - dis;
+    assert(tzd_im + dsq_im >= -(10 * r * r)) by(nonlinear_arith)
+        requires tzd_im == 2 * (s3 + s4), s3 + s4 >= -(2 * r * r),
+                 dsq_im == q1 - dis, q1 - dis >= -(6 * r * r);
+    assert(tzd_im + dsq_im < p) by(nonlinear_arith)
+        requires tzd_im + dsq_im <= 10 * r * r, 12 * r * r + e < p, e >= 0;
+    assert(tzd_im + dsq_im > -p) by(nonlinear_arith)
+        requires tzd_im + dsq_im >= -(10 * r * r), 12 * r * r + e < p, e >= 0;
+    lemma_signed_add_buf_no_wrap(tzd_im, dsq_im, n);
+    let p2 = signed_add_buf(tzd_im, dsq_im, n);
+    assert(p2 == 2 * (s3 + s4) + 2 * dre * dim);
+
+    // new_dim = p2 + dcim
+    assert(p2 + dcim <= 10 * r * r + e) by(nonlinear_arith)
+        requires p2 <= 10 * r * r, dcim <= e;
+    assert(p2 + dcim >= -(10 * r * r) - e) by(nonlinear_arith)
+        requires p2 >= -(10 * r * r), dcim >= -e;
+    assert(p2 + dcim < p) by(nonlinear_arith)
+        requires p2 + dcim <= 10 * r * r + e, 12 * r * r + e < p;
+    assert(p2 + dcim > -p) by(nonlinear_arith)
+        requires p2 + dcim >= -(10 * r * r) - e, 12 * r * r + e < p;
+    lemma_signed_add_buf_no_wrap(p2, dcim, n);
+    let new_dim = signed_add_buf(p2, dcim, n);
+    assert(new_dim == 2 * (s3 + s4) + 2 * dre * dim + dcim);
+
+    // ── Final spec equality ──
+    // spec_pert_step's real part: 2*z_re*dre - 2*z_im*dim + dre*dre - dim*dim + dcre
+    // new_dre: 2*(s1 - s2) + (dre*dre - dim*dim) + dcre
+    //        = 2*(z_re*dre - z_im*dim) + dre*dre - dim*dim + dcre
+    //        = 2*z_re*dre - 2*z_im*dim + dre*dre - dim*dim + dcre  ✓
+    assert(new_dre == 2 * z_re * dre - 2 * z_im * dim + dre * dre - dim * dim + dcre)
+        by(nonlinear_arith)
+        requires new_dre == 2 * (s1 - s2) + (dre * dre - dim * dim) + dcre,
+                 s1 == z_re * dre, s2 == z_im * dim;
+
+    // spec_pert_step's imag part: 2*z_re*dim + 2*z_im*dre + 2*dre*dim + dcim
+    // new_dim: 2*(s3 + s4) + 2*dre*dim + dcim
+    //        = 2*(z_re*dim + z_im*dre) + 2*dre*dim + dcim
+    //        = 2*z_re*dim + 2*z_im*dre + 2*dre*dim + dcim  ✓
+    assert(new_dim == 2 * z_re * dim + 2 * z_im * dre + 2 * dre * dim + dcim)
+        by(nonlinear_arith)
+        requires new_dim == 2 * (s3 + s4) + 2 * dre * dim + dcim,
+                 s3 == z_re * dim, s4 == z_im * dre;
 }
 
 } // verus!
