@@ -836,6 +836,175 @@ fn perturbation_iteration_step(
     (new_dr_s, new_di_s)
 }
 
+/// One iteration of the reference orbit: Z_{k+1} = Z_k² + c_ref.
+///
+/// Extracted from the thread-0 reference-orbit loop in
+/// `mandelbrot_perturbation` (Task #4 Phase B Stage 1) to isolate the
+/// 9-op Karatsuba squaring + c-add sequence into a focused Z3 context,
+/// mirroring the Stage A extraction for the perturbation helper.
+///
+/// Writes the new orbit point's real and imaginary bytes to
+/// `wg_mem[zn..zn+n]` and `wg_mem[zn+n+1..zn+2n+1]`, respectively.
+/// Returns the signs `(new_re_s, new_im_s)` which the caller stores at
+/// `wg_mem[zn+n]` and `wg_mem[zn+2n+1]`.
+///
+/// Stage 1 provides only structural postconditions (size preservation,
+/// sign validity, valid_limbs on the new slot). A later Stage 2 could
+/// add a value-equation postcondition tying the output to
+/// `ref_step_buf_int` on the input Z_k / c_ref values.
+#[verifier::rlimit(100)]
+fn ref_orbit_iteration_step(
+    wg_mem: &mut Vec<u32>,
+    zk_re: u32, zk_im: u32,
+    zk_re_s: u32, zk_im_s: u32,
+    ref_c_base: u32,
+    ref_c_re_s: u32, ref_c_im_s: u32,
+    t0_re2: u32, t0_im2: u32, t0_rpi: u32, t0_sum2: u32,
+    t0_diff: u32, t0_prod: u32,
+    t0_stmp1: u32, t0_stmp2: u32, t0_stmp3: u32,
+    zn: u32,
+    ref_a: &mut Vec<u32>, ref_b: &mut Vec<u32>,
+    n: u32, frac_limbs: u32,
+) -> (out: (u32, u32))
+    requires
+        n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+        frac_limbs <= n, frac_limbs + n <= 2 * n,
+        old(wg_mem)@.len() >= 8192,
+        old(ref_a)@.len() == n as int,
+        old(ref_b)@.len() == n as int,
+        // Sign validity
+        zk_re_s <= 1u32, zk_im_s <= 1u32,
+        ref_c_re_s <= 1u32, ref_c_im_s <= 1u32,
+        // Input region bounds
+        (zk_re as int) + (n as int) <= old(wg_mem)@.len(),
+        (zk_im as int) + (n as int) <= old(wg_mem)@.len(),
+        (ref_c_base as int) + (n as int) <= old(wg_mem)@.len(),
+        (ref_c_base as int) + (n as int) + 1 + (n as int) <= old(wg_mem)@.len(),
+        zk_re + n < u32_max(),
+        zk_im + n < u32_max(),
+        ref_c_base + n + 1u32 + n < u32_max(),
+        // Temp region offset relationships
+        t0_im2 as int == t0_re2 as int + n as int,
+        t0_rpi as int == t0_re2 as int + 2 * n as int,
+        t0_sum2 as int == t0_re2 as int + 3 * n as int,
+        t0_diff as int == t0_re2 as int + 4 * n as int,
+        t0_prod as int == t0_re2 as int + 5 * n as int,
+        t0_stmp1 as int == t0_re2 as int + 7 * n as int,
+        t0_stmp2 as int == t0_re2 as int + 8 * n as int,
+        t0_stmp3 as int == t0_re2 as int + 9 * n as int,
+        // Temp region upper bound (after t0_stmp3 is n bytes of space)
+        t0_stmp3 as int + n as int <= old(wg_mem)@.len(),
+        t0_re2 + 10u32 * n < 8192u32,
+        // Non-overlap: the new orbit slot zn is below t0_re2
+        (zn as int) + 2 * (n as int) + 1 < t0_re2 as int,
+        zn + 2u32 * n + 1u32 < u32_max(),
+        // The new orbit slot is outside the temp region (zn + 2n+2 ≤ t0_re2)
+        (zn as int) + 2 * (n as int) + 2 <= t0_re2 as int,
+        // zk is outside the temp region too (zk read, not overwritten)
+        (zk_re as int) + (n as int) <= t0_re2 as int,
+        (zk_im as int) + (n as int) <= t0_re2 as int,
+        (ref_c_base as int) + 2 * (n as int) + 2 <= t0_re2 as int,
+        // Valid limbs on Z_k and c_ref regions
+        valid_limbs(old(wg_mem)@.subrange(zk_re as int, zk_re as int + n as int)),
+        valid_limbs(old(wg_mem)@.subrange(zk_im as int, zk_im as int + n as int)),
+        valid_limbs(old(wg_mem)@.subrange(ref_c_base as int, ref_c_base as int + n as int)),
+        valid_limbs(old(wg_mem)@.subrange(
+            ref_c_base as int + n as int + 1,
+            ref_c_base as int + n as int + 1 + n as int)),
+    ensures
+        wg_mem@.len() == old(wg_mem)@.len(),
+        ref_a@.len() == n as int,
+        ref_b@.len() == n as int,
+        out.0 == 0u32 || out.0 == 1u32,
+        out.1 == 0u32 || out.1 == 1u32,
+        // Valid limbs on new orbit slots.
+        valid_limbs(wg_mem@.subrange(zn as int, zn as int + n as int)),
+        valid_limbs(wg_mem@.subrange(
+            zn as int + n as int + 1,
+            zn as int + 2 * n as int + 1)),
+{
+    // Copy Z_k re from wg_mem to ref_a (avoids borrow aliasing)
+    copy_limbs(wg_mem, zk_re, ref_a, n);
+    let re2_s = signed_mul_to_buf(
+        &**ref_a, &zk_re_s, &**ref_a, &zk_re_s,
+        wg_mem, t0_re2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+
+    copy_limbs(wg_mem, zk_im, ref_a, n);
+    let im2_s = signed_mul_to_buf(
+        &**ref_a, &zk_im_s, &**ref_a, &zk_im_s,
+        wg_mem, t0_im2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+
+    // re + im
+    copy_limbs(wg_mem, zk_re, ref_a, n);
+    copy_limbs(wg_mem, zk_im, ref_b, n);
+    let rpi_s = signed_add_to_buf(
+        &**ref_a, &zk_re_s, &**ref_b, &zk_im_s,
+        wg_mem, t0_rpi as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    // (re+im)^2
+    copy_limbs(wg_mem, t0_rpi, ref_a, n);
+    let sum2_s = signed_mul_to_buf(
+        &**ref_a, &rpi_s, &**ref_a, &rpi_s,
+        wg_mem, t0_sum2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+
+    // new_re = re^2 - im^2 + c_re
+    copy_limbs(wg_mem, t0_re2, ref_a, n);
+    copy_limbs(wg_mem, t0_im2, ref_b, n);
+    let diff_s = signed_sub_to_buf(
+        &**ref_a, &re2_s, &**ref_b, &im2_s,
+        wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    copy_limbs(wg_mem, t0_diff, ref_a, n);
+    copy_limbs(wg_mem, ref_c_base, ref_b, n);
+    let new_re_s = signed_add_to_buf(
+        &**ref_a, &diff_s, &**ref_b, &ref_c_re_s,
+        wg_mem, zn as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    // new_im = (re+im)^2 - re^2 - im^2 + c_im
+    copy_limbs(wg_mem, t0_sum2, ref_a, n);
+    copy_limbs(wg_mem, t0_re2, ref_b, n);
+    let t1_s = signed_sub_to_buf(
+        &**ref_a, &sum2_s, &**ref_b, &re2_s,
+        wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    copy_limbs(wg_mem, t0_diff, ref_a, n);
+    copy_limbs(wg_mem, t0_im2, ref_b, n);
+    let t2_s = signed_sub_to_buf(
+        &**ref_a, &t1_s, &**ref_b, &im2_s,
+        wg_mem, t0_stmp3 as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    copy_limbs(wg_mem, t0_stmp3, ref_a, n);
+    copy_limbs(wg_mem, (ref_c_base + n + 1u32), ref_b, n);
+    let new_im_s = signed_add_to_buf(
+        &**ref_a, &t2_s, &**ref_b, &ref_c_im_s,
+        wg_mem, (zn + n + 1u32) as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    // Convert the per-index forall postconditions of signed_add_to_buf
+    // into the valid_limbs predicate on the new orbit slots.
+    proof {
+        let new_re_seq = wg_mem@.subrange(zn as int, zn as int + n as int);
+        let new_im_seq = wg_mem@.subrange(
+            zn as int + n as int + 1,
+            zn as int + 2 * n as int + 1);
+        assert(valid_limbs(new_re_seq)) by {
+            assert forall |k: int| 0 <= k < new_re_seq.len()
+                implies 0 <= (#[trigger] new_re_seq[k]).sem()
+                    && new_re_seq[k].sem() < LIMB_BASE() by {
+                assert(new_re_seq[k] == wg_mem@[zn as int + k]);
+            }
+        }
+        assert(valid_limbs(new_im_seq)) by {
+            assert forall |k: int| 0 <= k < new_im_seq.len()
+                implies 0 <= (#[trigger] new_im_seq[k]).sem()
+                    && new_im_seq[k].sem() < LIMB_BASE() by {
+                assert(new_im_seq[k] == wg_mem@[(zn as int + n as int + 1) + k]);
+            }
+        }
+    }
+
+    (new_re_s, new_im_s)
+}
+
 // #[gpu_kernel(workgroup_size(16, 16, 1))]
 // rlimit bump rationale: the strengthened *_to_buf postconditions (#77) add
 // value-equation facts to the Z3 context for every call inside the reference
@@ -1121,6 +1290,7 @@ fn mandelbrot_perturbation(
             glitch_count_addr < 8192u32,
             best_ref_addr < 8192u32,
             ref_c_base + z_stride < 8192u32,
+            ref_c_base as int == ((max_iters as int) + 1) * (z_stride as int),
             ref_escape_addr < 8192u32,
             t0_re2 + n < 8192u32,
             t0_im2 + n < 8192u32,
@@ -1236,6 +1406,8 @@ fn mandelbrot_perturbation(
                     ref_a@.len() == n as int, ref_b@.len() == n as int,
                     frac_limbs <= n, frac_limbs + n <= 2 * n,
                     ref_c_base + z_stride < 8192u32,
+                    // Value of ref_c_base (carried from outer scope)
+                    ref_c_base as int == ((max_iters as int) + 1) * (z_stride as int),
                     ref_escaped <= max_iters,
                     params@.len() as int >= 5 + (n as int),
                     ref_c_re_s <= 1u32, ref_c_im_s <= 1u32,
@@ -1284,30 +1456,6 @@ fn mandelbrot_perturbation(
                     ref_escaped = iter;
                 } else {
 
-                // Copy Z_k re from wg_mem to ref_a (avoids borrow aliasing)
-                copy_limbs(wg_mem, zk_re, &mut ref_a, n);
-                let re2_s = signed_mul_to_buf(
-                    &ref_a, &zk_re_s, &ref_a, &zk_re_s,
-                    wg_mem, t0_re2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
-
-                copy_limbs(wg_mem, zk_im, &mut ref_a, n);
-                let im2_s = signed_mul_to_buf(
-                    &ref_a, &zk_im_s, &ref_a, &zk_im_s,
-                    wg_mem, t0_im2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
-
-                // re + im
-                copy_limbs(wg_mem, zk_re, &mut ref_a, n);
-                copy_limbs(wg_mem, zk_im, &mut ref_b, n);
-                let rpi_s = signed_add_to_buf(
-                    &ref_a, &zk_re_s, &ref_b, &zk_im_s,
-                    wg_mem, t0_rpi as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-                // (re+im)^2
-                copy_limbs(wg_mem, t0_rpi, &mut ref_a, n);
-                let sum2_s = signed_mul_to_buf(
-                    &ref_a, &rpi_s, &ref_a, &rpi_s,
-                    wg_mem, t0_sum2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
-
                 let zn = orbit_base + (iter + 1u32) * z_stride;
                 // PROVED: orbit write correspondence.
                 // Z_{iter+1} is written to wg_mem at offset (iter+1)*z_stride.
@@ -1331,38 +1479,116 @@ fn mandelbrot_perturbation(
                     assert(zn as int + 2 * (n as int) + 1 < (t0_re2 as int));
                 }
 
-                // new_re = re^2 - im^2 + c_re
-                copy_limbs(wg_mem, t0_re2, &mut ref_a, n);
-                copy_limbs(wg_mem, t0_im2, &mut ref_b, n);
-                let diff_s = signed_sub_to_buf(
-                    &ref_a, &re2_s, &ref_b, &im2_s,
-                    wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+                // ── Z_{k+1} = Z_k² + c_ref ──
+                // Extracted to ref_orbit_iteration_step (Task #4 Phase B Stage 1).
+                proof {
+                    // Establish the helper's precondition bounds.
+                    // zk = iter * z_stride, and iter < max_iters, so
+                    //   zk + n < iter*z_stride + z_stride == (iter+1)*z_stride
+                    //         <= max_iters*z_stride < (max_iters+2)*z_stride == t0_re2
+                    assert(zk as int == (iter as int) * (z_stride as int));
+                    assert((iter as int) * (z_stride as int) + (z_stride as int)
+                            == ((iter as int) + 1) * (z_stride as int)) by(nonlinear_arith);
+                    assert(((iter as int) + 1) * (z_stride as int)
+                            <= (max_iters as int) * (z_stride as int)) by(nonlinear_arith)
+                        requires (iter as int) + 1 <= max_iters as int, z_stride as int >= 0;
+                    assert((max_iters as int) * (z_stride as int)
+                            < ((max_iters as int) + 2) * (z_stride as int)) by(nonlinear_arith)
+                        requires z_stride as int >= 4;
+                    assert(zk as int + (n as int) < t0_re2 as int);
+                    // zk_re == zk and zk_im == zk + n + 1
+                    assert(zk_re == zk);
+                    assert(zk_im == zk + n + 1u32);
+                    assert((zk_re as int) + (n as int) <= t0_re2 as int);
+                    assert((zk_im as int) + (n as int)
+                            == zk as int + 2 * (n as int) + 1);
+                    assert((zk as int) + (z_stride as int) == zk as int + 2 * (n as int) + 2);
+                    assert((zk_im as int) + (n as int) < t0_re2 as int);
+                    assert((zk_im as int) + (n as int) <= t0_re2 as int);
 
-                copy_limbs(wg_mem, t0_diff, &mut ref_a, n);
-                copy_limbs(wg_mem, ref_c_base, &mut ref_b, n);
-                let new_re_s = signed_add_to_buf(
-                    &ref_a, &diff_s, &ref_b, &ref_c_re_s,
-                    wg_mem, zn as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+                    // zn + 2n+2 ≤ t0_re2 (from above: zn + z_stride < t0_re2)
+                    // we already showed zn + z_stride < t0_re2 in the outer proof.
+                    assert((zn as int) + 2 * (n as int) + 2 <= t0_re2 as int);
+
+                    // ref_c_base region bounds: ref_c_base + 2n+2 ≤ t0_re2
+                    // Follows from ref_c_base == (max_iters+1)*z_stride and
+                    //                t0_re2 == (max_iters+2)*z_stride.
+                    assert(ref_c_base as int == ((max_iters as int) + 1) * (z_stride as int));
+                    assert(((max_iters as int) + 1) * (z_stride as int) + (z_stride as int)
+                            == ((max_iters as int) + 2) * (z_stride as int)) by(nonlinear_arith);
+                    assert((ref_c_base as int) + (z_stride as int) == t0_re2 as int);
+                    assert(z_stride as int == 2 * (n as int) + 2);
+                    assert((ref_c_base as int) + 2 * (n as int) + 2 == t0_re2 as int);
+                    assert((ref_c_base as int) + 2 * (n as int) + 2 <= t0_re2 as int);
+
+                    // t0_re2 + 10n < 8192 (from existing invariants):
+                    // t0_stmp3 == t0_re2 + 9n, t0_stmp3 + n = t0_re2 + 10n = ref_escape_addr < 8192
+                    assert(t0_re2 + 10u32 * n < 8192u32);
+                    assert(t0_stmp3 as int + n as int <= wg_mem@.len());
+                    assert(zk_re + n < u32_max());
+                    assert(zk_im + n < u32_max());
+                    assert(ref_c_base + n + 1u32 + n < u32_max());
+                    assert(zn + 2u32 * n + 1u32 < u32_max());
+
+                    // Valid limbs on Z_k slots — these were written by previous
+                    // iterations or the initial zeroing loop. The kernel doesn't
+                    // yet carry this as a per-slot invariant; for now establish
+                    // it pointwise from wg_mem's values.
+                    assert(valid_limbs(wg_mem@.subrange(zk_re as int, zk_re as int + n as int))) by {
+                        assert forall |k: int| 0 <= k < (n as int)
+                            implies 0 <= (#[trigger] wg_mem@.subrange(zk_re as int, zk_re as int + n as int)[k]).sem()
+                                && wg_mem@.subrange(zk_re as int, zk_re as int + n as int)[k].sem() < LIMB_BASE() by {
+                            let s = wg_mem@.subrange(zk_re as int, zk_re as int + n as int);
+                            assert(s[k] == wg_mem@[zk_re as int + k]);
+                        }
+                    }
+                    assert(valid_limbs(wg_mem@.subrange(zk_im as int, zk_im as int + n as int))) by {
+                        assert forall |k: int| 0 <= k < (n as int)
+                            implies 0 <= (#[trigger] wg_mem@.subrange(zk_im as int, zk_im as int + n as int)[k]).sem()
+                                && wg_mem@.subrange(zk_im as int, zk_im as int + n as int)[k].sem() < LIMB_BASE() by {
+                            let s = wg_mem@.subrange(zk_im as int, zk_im as int + n as int);
+                            assert(s[k] == wg_mem@[zk_im as int + k]);
+                        }
+                    }
+                    assert(valid_limbs(wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int))) by {
+                        assert forall |k: int| 0 <= k < (n as int)
+                            implies 0 <= (#[trigger] wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int)[k]).sem()
+                                && wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int)[k].sem() < LIMB_BASE() by {
+                            let s = wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int);
+                            assert(s[k] == wg_mem@[ref_c_base as int + k]);
+                        }
+                    }
+                    assert(valid_limbs(wg_mem@.subrange(
+                        ref_c_base as int + n as int + 1,
+                        ref_c_base as int + n as int + 1 + n as int))) by {
+                        assert forall |k: int| 0 <= k < (n as int)
+                            implies 0 <= (#[trigger] wg_mem@.subrange(
+                                    ref_c_base as int + n as int + 1,
+                                    ref_c_base as int + n as int + 1 + n as int)[k]).sem()
+                                && wg_mem@.subrange(
+                                    ref_c_base as int + n as int + 1,
+                                    ref_c_base as int + n as int + 1 + n as int)[k].sem() < LIMB_BASE() by {
+                            let s = wg_mem@.subrange(
+                                ref_c_base as int + n as int + 1,
+                                ref_c_base as int + n as int + 1 + n as int);
+                            assert(s[k] == wg_mem@[ref_c_base as int + n as int + 1 + k]);
+                        }
+                    }
+                }
+                let (new_re_s, new_im_s) = ref_orbit_iteration_step(
+                    wg_mem,
+                    zk_re, zk_im,
+                    zk_re_s, zk_im_s,
+                    ref_c_base,
+                    ref_c_re_s, ref_c_im_s,
+                    t0_re2, t0_im2, t0_rpi, t0_sum2,
+                    t0_diff, t0_prod,
+                    t0_stmp1, t0_stmp2, t0_stmp3,
+                    zn,
+                    &mut ref_a, &mut ref_b,
+                    n, frac_limbs,
+                );
                 vset(wg_mem, zn + n, new_re_s);
-
-                // new_im = (re+im)^2 - re^2 - im^2 + c_im
-                copy_limbs(wg_mem, t0_sum2, &mut ref_a, n);
-                copy_limbs(wg_mem, t0_re2, &mut ref_b, n);
-                let t1_s = signed_sub_to_buf(
-                    &ref_a, &sum2_s, &ref_b, &re2_s,
-                    wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-                copy_limbs(wg_mem, t0_diff, &mut ref_a, n);
-                copy_limbs(wg_mem, t0_im2, &mut ref_b, n);
-                let t2_s = signed_sub_to_buf(
-                    &ref_a, &t1_s, &ref_b, &im2_s,
-                    wg_mem, t0_stmp3 as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-                copy_limbs(wg_mem, t0_stmp3, &mut ref_a, n);
-                copy_limbs(wg_mem, (ref_c_base + n + 1u32), &mut ref_b, n);
-                let new_im_s = signed_add_to_buf(
-                    &ref_a, &t2_s, &ref_b, &ref_c_im_s,
-                    wg_mem, (zn + n + 1u32) as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
                 vset(wg_mem, zn + 2u32 * n + 1u32, new_im_s);
 
                 // Check if reference escaped: |Z_{k+1}|² > 4
