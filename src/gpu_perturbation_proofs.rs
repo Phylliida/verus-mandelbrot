@@ -931,6 +931,34 @@ pub proof fn lemma_pert_step_buf_matches_spec(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Utility: pointwise `sem() < LIMB_BASE` ⇒ `valid_limbs` on subrange.
+// ═══════════════════════════════════════════════════════════════
+
+/// Convert a pointwise `forall j: 0 <= j < n ==> s[start+j].sem() < LIMB_BASE`
+/// hypothesis (which buffer ops' postconditions provide) into the
+/// `valid_limbs(s.subrange(start, start+n))` predicate used by the bridge
+/// lemmas. One-liner replacement for the inline 7-line assert-forall.
+pub proof fn lemma_pointwise_to_valid_limbs<T: LimbOps>(
+    s: Seq<T>, start: int, n: nat,
+)
+    requires
+        0 <= start,
+        start + n as int <= s.len(),
+        forall |j: int| 0 <= j < n as int
+            ==> 0 <= (#[trigger] s[start + j]).sem()
+                && s[start + j].sem() < LIMB_BASE(),
+    ensures
+        valid_limbs(s.subrange(start, start + n as int)),
+{
+    let sub = s.subrange(start, start + n as int);
+    assert forall |k: int| 0 <= k < sub.len()
+        implies 0 <= (#[trigger] sub[k]).sem() && sub[k].sem() < LIMB_BASE()
+    by {
+        assert(sub[k] == s[start + k]);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Reference-step buffer spec: Z_{k+1} = Z_k² + c_ref (Mandelbrot)
 //
 // Mirrors the 9-op sequence the kernel's reference-orbit loop uses
@@ -2374,6 +2402,218 @@ pub proof fn lemma_kernel_end_to_end_under_bounds(
 
     // (b): Stage F's wrapper.
     lemma_spec_orbit_end_to_end_correct(z0, c_ref, d0, dc, n_steps);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Reference orbit 9-op chain lemma (Phase B Stage 2 support)
+//
+// Single focused proof fn that chains through the 9 bridge lemmas for
+// the reference-orbit iteration body. Called from the ref_orbit_iteration_step
+// helper in gpu_perturbation_entry.rs, which provides all the needed facts
+// as preconditions. Having this in a separate proof fn keeps the kernel
+// helper's Z3 context clean (rlimit tips: "Extract expensive blocks into
+// helpers — Z3 context per function").
+// ═══════════════════════════════════════════════════════════════
+
+/// Chain the 9 bridge lemmas for a complete reference-orbit step.
+///
+/// Given all the relevant subrange snapshots and their associated sign
+/// values (representing the results of the 9 buffer ops), plus the
+/// valid_limbs and vec_val-equation preconditions that each buffer op
+/// provides, prove that the final output slots' signed integer values
+/// equal `ref_step_buf_int` applied to the input Z_k and c_ref.
+pub proof fn lemma_ref_orbit_chain<T: LimbOps>(
+    // Input Z_k and c_ref subranges + signs
+    z_re_seq: Seq<T>, zk_re_s: int,
+    z_im_seq: Seq<T>, zk_im_s: int,
+    c_re_seq: Seq<T>, c_re_s: int,
+    c_im_seq: Seq<T>, c_im_s: int,
+    // Intermediate subranges + signs (after each op)
+    t0_re2_seq: Seq<T>, re2_s: int,
+    t0_im2_seq: Seq<T>, im2_s: int,
+    t0_rpi_seq: Seq<T>, rpi_s: int,
+    t0_sum2_seq: Seq<T>, sum2_s: int,
+    t0_diff_seq: Seq<T>, diff_s: int,
+    new_re_seq: Seq<T>, new_re_s: int,
+    t0_diff_seq2: Seq<T>, t1_s: int,
+    t0_stmp3_seq: Seq<T>, t2_s: int,
+    new_im_seq: Seq<T>, new_im_s: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n > 0,
+        // All subrange lengths
+        z_re_seq.len() == n, z_im_seq.len() == n,
+        c_re_seq.len() == n, c_im_seq.len() == n,
+        t0_re2_seq.len() == n, t0_im2_seq.len() == n,
+        t0_rpi_seq.len() == n, t0_sum2_seq.len() == n,
+        t0_diff_seq.len() == n, new_re_seq.len() == n,
+        t0_diff_seq2.len() == n, t0_stmp3_seq.len() == n,
+        new_im_seq.len() == n,
+        // All valid_limbs
+        valid_limbs(z_re_seq), valid_limbs(z_im_seq),
+        valid_limbs(c_re_seq), valid_limbs(c_im_seq),
+        valid_limbs(t0_re2_seq), valid_limbs(t0_im2_seq),
+        valid_limbs(t0_rpi_seq), valid_limbs(t0_sum2_seq),
+        valid_limbs(t0_diff_seq), valid_limbs(new_re_seq),
+        valid_limbs(t0_diff_seq2), valid_limbs(t0_stmp3_seq),
+        valid_limbs(new_im_seq),
+        // Sign validity
+        zk_re_s == 0 || zk_re_s == 1,
+        zk_im_s == 0 || zk_im_s == 1,
+        c_re_s == 0 || c_re_s == 1,
+        c_im_s == 0 || c_im_s == 1,
+        re2_s == 0 || re2_s == 1,
+        im2_s == 0 || im2_s == 1,
+        rpi_s == 0 || rpi_s == 1,
+        sum2_s == 0 || sum2_s == 1,
+        diff_s == 0 || diff_s == 1,
+        new_re_s == 0 || new_re_s == 1,
+        t1_s == 0 || t1_s == 1,
+        t2_s == 0 || t2_s == 1,
+        new_im_s == 0 || new_im_s == 1,
+        // Op 1: re² (signed_mul_to_buf value equation + sign-xor)
+        vec_val(t0_re2_seq) == (vec_val(z_re_seq) * vec_val(z_re_seq)
+            / limb_power(frac_limbs)) % limb_power(n),
+        (zk_re_s == zk_re_s) ==> re2_s == 0,
+        (zk_re_s != zk_re_s) ==> re2_s == 1,
+        // Op 2: im²
+        vec_val(t0_im2_seq) == (vec_val(z_im_seq) * vec_val(z_im_seq)
+            / limb_power(frac_limbs)) % limb_power(n),
+        (zk_im_s == zk_im_s) ==> im2_s == 0,
+        (zk_im_s != zk_im_s) ==> im2_s == 1,
+        // Op 3: re + im (signed_add_to_buf disjunction)
+        ({
+            let va = vec_val(z_re_seq);
+            let vb = vec_val(z_im_seq);
+            let vo = vec_val(t0_rpi_seq);
+            let sa = if zk_re_s == 0 { va } else { -va };
+            let sb = if zk_im_s == 0 { vb } else { -vb };
+            let so = if rpi_s == 0 { vo } else { -vo };
+            let p = limb_power(n);
+            so == sa + sb
+                || (so == sa + sb - p && sa + sb >= p)
+                || (so == sa + sb + p && sa + sb <= -(p as int))
+        }),
+        // Op 4: (re+im)²
+        vec_val(t0_sum2_seq) == (vec_val(t0_rpi_seq) * vec_val(t0_rpi_seq)
+            / limb_power(frac_limbs)) % limb_power(n),
+        (rpi_s == rpi_s) ==> sum2_s == 0,
+        (rpi_s != rpi_s) ==> sum2_s == 1,
+        // Op 5: re² - im² (signed_sub_to_buf disjunction)
+        ({
+            let va = vec_val(t0_re2_seq);
+            let vb = vec_val(t0_im2_seq);
+            let vo = vec_val(t0_diff_seq);
+            let sa = if re2_s == 0 { va } else { -va };
+            let sb = if im2_s == 0 { vb } else { -vb };
+            let so = if diff_s == 0 { vo } else { -vo };
+            let p = limb_power(n);
+            so == sa - sb
+                || (so == sa - sb - p && sa - sb >= p)
+                || (so == sa - sb + p && sa - sb <= -(p as int))
+        }),
+        // Op 6: diff + c_re = new_re (signed_add_to_buf disjunction)
+        ({
+            let va = vec_val(t0_diff_seq);
+            let vb = vec_val(c_re_seq);
+            let vo = vec_val(new_re_seq);
+            let sa = if diff_s == 0 { va } else { -va };
+            let sb = if c_re_s == 0 { vb } else { -vb };
+            let so = if new_re_s == 0 { vo } else { -vo };
+            let p = limb_power(n);
+            so == sa + sb
+                || (so == sa + sb - p && sa + sb >= p)
+                || (so == sa + sb + p && sa + sb <= -(p as int))
+        }),
+        // Op 7: (re+im)² - re² (signed_sub_to_buf disjunction)
+        ({
+            let va = vec_val(t0_sum2_seq);
+            let vb = vec_val(t0_re2_seq);
+            let vo = vec_val(t0_diff_seq2);
+            let sa = if sum2_s == 0 { va } else { -va };
+            let sb = if re2_s == 0 { vb } else { -vb };
+            let so = if t1_s == 0 { vo } else { -vo };
+            let p = limb_power(n);
+            so == sa - sb
+                || (so == sa - sb - p && sa - sb >= p)
+                || (so == sa - sb + p && sa - sb <= -(p as int))
+        }),
+        // Op 8: t1 - im² (signed_sub_to_buf disjunction)
+        ({
+            let va = vec_val(t0_diff_seq2);
+            let vb = vec_val(t0_im2_seq);
+            let vo = vec_val(t0_stmp3_seq);
+            let sa = if t1_s == 0 { va } else { -va };
+            let sb = if im2_s == 0 { vb } else { -vb };
+            let so = if t2_s == 0 { vo } else { -vo };
+            let p = limb_power(n);
+            so == sa - sb
+                || (so == sa - sb - p && sa - sb >= p)
+                || (so == sa - sb + p && sa - sb <= -(p as int))
+        }),
+        // Op 9: t2 + c_im = new_im (signed_add_to_buf disjunction)
+        ({
+            let va = vec_val(t0_stmp3_seq);
+            let vb = vec_val(c_im_seq);
+            let vo = vec_val(new_im_seq);
+            let sa = if t2_s == 0 { va } else { -va };
+            let sb = if c_im_s == 0 { vb } else { -vb };
+            let so = if new_im_s == 0 { vo } else { -vo };
+            let p = limb_power(n);
+            so == sa + sb
+                || (so == sa + sb - p && sa + sb >= p)
+                || (so == sa + sb + p && sa + sb <= -(p as int))
+        }),
+    ensures
+        ({
+            let zk_re_int = signed_val_of(z_re_seq, zk_re_s);
+            let zk_im_int = signed_val_of(z_im_seq, zk_im_s);
+            let c_re_int = signed_val_of(c_re_seq, c_re_s);
+            let c_im_int = signed_val_of(c_im_seq, c_im_s);
+            let result = ref_step_buf_int(
+                zk_re_int, zk_im_int, c_re_int, c_im_int, n, frac_limbs);
+            signed_val_of(new_re_seq, new_re_s) == result.0
+                && signed_val_of(new_im_seq, new_im_s) == result.1
+        }),
+{
+    // Op 1: re² = signed_mul_buf(zk_re_int, zk_re_int)
+    lemma_signed_mul_postcond_to_buf::<T>(
+        z_re_seq, zk_re_s, z_re_seq, zk_re_s,
+        t0_re2_seq, re2_s, n, frac_limbs);
+    // Op 2: im² = signed_mul_buf(zk_im_int, zk_im_int)
+    lemma_signed_mul_postcond_to_buf::<T>(
+        z_im_seq, zk_im_s, z_im_seq, zk_im_s,
+        t0_im2_seq, im2_s, n, frac_limbs);
+    // Op 3: rpi = signed_add_buf(zk_re_int, zk_im_int)
+    lemma_disjunction_to_signed_add_buf::<T>(
+        z_re_seq, zk_re_s, z_im_seq, zk_im_s,
+        t0_rpi_seq, rpi_s, n);
+    // Op 4: sum2 = signed_mul_buf(rpi_int, rpi_int)
+    lemma_signed_mul_postcond_to_buf::<T>(
+        t0_rpi_seq, rpi_s, t0_rpi_seq, rpi_s,
+        t0_sum2_seq, sum2_s, n, frac_limbs);
+    // Op 5: diff = signed_sub_buf(re2_int, im2_int)
+    lemma_disjunction_to_signed_sub_buf::<T>(
+        t0_re2_seq, re2_s, t0_im2_seq, im2_s,
+        t0_diff_seq, diff_s, n);
+    // Op 6: new_re = signed_add_buf(diff_int, c_re_int)
+    lemma_disjunction_to_signed_add_buf::<T>(
+        t0_diff_seq, diff_s, c_re_seq, c_re_s,
+        new_re_seq, new_re_s, n);
+    // Op 7: t1 = signed_sub_buf(sum2_int, re2_int)
+    lemma_disjunction_to_signed_sub_buf::<T>(
+        t0_sum2_seq, sum2_s, t0_re2_seq, re2_s,
+        t0_diff_seq2, t1_s, n);
+    // Op 8: t2 = signed_sub_buf(t1_int, im2_int)
+    lemma_disjunction_to_signed_sub_buf::<T>(
+        t0_diff_seq2, t1_s, t0_im2_seq, im2_s,
+        t0_stmp3_seq, t2_s, n);
+    // Op 9: new_im = signed_add_buf(t2_int, c_im_int)
+    lemma_disjunction_to_signed_add_buf::<T>(
+        t0_stmp3_seq, t2_s, c_im_seq, c_im_s,
+        new_im_seq, new_im_s, n);
+    // ref_step_buf_int unfolds and matches each intermediate.
 }
 
 } // verus!
