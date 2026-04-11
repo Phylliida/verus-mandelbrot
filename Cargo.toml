@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-vstd = { path = "../verus/source/vstd" }
+vstd = { path = "../verus-dev/source/vstd" }
 verus-algebra = { path = "../verus-algebra" }
 verus-bigint = { path = "../verus-bigint" }
 verus-rational = { path = "../verus-rational" }
 verus-interval-arithmetic = { path = "../verus-interval-arithmetic" }
 verus-fixed-point = { path = "../verus-fixed-point" }
 verus-vulkan = { path = "../verus-vulkan", default-features = false }
-builtin = { package = "verus_builtin", path = "../verus/source/builtin" }
+builtin = { package = "verus_builtin", path = "../verus-dev/source/builtin" }
 
 # Windowing deps (for viewer binary)
 bytemuck = { version = "1", features = ["derive"], optional = true }
@@ -20,13 +20,23 @@ winit = { version = "0.30", optional = true }
 ash-window = { version = "0.13", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 
+# GPU profiler deps (for profile_shader binary)
+wgpu = { version = "22", optional = true }
+pollster = { version = "0.3", optional = true }
+
 [features]
 viewer = ["ash", "winit", "ash-window", "raw-window-handle", "bytemuck"]
+profiler = ["wgpu", "pollster"]
 
 [[bin]]
 name = "mandelbrot_viewer"
 path = "src/bin/mandelbrot_viewer.rs"
 required-features = ["viewer"]
+
+[[bin]]
+name = "profile_shader"
+path = "src/bin/profile_shader.rs"
+required-features = ["profiler"]
 
 [package.metadata.verus]
 verify = true

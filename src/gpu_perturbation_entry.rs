@@ -205,6 +205,139 @@ fn copy_limbs(src: &Vec<u32>, src_off: u32, dst: &mut Vec<u32>, n: u32)
     }
 }
 
+/// One iteration of the perturbation step: δ' = 2*Z*δ + δ² + Δc.
+///
+/// Extracted from the perturbation while loop in `mandelbrot_perturbation`
+/// (Task #81 Stage A) so that value-tracking ghost invariants (Task #78)
+/// can be added inside a focused Z3 context, instead of polluting the
+/// kernel function with ~30 buffer ops per iteration.
+///
+/// Stage A provides only structural postconditions (sizes, sign validity,
+/// `valid_limbs`). Stage B will add a value-equation postcondition.
+#[verifier::rlimit(50)]
+fn perturbation_iteration_step(
+    z_re_slice: &[u32], z_re_sign: u32,
+    z_im_slice: &[u32], z_im_sign: u32,
+    delta_re: &mut Vec<u32>, delta_re_sign_in: u32,
+    delta_im: &mut Vec<u32>, delta_im_sign_in: u32,
+    dc_re: &Vec<u32>, dc_re_sign: u32,
+    dc_im: &Vec<u32>, dc_im_sign: u32,
+    t1: &mut Vec<u32>, t2: &mut Vec<u32>,
+    t3: &mut Vec<u32>, t4: &mut Vec<u32>, t5: &mut Vec<u32>,
+    lprod: &mut Vec<u32>,
+    ls1: &mut Vec<u32>, ls2: &mut Vec<u32>,
+    n: u32, frac_limbs: u32,
+) -> (out: (u32, u32))
+    requires
+        n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+        frac_limbs <= n, frac_limbs + n <= 2 * n,
+        // Sizes
+        z_re_slice@.len() >= n as int,
+        z_im_slice@.len() >= n as int,
+        old(delta_re)@.len() == n as int,
+        old(delta_im)@.len() == n as int,
+        dc_re@.len() == n as int,
+        dc_im@.len() == n as int,
+        old(t1)@.len() == n as int,
+        old(t2)@.len() == n as int,
+        old(t3)@.len() == n as int,
+        old(t4)@.len() == n as int,
+        old(t5)@.len() == n as int,
+        old(lprod)@.len() == 2 * n as int,
+        old(ls1)@.len() == n as int,
+        old(ls2)@.len() == n as int,
+        // Sign validity
+        z_re_sign == 0u32 || z_re_sign == 1u32,
+        z_im_sign == 0u32 || z_im_sign == 1u32,
+        delta_re_sign_in == 0u32 || delta_re_sign_in == 1u32,
+        delta_im_sign_in == 0u32 || delta_im_sign_in == 1u32,
+        dc_re_sign == 0u32 || dc_re_sign == 1u32,
+        dc_im_sign == 0u32 || dc_im_sign == 1u32,
+        // Valid limbs on inputs
+        valid_limbs(z_re_slice@.subrange(0, n as int)),
+        valid_limbs(z_im_slice@.subrange(0, n as int)),
+        valid_limbs(old(delta_re)@),
+        valid_limbs(old(delta_im)@),
+        valid_limbs(dc_re@),
+        valid_limbs(dc_im@),
+    ensures
+        // Sizes preserved
+        delta_re@.len() == n as int,
+        delta_im@.len() == n as int,
+        t1@.len() == n as int,
+        t2@.len() == n as int,
+        t3@.len() == n as int,
+        t4@.len() == n as int,
+        t5@.len() == n as int,
+        lprod@.len() == 2 * n as int,
+        ls1@.len() == n as int,
+        ls2@.len() == n as int,
+        // Sign validity
+        out.0 == 0u32 || out.0 == 1u32,
+        out.1 == 0u32 || out.1 == 1u32,
+        // Valid limbs preserved on outputs
+        valid_limbs(delta_re@),
+        valid_limbs(delta_im@),
+{
+    let n_us = n as usize;
+    let frac_us = frac_limbs as usize;
+
+    // ── Part A: 2*Z*δ (4 multiplies) ──
+    let s1 = signed_mul_to(z_re_slice, &z_re_sign, &**delta_re, &delta_re_sign_in,
+                           t1, 0usize, lprod, 0usize, n_us, frac_us);
+    let s2 = signed_mul_to(z_im_slice, &z_im_sign, &**delta_im, &delta_im_sign_in,
+                           t2, 0usize, lprod, 0usize, n_us, frac_us);
+    let s3 = signed_mul_to(z_re_slice, &z_re_sign, &**delta_im, &delta_im_sign_in,
+                           t3, 0usize, lprod, 0usize, n_us, frac_us);
+    let s4 = signed_mul_to(z_im_slice, &z_im_sign, &**delta_re, &delta_re_sign_in,
+                           t4, 0usize, lprod, 0usize, n_us, frac_us);
+
+    // 2*Z*δ real = 2*(t1 - t2)
+    let d1_s = signed_sub_to(&**t1, &s1, &**t2, &s2, t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let tzd_re_s = signed_add_to(&**t5, &d1_s, &**t5, &d1_s, t1, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    // 2*Z*δ imag = 2*(t3 + t4)
+    let d2_s = signed_add_to(&**t3, &s3, &**t4, &s4, t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let tzd_im_s = signed_add_to(&**t5, &d2_s, &**t5, &d2_s, t2, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+
+    // ── Part B: δ² (3 multiplies, Karatsuba) ──
+    let drs_s = signed_mul_to(&**delta_re, &delta_re_sign_in, &**delta_re, &delta_re_sign_in,
+                              t3, 0usize, lprod, 0usize, n_us, frac_us);
+    let dis_s = signed_mul_to(&**delta_im, &delta_im_sign_in, &**delta_im, &delta_im_sign_in,
+                              t4, 0usize, lprod, 0usize, n_us, frac_us);
+    let dri_s = signed_add_to(&**delta_re, &delta_re_sign_in, &**delta_im, &delta_im_sign_in,
+                              t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let dri2_s = signed_mul_to(&**t5, &dri_s, &**t5, &dri_s,
+                               ls1, 0usize, lprod, 0usize, n_us, frac_us);
+
+    // δ² real = δ_re² - δ_im²
+    let dsq_re_s = signed_sub_to(&**t3, &drs_s, &**t4, &dis_s, t5, 0usize, delta_re, 0usize, delta_im, 0usize, n_us);
+    // δ² imag = (δ_re+δ_im)² - δ_re² - δ_im²
+    let q1_s = signed_sub_to(&**ls1, &dri2_s, &**t3, &drs_s, delta_re, 0usize, ls2, 0usize, delta_im, 0usize, n_us);
+    let dsq_im_s = signed_sub_to(&**delta_re, &q1_s, &**t4, &dis_s, t3, 0usize, ls2, 0usize, delta_im, 0usize, n_us);
+
+    // ── Part C: δ' = (2*Z*δ) + δ² + Δc ──
+    let p1_s = signed_add_to(&**t1, &tzd_re_s, &**t5, &dsq_re_s, t4, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let new_dr_s = signed_add_to(&**t4, &p1_s, dc_re, &dc_re_sign, delta_re, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+
+    let p2_s = signed_add_to(&**t2, &tzd_im_s, &**t3, &dsq_im_s, t4, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let new_di_s = signed_add_to(&**t4, &p2_s, dc_im, &dc_im_sign, delta_im, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+
+    proof {
+        assert(valid_limbs(delta_re@)) by {
+            assert forall |k: int| 0 <= k < delta_re@.len()
+                implies 0 <= (#[trigger] delta_re@[k]).sem()
+                    && delta_re@[k].sem() < LIMB_BASE() by { }
+        }
+        assert(valid_limbs(delta_im@)) by {
+            assert forall |k: int| 0 <= k < delta_im@.len()
+                implies 0 <= (#[trigger] delta_im@[k]).sem()
+                    && delta_im@[k].sem() < LIMB_BASE() by { }
+        }
+    }
+
+    (new_dr_s, new_di_s)
+}
+
 // #[gpu_kernel(workgroup_size(16, 16, 1))]
 // rlimit bump rationale: the strengthened *_to_buf postconditions (#77) add
 // value-equation facts to the Z3 context for every call inside the reference
@@ -915,39 +1048,22 @@ fn mandelbrot_perturbation(
                 }
 
                 // ── δ' = 2·Z_n·δ + δ² + Δc ──
-
-                // Part A: 2*Z*δ (4 multiplies)
-                let s1 = signed_mul_to(vslice(wg_mem, zn_re), &zn_re_s, &delta_re, &delta_re_sign, &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-                let s2 = signed_mul_to(vslice(wg_mem, zn_im), &zn_im_s, &delta_im, &delta_im_sign, &mut t2, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-                let s3 = signed_mul_to(vslice(wg_mem, zn_re), &zn_re_s, &delta_im, &delta_im_sign, &mut t3, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-                let s4 = signed_mul_to(vslice(wg_mem, zn_im), &zn_im_s, &delta_re, &delta_re_sign, &mut t4, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-
-                // 2*Z*δ real = 2*(t1 - t2)
-                let d1_s = signed_sub_to(&t1, &s1, &t2, &s2, &mut t5, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-                let tzd_re_s = signed_add_to(&t5, &d1_s, &t5, &d1_s, &mut t1, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-                // 2*Z*δ imag = 2*(t3 + t4)
-                let d2_s = signed_add_to(&t3, &s3, &t4, &s4, &mut t5, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-                let tzd_im_s = signed_add_to(&t5, &d2_s, &t5, &d2_s, &mut t2, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-
-                // Part B: δ² (3 multiplies, Karatsuba)
-                let drs_s = signed_mul_to(&delta_re, &delta_re_sign, &delta_re, &delta_re_sign, &mut t3, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-                let dis_s = signed_mul_to(&delta_im, &delta_im_sign, &delta_im, &delta_im_sign, &mut t4, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-                let dri_s = signed_add_to(&delta_re, &delta_re_sign, &delta_im, &delta_im_sign, &mut t5, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-                let dri2_s = signed_mul_to(&t5, &dri_s, &t5, &dri_s, &mut ls1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-
-                // δ² real = δ_re² - δ_im²
-                let dsq_re_s = signed_sub_to(&t3, &drs_s, &t4, &dis_s, &mut t5, 0usize, &mut delta_re, 0usize, &mut delta_im, 0usize, n as usize);
-                // δ² imag = (δ_re+δ_im)² - δ_re² - δ_im²
-                let q1_s = signed_sub_to(&ls1, &dri2_s, &t3, &drs_s, &mut delta_re, 0usize, &mut ls2, 0usize, &mut delta_im, 0usize, n as usize);
-                let dsq_im_s = signed_sub_to(&delta_re, &q1_s, &t4, &dis_s, &mut t3, 0usize, &mut ls2, 0usize, &mut delta_im, 0usize, n as usize);
-
-                // Part C: δ' = (2*Z*δ) + δ² + Δc
-                let p1_s = signed_add_to(&t1, &tzd_re_s, &t5, &dsq_re_s, &mut t4, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-                let new_dr_s = signed_add_to(&t4, &p1_s, &dc_re, &dc_re_sign, &mut delta_re, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+                // Extracted to perturbation_iteration_step (Task #81 Stage A).
+                let zn_re_slc = vslice(wg_mem, zn_re);
+                let zn_im_slc = vslice(wg_mem, zn_im);
+                let (new_dr_s, new_di_s) = perturbation_iteration_step(
+                    zn_re_slc, zn_re_s,
+                    zn_im_slc, zn_im_s,
+                    &mut delta_re, delta_re_sign,
+                    &mut delta_im, delta_im_sign,
+                    &dc_re, dc_re_sign,
+                    &dc_im, dc_im_sign,
+                    &mut t1, &mut t2, &mut t3, &mut t4, &mut t5,
+                    &mut lprod,
+                    &mut ls1, &mut ls2,
+                    n, frac_limbs,
+                );
                 delta_re_sign = new_dr_s;
-
-                let p2_s = signed_add_to(&t2, &tzd_im_s, &t3, &dsq_im_s, &mut t4, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-                let new_di_s = signed_add_to(&t4, &p2_s, &dc_im, &dc_im_sign, &mut delta_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
                 delta_im_sign = new_di_s;
 
                 // ── Glitch check: fixed-point overflow detection ──
