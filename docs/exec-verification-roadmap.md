@@ -275,8 +275,30 @@ analogous to their `*_to` counterparts. Build still passes for
 **Status**: Pending (`#78`)
 **Effort**: HIGH (the largest task — many buffers, many ops, non-trivial chain)
 **Unblocks**: Task 3
-**Depends on**: Task 1 (only for the reference orbit; the perturbation loop
-itself uses `*_to` which is already strengthened)
+**Depends on**: Task 1 (done) AND a NEW prerequisite — see below.
+
+**NEW PREREQUISITE (discovered while attempting #78)**: The perturbation
+while loop is too monolithic to add value-tracking invariants in-place.
+Even adding two simple ghost-int invariants (delta_re_int, delta_im_int)
+exceeded rlimit(200) on the kernel function. Before #78 can proceed:
+
+1. **Extract the perturbation iteration body into a helper function**
+   `perturbation_iteration_step(...)` with explicit requires/ensures.
+2. The helper takes ~12-15 buffer parameters (delta_re, delta_im, dc_re,
+   dc_im, t1-t5, lprod, ls1, ls2, plus z_re/z_im slices) and the n,
+   frac_limbs constants.
+3. The helper computes one iteration's worth of buffer ops and returns
+   the new sign values.
+4. The kernel calls the helper instead of inlining the math.
+
+Once extracted, the helper has its own clean Z3 context (~100 lines of
+buffer ops, no surrounding loop invariants). Adding the value-tracking
+ghost variables to the helper's ensures clause should be feasible without
+hitting rlimit. The kernel's loop invariant then carries just the ghost
+δ_spec across iterations and uses the helper's ensures to advance it.
+
+This extraction is significant work (~200-300 lines including all the
+parameter plumbing and the requires/ensures). Plan it as its own task.
 
 **What it is**:
 
