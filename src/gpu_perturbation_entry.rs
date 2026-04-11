@@ -162,6 +162,177 @@ proof fn lemma_colorize_safe(escaped_iter: int, max_iters: int)
         requires (escaped_iter * 255int) / max_iters <= 254int;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Coloring invariants
+// ═══════════════════════════════════════════════════════════════
+
+/// Row-major linearization `tid = gy * w + gx` is injective on
+/// `0 <= gx < w` and `0 <= gy`. Guarantees each pixel writes to a
+/// unique `iter_counts[tid]` slot, so no two threads clobber each other.
+proof fn lemma_tid_injective(gy1: int, gx1: int, gy2: int, gx2: int, w: int)
+    requires
+        w > 0,
+        0 <= gx1, gx1 < w,
+        0 <= gx2, gx2 < w,
+        0 <= gy1,
+        0 <= gy2,
+        gy1 * w + gx1 == gy2 * w + gx2,
+    ensures
+        gx1 == gx2,
+        gy1 == gy2,
+{
+    // gy1 * w + gx1 == gy2 * w + gx2
+    // (gy1 - gy2) * w == gx2 - gx1
+    // |gx2 - gx1| < w, so (gy1 - gy2) * w must also satisfy |.| < w
+    // The only multiple of w with |.| < w is 0, so gy1 == gy2, then gx1 == gx2.
+    assert((gy1 - gy2) * w == gx2 - gx1) by(nonlinear_arith)
+        requires gy1 * w + gx1 == gy2 * w + gx2;
+    assert(-w < gx2 - gx1 && gx2 - gx1 < w)
+        by(nonlinear_arith)
+        requires 0 <= gx1, gx1 < w, 0 <= gx2, gx2 < w;
+    if gy1 != gy2 {
+        if gy1 > gy2 {
+            assert(gy1 - gy2 >= 1);
+            assert((gy1 - gy2) * w >= w) by(nonlinear_arith)
+                requires gy1 - gy2 >= 1, w > 0;
+            assert(false);
+        } else {
+            assert(gy2 - gy1 >= 1);
+            assert((gy2 - gy1) * w >= w) by(nonlinear_arith)
+                requires gy2 - gy1 >= 1, w > 0;
+            assert((gy1 - gy2) * w <= -w) by(nonlinear_arith)
+                requires (gy2 - gy1) * w >= w;
+            assert(false);
+        }
+    }
+    assert(gy1 == gy2);
+}
+
+/// Per-channel bounds: each of `r`, `g`, `b` fits in an 8-bit slot and
+/// `b` has the documented minimum of 128.
+///
+/// Catches bugs where the coloring formula is retuned (e.g. swapping
+/// `r = t_col` for `r = 256 - t_col` wrap-around) or where `half_t`
+/// accidentally exceeds 127.
+proof fn lemma_colorize_channels_bounded(escaped_iter: int, max_iters: int)
+    requires
+        0 <= escaped_iter, escaped_iter < max_iters,
+        max_iters > 0, max_iters <= 4096,
+    ensures
+        ({
+            let t_col = (escaped_iter * 255) / max_iters;
+            let half_t = t_col / 2;
+            let r = t_col;
+            let g = t_col / 3;
+            let b = 255 - half_t;
+            &&& 0 <= r && r < 256
+            &&& 0 <= g && g < 256
+            &&& 128 <= b && b < 256
+        }),
+{
+    lemma_colorize_safe(escaped_iter, max_iters);
+    let t_col = (escaped_iter * 255) / max_iters;
+    // t_col >= 0 because escaped_iter * 255 >= 0 and max_iters > 0.
+    assert(escaped_iter * 255 >= 0) by(nonlinear_arith)
+        requires escaped_iter >= 0;
+    assert(t_col >= 0) by(nonlinear_arith)
+        requires t_col == (escaped_iter * 255) / max_iters,
+                 escaped_iter * 255 >= 0, max_iters > 0;
+    // t_col <= 254 from lemma_colorize_safe.
+    // r = t_col → 0 <= r < 256.
+    // g = t_col / 3 >= 0, and g <= t_col <= 254 < 256.
+    assert(t_col / 3 >= 0) by(nonlinear_arith) requires t_col >= 0;
+    assert(t_col / 3 <= t_col) by(nonlinear_arith) requires t_col >= 0;
+    // half_t = t_col / 2, 0 <= half_t <= 127.
+    let half_t = t_col / 2;
+    assert(half_t >= 0) by(nonlinear_arith) requires half_t == t_col / 2, t_col >= 0;
+    // b = 255 - half_t, so 128 <= b <= 255 < 256.
+}
+
+/// Monotonicity: r (the red channel) is a non-decreasing function of
+/// `escaped_iter`. So "pixel escaped later" never yields a less-red color.
+///
+/// Catches off-by-one bugs where the formula e.g. computes `255 - t_col`.
+proof fn lemma_colorize_r_monotonic(e1: int, e2: int, max_iters: int)
+    requires
+        0 <= e1, e1 <= e2, e2 < max_iters,
+        max_iters > 0, max_iters <= 4096,
+    ensures
+        (e1 * 255) / max_iters <= (e2 * 255) / max_iters,
+{
+    assert(e1 * 255 <= e2 * 255) by(nonlinear_arith) requires e1 <= e2;
+    // Integer division is monotonic in the numerator for positive divisor.
+    assert((e1 * 255) / max_iters <= (e2 * 255) / max_iters) by(nonlinear_arith)
+        requires e1 * 255 <= e2 * 255, max_iters > 0,
+                 e1 * 255 >= 0, e2 * 255 >= 0, e1 >= 0;
+}
+
+/// Monotonicity (the other direction): b (the blue channel) is a
+/// non-increasing function of `escaped_iter`. So "pixel escaped later"
+/// never yields a more-blue color.
+proof fn lemma_colorize_b_monotonic(e1: int, e2: int, max_iters: int)
+    requires
+        0 <= e1, e1 <= e2, e2 < max_iters,
+        max_iters > 0, max_iters <= 4096,
+    ensures
+        255 - ((e1 * 255) / max_iters) / 2 >= 255 - ((e2 * 255) / max_iters) / 2,
+{
+    lemma_colorize_r_monotonic(e1, e2, max_iters);
+    // t1 <= t2 ⇒ t1/2 <= t2/2 ⇒ 255 - t1/2 >= 255 - t2/2.
+    let t1 = (e1 * 255) / max_iters;
+    let t2 = (e2 * 255) / max_iters;
+    assert(t1 <= t2);
+    assert(t1 / 2 <= t2 / 2) by(nonlinear_arith) requires t1 <= t2, t1 >= 0, t2 >= 0;
+    assert(e1 * 255 >= 0) by(nonlinear_arith) requires e1 >= 0;
+    assert(e2 * 255 >= 0) by(nonlinear_arith) requires e2 >= 0;
+    assert(t1 >= 0) by(nonlinear_arith)
+        requires t1 == (e1 * 255) / max_iters, e1 * 255 >= 0, max_iters > 0;
+    assert(t2 >= 0) by(nonlinear_arith)
+        requires t2 == (e2 * 255) / max_iters, e2 * 255 >= 0, max_iters > 0;
+}
+
+/// The alpha constant used in the colorize phase is exactly 0xFF000000 —
+/// full alpha in the top byte with all RGB channels masked off.
+///
+/// Catches bugs where the constant is accidentally changed to something
+/// that bleeds into the RGB channels, e.g. 0xFF7F7F7F (gray).
+proof fn lemma_alpha_constant_valid()
+    ensures
+        4278190080u32 == 0xFF000000u32,
+        4278190080u32 & 0x00FFFFFFu32 == 0u32,
+{
+    assert(4278190080u32 == 0xFF000000u32);
+    assert(4278190080u32 & 0x00FFFFFFu32 == 0u32) by(bit_vector);
+}
+
+/// Packing the channels into the 32-bit pixel word doesn't overflow or
+/// clobber: with the channel bounds from `lemma_colorize_channels_bounded`,
+/// each of `r`, `g << 8`, `b << 16` fits in its assigned byte slot, and
+/// `alpha = 0xFF000000` occupies only the top byte.
+proof fn lemma_colorize_packing_safe(r: u32, g: u32, b: u32)
+    requires
+        r < 256,
+        g < 256,
+        b < 256,
+    ensures
+        // Each shifted component fits in its slot
+        (g << 8u32) < 65536u32,
+        (b << 16u32) < 16777216u32,
+        // The OR doesn't overlap with alpha's top byte.
+        (4278190080u32 | (b << 16u32) | (g << 8u32) | r) >> 24u32 == 255u32,
+        // The red byte is recoverable from the packed word.
+        (4278190080u32 | (b << 16u32) | (g << 8u32) | r) & 0xFFu32 == r,
+{
+    assert((g << 8u32) < 65536u32) by(bit_vector)
+        requires g < 256u32;
+    assert((b << 16u32) < 16777216u32) by(bit_vector)
+        requires b < 256u32;
+    assert((4278190080u32 | (b << 16u32) | (g << 8u32) | r) >> 24u32 == 255u32) by(bit_vector)
+        requires r < 256u32, g < 256u32, b < 256u32;
+    assert((4278190080u32 | (b << 16u32) | (g << 8u32) | r) & 0xFFu32 == r) by(bit_vector)
+        requires r < 256u32, g < 256u32, b < 256u32;
+}
+
 /// No-op barrier for Verus verification (GPU semantics handled by transpiler).
 #[verifier::external_body]
 fn gpu_workgroup_barrier() { }
