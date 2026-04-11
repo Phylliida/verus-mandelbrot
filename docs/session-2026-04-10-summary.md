@@ -414,15 +414,75 @@ Per the rlimit tips, the proof was extracted to a helper lemma to avoid
 pushing the perturbation while loop's Z3 context over its rlimit. The
 kernel call site only invokes the helper.
 
+## Buffer-to-buf Closure & Glitch Refinement (#77, #80)
+
+After completing the kernel robustness work (#74-#76), we attempted to
+close the remaining gap between the verified buffer operations and the
+kernel's actual perturbation theory implementation. Wrote a roadmap doc
+(`exec-verification-roadmap.md`) characterizing four follow-up tasks:
+- Task 1 (#77): Strengthen `*_to_buf` variants
+- Task 2 (#78): Add value invariants to perturbation while loop
+- Task 3 (#79): Bridge to `theorem_perturbation_n_steps`
+- Task 4 (#80): Refine glitch detection criterion
+
+### 15. Strengthen `*_to_buf` Variants (#77)
+
+Adds value-equation postconditions to the three single-buffer signed
+operations (`signed_add_to_buf`, `signed_sub_to_buf`, `signed_mul_to_buf`).
+Mirrors the work for `signed_add_to`/`signed_mul_to` but adapted for the
+single-buffer + offsets pattern with explicit non-overlap preconditions.
+
+The proofs reuse the helpers in `limb_ops_proofs.rs`
+(`lemma_signed_add_correct_seq`, `lemma_truncated_product_seq`).
+
+**rlimit consequence**: After #77, the kernel function `mandelbrot_perturbation`
+exceeded its default rlimit because the strengthened postconditions added
+facts to Z3's context for every call inside the reference orbit and
+perturbation while loops. Bumped to `rlimit(100)` as a stopgap. The proper
+fix is loop body extraction (Task #81 below).
+
+### 16. Refined Glitch Criterion (#80)
+
+Defines `is_perturbation_glitch` — the math criterion for when the
+perturbation linearization breaks down:
+
+> **Glitch** ⟺ `max(|δ_re|, |δ_im|) ≥ 2 * z_max`
+
+At this threshold, the `δ²` correction term equals the `2Zδ` linear
+term, so the `(Z+δ)² ≈ Z² + 2Zδ` linearization has completely broken down.
+
+`theorem_glitch_check_sound` proves that when the kernel's coarse
+buffer-level check fires (`vec_val(δ) >= 4*S` with `frac_limbs == n-1`),
+the math glitch criterion holds. The kernel marks pixels as glitched
+when the linearization actually broke — no false positives.
+
+Combined with #76 (limb-level completeness), the kernel's check is
+sound w.r.t. **both**:
+- the limb-level threshold (via #76)
+- the math criterion (via #80)
+
+### 17. Task 2 (#78) Discovery: Loop Body Extraction Prerequisite
+
+Attempted to add ghost value tracking (`delta_re_int`, `delta_im_int`) to
+the perturbation while loop. **Result**: even with `rlimit(200)`, the
+loop's Z3 context exceeded its budget when adding two simple invariants.
+
+**Conclusion**: Task #78 cannot be done in-place. The perturbation
+iteration body (~30 buffer ops, ~150 lines) must first be extracted into
+a focused helper function `perturbation_iteration_step`. The helper has
+its own clean Z3 context and could carry the ghost invariants without
+polluting the kernel function.
+
+This created Task #81 as a new prerequisite. Documented in
+`exec-verification-roadmap.md` and `loop-extraction-plan.md`.
+
 ## What Remains
 
-### Kernel-Level Spec Connection
+### Active Tasks
 
-With #68–#76 all done, the kernel loop could now carry ghost state tracking
-the exact `FpComplex` values that the buffer operations represent, and
-connect them to the FpComplex-level error theorems. This would let the
-per-step error accumulation live inside the kernel loop invariant rather
-than as a standalone mathematical theorem.
+- **#81**: Extract perturbation iteration body to helper function (NEW prerequisite for #78)
+- **#78**: Add value invariants to perturbation while loop (depends on #81)
+- **#79**: Bridge per-iteration ghost values to `theorem_perturbation_n_steps` (depends on #78)
 
 ### Other Future Work
 
@@ -431,6 +491,8 @@ Possible additional verification targets:
 - **Tighten reference orbit error bound** — currently the bound assumes
   worst-case amplification at every step. A bound that uses the actual
   `|Z_k|` at each step would be much tighter.
+- **WGSL transpilation correctness** — `wgsl_emit.rs` has some proofs but
+  the bridge from Rust IR to WGSL semantics involves trust.
 
 ### TODO: Workgroup Barrier Semantics
 
@@ -474,11 +536,11 @@ re-proving the kernel's barrier-dependent invariants).
 
 | Module                                        | Verified | Errors |
 |-----------------------------------------------|----------|--------|
-| `verus-fixed-point/src/fixed_point/limb_ops`  | 194      | 0      |
+| `verus-fixed-point/src/fixed_point/limb_ops`  | 203      | 0      |
 | `verus-fixed-point/src/fixed_point/limb_ops_proofs` | 15  | 0      |
-| `verus-mandelbrot/src/gpu_mandelbrot_kernel`  | 158      | 0      |
+| `verus-mandelbrot/src/gpu_mandelbrot_kernel`  | 165      | 0      |
 | `verus-mandelbrot/src/gpu_perturbation_entry` | 49       | 0      |
-| **Total (this session)**                      | **416**  | **0**  |
+| **Total (this session)**                      | **432**  | **0**  |
 
 Plus ~800 verified across other modules in `verus-fixed-point` (all unchanged
 and still passing).
@@ -497,3 +559,10 @@ and still passing).
 - `cfc2b6e` — Connect magnitudes back to signed inputs (#74)
 - `1135093` — Reference orbit error accumulation (#75)
 - `af27fbc` — Glitch detection completeness (#76)
+- `9ca7a0e` — Update session summary with kernel robustness work
+- `d65eff6` — Add exec verification roadmap doc
+- `995f447` — Strengthen *_to_buf variants with value equations (#77)
+- `26eb016` — Bump rlimit on mandelbrot_perturbation
+- `13a011f` — Document Task #78 prerequisite: loop body extraction needed
+- `c43e707` — Refine glitch detection criterion (#80)
+- `73580ea` — Update roadmap: Task 2 needs loop body extraction first
