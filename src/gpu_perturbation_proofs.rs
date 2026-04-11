@@ -2000,4 +2000,156 @@ pub proof fn lemma_spec_orbit_end_to_end_correct(
     lemma_perturbation_correctness_via_orbits(z_orbit, d_orbit, c_ref, dc, n);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Stage G: kernel buffer step ↔ spec orbit under bounds
+// ═══════════════════════════════════════════════════════════════
+
+/// Per-step correctness: at iteration `k`, if the unscaled spec orbit
+/// values satisfy Stage E's no-overflow bound, then the buffer-level
+/// perturbation step (via `pert_step_buf_int`) exactly produces the
+/// scaled version of the next spec orbit value.
+///
+/// This is the "one step of Stage E along the spec orbit" lemma. Combined
+/// over all iterations (via `lemma_kernel_orbit_matches_spec_under_bounds`),
+/// it establishes that the kernel's buffer state equals the scaled spec
+/// orbit at every step — which then plugs into Stage F's theorem.
+pub proof fn lemma_kernel_step_matches_spec_orbit(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    r_u: int, e_u: int,
+    n: nat, frac_limbs: nat,
+    k: nat,
+)
+    requires
+        n >= 1,
+        frac_limbs <= n,
+        ({
+            let z_k = spec_ref_orbit(z0, c_ref, k);
+            let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k);
+            pert_step_no_overflow(
+                z_k.re, z_k.im, d_k.re, d_k.im, dc.re, dc.im,
+                r_u, e_u, (n - frac_limbs) as nat,
+            )
+        }),
+    ensures
+        ({
+            let pf = limb_power(frac_limbs);
+            let z_k = spec_ref_orbit(z0, c_ref, k);
+            let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k);
+            let d_k1 = spec_pert_orbit(z0, c_ref, d0, dc, k + 1);
+            let buf = pert_step_buf_int(
+                z_k.re * pf, z_k.im * pf,
+                d_k.re * pf, d_k.im * pf,
+                dc.re * pf, dc.im * pf,
+                n, frac_limbs,
+            );
+            buf.0 == d_k1.re * pf && buf.1 == d_k1.im * pf
+        }),
+{
+    let z_k = spec_ref_orbit(z0, c_ref, k);
+    let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k);
+    // Apply Stage E's scaled bridge at this step.
+    lemma_pert_step_buf_matches_spec_scaled(
+        z_k.re, z_k.im, d_k.re, d_k.im, dc.re, dc.im,
+        r_u, e_u, n, frac_limbs,
+    );
+    // Unfold spec_pert_orbit at (k+1) to see it equals spec_pert_step(z_k, d_k, dc).
+    assert((k + 1) as nat > 0);
+    assert(((k + 1) as nat - 1) as nat == k);
+    assert(spec_pert_orbit(z0, c_ref, d0, dc, k + 1)
+        == spec_pert_step(z_k, d_k, dc));
+}
+
+/// Uniform bound predicate: the spec orbit's pointwise values satisfy
+/// Stage E's `pert_step_no_overflow` at every iteration in `[0, n_steps)`.
+///
+/// This is the precondition the kernel would need to establish (via an
+/// external perturbation-theory bound proof) to discharge the conditional
+/// part of the end-to-end correctness theorem.
+pub open spec fn spec_orbit_bounded(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    r_u: int, e_u: int,
+    n: nat, frac_limbs: nat,
+    n_steps: nat,
+) -> bool {
+    forall|k: int| 0 <= k < n_steps as int ==> {
+        let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
+        let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
+        pert_step_no_overflow(
+            z_k.re, z_k.im, d_k.re, d_k.im, dc.re, dc.im,
+            r_u, e_u, (n - frac_limbs) as nat,
+        )
+    }
+}
+
+/// Conditional end-to-end kernel correctness (Stage G).
+///
+/// Given a uniform bound on the spec orbit (which the kernel would
+/// establish via an external perturbation-theory bound proof, possibly
+/// cross-checked against runtime glitch detection), every buffer-level
+/// perturbation step matches the corresponding spec step, and the full
+/// spec orbit satisfies `perturbation_step_correct` at every iteration.
+///
+/// In other words: under uniform bounds, the kernel's fixed-point
+/// perturbation loop provably implements mathematical perturbation theory.
+pub proof fn lemma_kernel_end_to_end_under_bounds(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    r_u: int, e_u: int,
+    n: nat, frac_limbs: nat,
+    n_steps: nat,
+)
+    requires
+        n >= 1,
+        frac_limbs <= n,
+        spec_orbit_bounded(z0, c_ref, d0, dc, r_u, e_u, n, frac_limbs, n_steps),
+    ensures
+        // (a) Every buffer step matches the next scaled spec orbit point.
+        ({
+            let pf = limb_power(frac_limbs);
+            forall|k: int| 0 <= k < n_steps as int ==> {
+                let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
+                let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
+                let d_k1 = spec_pert_orbit(z0, c_ref, d0, dc, (k + 1) as nat);
+                let buf = pert_step_buf_int(
+                    z_k.re * pf, z_k.im * pf,
+                    d_k.re * pf, d_k.im * pf,
+                    dc.re * pf, dc.im * pf,
+                    n, frac_limbs,
+                );
+                buf.0 == d_k1.re * pf && buf.1 == d_k1.im * pf
+            }
+        }),
+        // (b) The full spec orbit satisfies perturbation_step_correct.
+        ({
+            let z_orbit = spec_ref_orbit_seq(z0, c_ref, n_steps);
+            let d_orbit = spec_pert_orbit_seq(z0, c_ref, d0, dc, n_steps);
+            forall|k: int| 0 <= k < n_steps as int
+                ==> #[trigger] perturbation_step_correct(z_orbit, d_orbit, c_ref, dc, k)
+        }),
+{
+    // (a): pointwise correspondence via Stage E.
+    assert forall|k: int| 0 <= k < n_steps as int implies ({
+        let pf = limb_power(frac_limbs);
+        let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
+        let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
+        let d_k1 = spec_pert_orbit(z0, c_ref, d0, dc, (k + 1) as nat);
+        let buf = pert_step_buf_int(
+            z_k.re * pf, z_k.im * pf,
+            d_k.re * pf, d_k.im * pf,
+            dc.re * pf, dc.im * pf,
+            n, frac_limbs,
+        );
+        buf.0 == d_k1.re * pf && buf.1 == d_k1.im * pf
+    }) by {
+        lemma_kernel_step_matches_spec_orbit(
+            z0, c_ref, d0, dc, r_u, e_u, n, frac_limbs, k as nat,
+        );
+    }
+
+    // (b): Stage F's wrapper.
+    lemma_spec_orbit_end_to_end_correct(z0, c_ref, d0, dc, n_steps);
+}
+
 } // verus!
