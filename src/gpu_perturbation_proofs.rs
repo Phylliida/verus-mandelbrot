@@ -862,6 +862,70 @@ pub proof fn lemma_glitch_soundness_int(
     assert(4 * delta_mag_sq >= tolerance * z_mag_sq);
 }
 
+/// Limb-level: if `vec_val(δ) >= 4 * limb_power(n - 1)`, the top limb > 3.
+/// Generic version of `lemma_glitch_completeness_one` (#76).
+pub proof fn lemma_magnitude_implies_top<T: LimbOps>(
+    delta: Seq<T>, n: nat,
+)
+    requires
+        n >= 1,
+        delta.len() == n as int,
+        valid_limbs(delta),
+        vec_val(delta) >= 4 * limb_power((n - 1) as nat),
+    ensures
+        delta[(n - 1) as int].sem() > 3,
+{
+    let s_top = limb_power((n - 1) as nat);
+    let lo = delta.subrange(0, (n - 1) as int);
+    assert(valid_limbs(lo)) by {
+        assert forall |k: int| 0 <= k < lo.len()
+            implies 0 <= (#[trigger] lo[k]).sem() && lo[k].sem() < LIMB_BASE() by {
+            assert(lo[k] == delta[k]);
+        }
+    }
+    lemma_vec_val_split::<T>(delta, (n - 1) as nat);
+    let lo_v = vec_val(lo);
+    let top_v = delta[(n - 1) as int].sem();
+    let hi_seq = delta.subrange((n - 1) as int, n as int);
+    assert(hi_seq.len() == 1);
+    assert(hi_seq[0] == delta[(n - 1) as int]);
+    reveal_with_fuel(limbs_val, 2);
+    assert(sem_seq(hi_seq).len() == 1);
+    assert(sem_seq(hi_seq)[0] == top_v);
+    assert(sem_seq(hi_seq).subrange(1, 1) =~= Seq::<int>::empty());
+    assert(vec_val(hi_seq) == top_v);
+    assert(vec_val(delta) == lo_v + top_v * s_top);
+    lemma_vec_val_bounded::<T>(lo);
+    assert(lo_v < s_top);
+    lemma_limb_power_pos((n - 1) as nat);
+    assert(s_top > 0);
+
+    // vec_val >= 4*s_top, lo_v < s_top ⇒ top_v * s_top > 3*s_top ⇒ top_v > 3
+    assert(top_v * s_top >= 4 * s_top - lo_v);
+    assert(top_v * s_top > 3 * s_top) by(nonlinear_arith)
+        requires top_v * s_top >= 4 * s_top - lo_v, lo_v < s_top, s_top > 0;
+    assert(top_v > 3) by(nonlinear_arith)
+        requires top_v * s_top > 3 * s_top, s_top > 0;
+}
+
+/// Square-root helper: if `x² ≥ k²` and both x and k are non-negative,
+/// then `x ≥ k`.
+pub proof fn lemma_sq_monotone(x: int, k: int)
+    requires
+        x >= 0,
+        k >= 0,
+        x * x >= k * k,
+    ensures
+        x >= k,
+{
+    if x < k {
+        // x < k and x >= 0 and k >= 0 ⇒ x*x < k*k, contradiction.
+        assert(x * x < k * k) by(nonlinear_arith)
+            requires 0 <= x, x < k, 0 <= k;
+        assert(false);
+    }
+}
+
 /// Limb-level helper: if the top limb of δ is greater than 3, then
 /// `vec_val(δ) >= 4 * limb_power(n - 1)`. This is the converse direction
 /// of `lemma_glitch_completeness_one` (#76).
@@ -1004,6 +1068,138 @@ pub proof fn lemma_glitch_check_implies_is_glitch<T: LimbOps>(
     assert(tolerance * (z.re * z.re + z.im * z.im) <= 4 * k * k);
 
     lemma_glitch_soundness_int(z, delta, k, tolerance);
+}
+
+/// COMPLETENESS (conditional): if `is_glitch(z, delta, T)` holds AND
+/// `T * |Z|² >= 128 * limb_power(2*(n-1))`, then the kernel's
+/// per-component check fires.
+///
+/// The factor 2 gap (128 vs soundness's 64) reflects the loss from
+/// `max(|δ_re|², |δ_im|²) >= (|δ_re|² + |δ_im|²)/2`: in the worst case
+/// the magnitude is split equally between components, so a single
+/// component carries only half the total squared magnitude.
+///
+/// Note this is a CONDITIONAL completeness — strict completeness
+/// (`is_glitch ⇒ check fires` for all T) is false because is_glitch
+/// can hold with both |Z| and |δ| tiny (e.g., Z=0, δ=ε). The strong
+/// tolerance precondition rules out this regime.
+pub proof fn lemma_glitch_is_glitch_implies_check<T: LimbOps>(
+    z: SpecComplex,
+    dre_seq: Seq<T>, dre_sign: int,
+    dim_seq: Seq<T>, dim_sign: int,
+    n: nat,
+    tolerance: int,
+)
+    requires
+        n >= 1,
+        dre_seq.len() == n as int,
+        dim_seq.len() == n as int,
+        valid_limbs(dre_seq),
+        valid_limbs(dim_seq),
+        dre_sign == 0 || dre_sign == 1,
+        dim_sign == 0 || dim_sign == 1,
+        // is_glitch holds at the chosen tolerance
+        is_glitch(
+            z,
+            SpecComplex {
+                re: signed_val_of(dre_seq, dre_sign),
+                im: signed_val_of(dim_seq, dim_sign),
+            },
+            tolerance,
+        ),
+        // Strong tolerance precondition: T*|Z|² is at least twice the
+        // soundness threshold of 64*P^(2(n-1)).
+        tolerance * (z.re * z.re + z.im * z.im)
+            >= 128 * limb_power((2 * (n - 1)) as nat),
+    ensures
+        dre_seq[(n - 1) as int].sem() > 3
+            || dim_seq[(n - 1) as int].sem() > 3,
+{
+    let pn1 = limb_power((n - 1) as nat);
+    lemma_limb_power_pos((n - 1) as nat);
+    assert(pn1 > 0);
+
+    // p2n1 = limb_power(2*(n-1)) = pn1 * pn1
+    verus_fixed_point::fixed_point::limb_ops::lemma_limb_power_add(
+        (n - 1) as nat, (n - 1) as nat);
+    assert(((n - 1) as nat) + ((n - 1) as nat) == (2 * (n - 1)) as nat);
+    let p2n1 = limb_power((2 * (n - 1)) as nat);
+    assert(p2n1 == pn1 * pn1);
+
+    let dre_int = signed_val_of(dre_seq, dre_sign);
+    let dim_int = signed_val_of(dim_seq, dim_sign);
+    let z_mag_sq = z.re * z.re + z.im * z.im;
+    let delta_mag_sq = dre_int * dre_int + dim_int * dim_int;
+
+    // From is_glitch: 4 * delta_mag_sq >= tolerance * z_mag_sq.
+    assert(4 * delta_mag_sq >= tolerance * z_mag_sq);
+    // Combined with the precondition:
+    assert(4 * delta_mag_sq >= 128 * p2n1);
+    // ⇒ delta_mag_sq >= 32 * p2n1.
+    assert(delta_mag_sq >= 32 * p2n1) by(nonlinear_arith)
+        requires 4 * delta_mag_sq >= 128 * p2n1;
+
+    // Both component squares are non-negative.
+    assert(dre_int * dre_int >= 0) by(nonlinear_arith);
+    assert(dim_int * dim_int >= 0) by(nonlinear_arith);
+
+    // max(dre_int², dim_int²) >= delta_mag_sq / 2 >= 16 * p2n1.
+    // Equivalently: dre_int² >= 16*p2n1 OR dim_int² >= 16*p2n1.
+    if dre_int * dre_int >= 16 * p2n1 {
+        // Real component is large enough.
+    } else {
+        // dim_int² must carry the rest.
+        assert(dre_int * dre_int < 16 * p2n1);
+        assert(dim_int * dim_int >= delta_mag_sq - dre_int * dre_int);
+        assert(dim_int * dim_int >= 32 * p2n1 - 16 * p2n1) by(nonlinear_arith)
+            requires
+                dim_int * dim_int >= delta_mag_sq - dre_int * dre_int,
+                delta_mag_sq >= 32 * p2n1,
+                dre_int * dre_int < 16 * p2n1;
+        assert(dim_int * dim_int >= 16 * p2n1);
+    }
+    // After the if-else, at least one of dre_int², dim_int² is >= 16 * p2n1.
+    assert(dre_int * dre_int >= 16 * p2n1 || dim_int * dim_int >= 16 * p2n1);
+
+    // signed_val_of squared equals vec_val squared.
+    let dre_v = vec_val(dre_seq);
+    let dim_v = vec_val(dim_seq);
+    assert(dre_int == dre_v || dre_int == -dre_v);
+    assert(dim_int == dim_v || dim_int == -dim_v);
+    assert(dre_int * dre_int == dre_v * dre_v) by(nonlinear_arith)
+        requires dre_int == dre_v || dre_int == -dre_v;
+    assert(dim_int * dim_int == dim_v * dim_v) by(nonlinear_arith)
+        requires dim_int == dim_v || dim_int == -dim_v;
+    assert(dre_v * dre_v >= 16 * p2n1 || dim_v * dim_v >= 16 * p2n1);
+
+    // 16 * p2n1 = 16 * pn1² = (4*pn1)². So vec_val² >= (4*pn1)² ⇒ vec_val >= 4*pn1.
+    let four_pn1 = 4 * pn1;
+    assert(four_pn1 >= 0);
+    assert(four_pn1 * four_pn1 == 16 * (pn1 * pn1)) by(nonlinear_arith)
+        requires four_pn1 == 4 * pn1;
+    assert(four_pn1 * four_pn1 == 16 * p2n1);
+
+    lemma_vec_val_bounded::<T>(dre_seq);
+    lemma_vec_val_bounded::<T>(dim_seq);
+    assert(dre_v >= 0);
+    assert(dim_v >= 0);
+
+    if dre_v * dre_v >= 16 * p2n1 {
+        assert(dre_v * dre_v >= four_pn1 * four_pn1);
+        lemma_sq_monotone(dre_v, four_pn1);
+        assert(dre_v >= four_pn1);
+        assert(dre_v >= 4 * pn1);
+        lemma_magnitude_implies_top::<T>(dre_seq, n);
+        assert(dre_seq[(n - 1) as int].sem() > 3);
+    } else {
+        assert(dim_v * dim_v >= 16 * p2n1);
+        assert(dim_v * dim_v >= four_pn1 * four_pn1);
+        lemma_sq_monotone(dim_v, four_pn1);
+        assert(dim_v >= four_pn1);
+        assert(dim_v >= 4 * pn1);
+        lemma_magnitude_implies_top::<T>(dim_seq, n);
+        assert(dim_seq[(n - 1) as int].sem() > 3);
+    }
 }
 
 } // verus!
