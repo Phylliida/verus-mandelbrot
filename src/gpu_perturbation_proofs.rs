@@ -449,6 +449,135 @@ pub proof fn lemma_signed_mul_buf_no_wrap(a: int, b: int, n: nat)
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Scaled helpers: signed_*_buf on P_frac-scaled inputs
+//
+// These show that when both inputs to a buffer op are exact multiples
+// of `limb_power(frac_limbs)`, the output is also such a multiple —
+// specifically, the P_frac-scaled version of the spec result.
+// ═══════════════════════════════════════════════════════════════
+
+/// `signed_add_buf` on P_frac-scaled inputs: returns the P_frac-scaled sum.
+pub proof fn lemma_signed_add_buf_scaled(
+    a_u: int, b_u: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n >= 1,
+        -(limb_power(n) as int) < (a_u + b_u) * limb_power(frac_limbs),
+        (a_u + b_u) * limb_power(frac_limbs) < limb_power(n) as int,
+    ensures
+        signed_add_buf(
+            a_u * limb_power(frac_limbs),
+            b_u * limb_power(frac_limbs),
+            n,
+        ) == (a_u + b_u) * limb_power(frac_limbs),
+{
+    let pf = limb_power(frac_limbs);
+    // (a_u * pf) + (b_u * pf) == (a_u + b_u) * pf
+    assert((a_u * pf) + (b_u * pf) == (a_u + b_u) * pf) by(nonlinear_arith);
+    // Apply the no-wrap lemma.
+    lemma_signed_add_buf_no_wrap(a_u * pf, b_u * pf, n);
+}
+
+/// `signed_sub_buf` on P_frac-scaled inputs: returns the P_frac-scaled difference.
+pub proof fn lemma_signed_sub_buf_scaled(
+    a_u: int, b_u: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n >= 1,
+        -(limb_power(n) as int) < (a_u - b_u) * limb_power(frac_limbs),
+        (a_u - b_u) * limb_power(frac_limbs) < limb_power(n) as int,
+    ensures
+        signed_sub_buf(
+            a_u * limb_power(frac_limbs),
+            b_u * limb_power(frac_limbs),
+            n,
+        ) == (a_u - b_u) * limb_power(frac_limbs),
+{
+    let pf = limb_power(frac_limbs);
+    assert((a_u * pf) - (b_u * pf) == (a_u - b_u) * pf) by(nonlinear_arith);
+    lemma_signed_sub_buf_no_wrap(a_u * pf, b_u * pf, n);
+}
+
+/// `signed_mul_buf` on P_frac-scaled inputs: returns the P_frac-scaled product.
+///
+/// Key property: (a_u * pf) * (b_u * pf) = (a_u * b_u) * pf², and dividing
+/// by pf gives `(a_u * b_u) * pf` exactly (since pf² is divisible by pf).
+pub proof fn lemma_signed_mul_buf_scaled(
+    a_u: int, b_u: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n >= 1,
+        -(limb_power(n) as int) < a_u * b_u * limb_power(frac_limbs),
+        a_u * b_u * limb_power(frac_limbs) < limb_power(n) as int,
+    ensures
+        signed_mul_buf(
+            a_u * limb_power(frac_limbs),
+            b_u * limb_power(frac_limbs),
+            n,
+            frac_limbs,
+        ) == a_u * b_u * limb_power(frac_limbs),
+{
+    lemma_limb_power_pos(n);
+    lemma_limb_power_pos(frac_limbs);
+    let pf = limb_power(frac_limbs);
+    let pn = limb_power(n);
+    assert(pf > 0);
+    assert(pn > 0);
+
+    let a = a_u * pf;
+    let b = b_u * pf;
+    let s = a_u * b_u;  // unscaled product
+    let prod = a * b;
+    // prod = a_u * pf * b_u * pf = s * pf * pf = s * pf² = pf * (s * pf)
+    assert(prod == s * pf * pf) by(nonlinear_arith)
+        requires a == a_u * pf, b == b_u * pf, prod == a * b, s == a_u * b_u;
+    assert(prod == pf * (s * pf)) by(nonlinear_arith)
+        requires prod == s * pf * pf;
+
+    // Case-split on sign.
+    if s >= 0 {
+        // prod ≥ 0 (since pf > 0), so abs_prod == prod == pf * (s * pf).
+        assert(prod >= 0) by(nonlinear_arith)
+            requires prod == s * pf * pf, s >= 0, pf > 0;
+        // abs_prod / pf == s * pf  (via lemma_div_multiples_vanish)
+        vstd::arithmetic::div_mod::lemma_div_multiples_vanish(s * pf, pf);
+        assert((pf * (s * pf)) / pf == s * pf);
+        // So mag = (s * pf) % pn. Since -pn < s*pf < pn and s*pf >= 0, mag == s*pf.
+        assert(s * pf >= 0) by(nonlinear_arith) requires s >= 0, pf > 0;
+        assert(s * pf < pn);
+        assert((s * pf) % pn == s * pf) by(nonlinear_arith)
+            requires 0 <= s * pf, s * pf < pn, pn > 0;
+        // signed_mul_buf returns mag (since prod >= 0).
+        assert(signed_mul_buf(a, b, n, frac_limbs) == s * pf);
+    } else {
+        // s < 0 ⇒ prod < 0.
+        assert(prod < 0) by(nonlinear_arith)
+            requires prod == s * pf * pf, s < 0, pf > 0;
+        // abs_prod == -prod == -(pf * (s * pf)) == pf * (-(s * pf)) == pf * ((-s) * pf)
+        assert(-prod == pf * ((-s) * pf)) by(nonlinear_arith)
+            requires prod == pf * (s * pf);
+        let abs_prod = -prod;
+        assert(abs_prod == pf * ((-s) * pf));
+        // abs_prod / pf == (-s) * pf
+        vstd::arithmetic::div_mod::lemma_div_multiples_vanish((-s) * pf, pf);
+        assert((pf * ((-s) * pf)) / pf == (-s) * pf);
+        // mag = ((-s) * pf) % pn. Since -s > 0 and (-s)*pf < pn (from precondition: s*pf > -pn), mag == (-s)*pf.
+        assert((-s) * pf > 0) by(nonlinear_arith) requires s < 0, pf > 0;
+        assert((-s) * pf < pn) by(nonlinear_arith)
+            requires -(pn as int) < s * pf;
+        assert(((-s) * pf) % pn == (-s) * pf) by(nonlinear_arith)
+            requires 0 <= (-s) * pf, (-s) * pf < pn, pn > 0;
+        // signed_mul_buf returns -mag (since prod < 0).
+        // -mag = -((-s) * pf) = s * pf
+        assert(-((-s) * pf) == s * pf) by(nonlinear_arith);
+        assert(signed_mul_buf(a, b, n, frac_limbs) == s * pf);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Bridge lemma: pert_step_buf_int matches spec_pert_step under bounds
 // ═══════════════════════════════════════════════════════════════
 
@@ -796,6 +925,490 @@ pub proof fn lemma_pert_step_buf_matches_spec(
         by(nonlinear_arith)
         requires new_dim == 2 * (s3 + s4) + 2 * dre * dim + dcim,
                  s3 == z_re * dim, s4 == z_im * dre;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Fixed-point bridge (Stage E): pert_step_buf_int matches spec_pert_step
+// when inputs are exact P_frac scalings of the spec values.
+// ═══════════════════════════════════════════════════════════════
+
+/// Fixed-point bridge lemma: when all buffer inputs are exact P_frac
+/// scalings of "unscaled" (spec) values, `pert_step_buf_int` produces
+/// the exact P_frac scaling of `spec_pert_step` on the unscaled values.
+///
+/// The bound precondition uses `pert_step_no_overflow` at scale
+/// `(n - frac_limbs)`, because after multiplying the result is a
+/// `P_frac`-scaled spec value whose magnitude must fit in
+/// `limb_power(n)` — equivalent to the spec value fitting in
+/// `limb_power(n - frac_limbs)`.
+pub proof fn lemma_pert_step_buf_matches_spec_scaled(
+    z_re_u: int, z_im_u: int,
+    dre_u: int, dim_u: int,
+    dcre_u: int, dcim_u: int,
+    r_u: int, e_u: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n >= 1,
+        frac_limbs <= n,
+        // Bounds on unscaled (spec) values — equivalent to no-overflow at
+        // scale (n - frac_limbs).
+        pert_step_no_overflow(
+            z_re_u, z_im_u, dre_u, dim_u, dcre_u, dcim_u,
+            r_u, e_u, (n - frac_limbs) as nat,
+        ),
+    ensures
+        ({
+            let pf = limb_power(frac_limbs);
+            let buf_result = pert_step_buf_int(
+                z_re_u * pf, z_im_u * pf,
+                dre_u * pf, dim_u * pf,
+                dcre_u * pf, dcim_u * pf,
+                n, frac_limbs,
+            );
+            let spec_result = spec_pert_step(
+                SpecComplex { re: z_re_u, im: z_im_u },
+                SpecComplex { re: dre_u, im: dim_u },
+                SpecComplex { re: dcre_u, im: dcim_u },
+            );
+            buf_result.0 == spec_result.re * pf
+                && buf_result.1 == spec_result.im * pf
+        }),
+{
+    lemma_limb_power_pos(frac_limbs);
+    lemma_limb_power_pos(n);
+    lemma_limb_power_pos((n - frac_limbs) as nat);
+    let pf = limb_power(frac_limbs);
+    let pn = limb_power(n);
+    let pk = limb_power((n - frac_limbs) as nat);
+    assert(pf > 0);
+    assert(pn > 0);
+    assert(pk > 0);
+
+    // pn = pf * pk via lemma_limb_power_add.
+    verus_fixed_point::fixed_point::limb_ops::lemma_limb_power_add(
+        frac_limbs, (n - frac_limbs) as nat);
+    assert(frac_limbs + ((n - frac_limbs) as nat) == n);
+    assert(pn == pf * pk);
+
+    // ── Bound lemma: if an unscaled intermediate |x_u| <= bnd_u and
+    //    bnd_u <= pk, then the scaled value |x_u * pf| < pn.
+    // We'll reuse this implicitly via nonlinear_arith at each step.
+
+    // Inputs satisfy |x_u| <= r_u (resp. e_u), and 12*r_u*r_u + e_u < pk.
+
+    // Notation: r, e for unscaled bounds (we keep r_u, e_u from precondition).
+    assert(r_u >= 0);
+    assert(e_u >= 0);
+    assert(12 * r_u * r_u + e_u < pk);
+    assert(r_u * r_u >= 0) by(nonlinear_arith);
+
+    // ── Part A: 2*Z*δ (4 multiplies + 4 add/sub) ──
+
+    // s1 = z_re * dre (scaled). Spec: z_re_u * dre_u.
+    assert(z_re_u * dre_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= z_re_u, z_re_u <= r_u, -r_u <= dre_u, dre_u <= r_u;
+    assert(-(r_u * r_u) <= z_re_u * dre_u) by(nonlinear_arith)
+        requires -r_u <= z_re_u, z_re_u <= r_u, -r_u <= dre_u, dre_u <= r_u;
+    assert(z_re_u * dre_u * pf < pn) by(nonlinear_arith)
+        requires z_re_u * dre_u <= r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < z_re_u * dre_u * pf) by(nonlinear_arith)
+        requires -(r_u * r_u) <= z_re_u * dre_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_mul_buf_scaled(z_re_u, dre_u, n, frac_limbs);
+    let s1 = signed_mul_buf(z_re_u * pf, dre_u * pf, n, frac_limbs);
+    assert(s1 == z_re_u * dre_u * pf);
+
+    // s2 = z_im * dim (scaled). Spec: z_im_u * dim_u.
+    assert(z_im_u * dim_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= z_im_u, z_im_u <= r_u, -r_u <= dim_u, dim_u <= r_u;
+    assert(-(r_u * r_u) <= z_im_u * dim_u) by(nonlinear_arith)
+        requires -r_u <= z_im_u, z_im_u <= r_u, -r_u <= dim_u, dim_u <= r_u;
+    assert(z_im_u * dim_u * pf < pn) by(nonlinear_arith)
+        requires z_im_u * dim_u <= r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < z_im_u * dim_u * pf) by(nonlinear_arith)
+        requires -(r_u * r_u) <= z_im_u * dim_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_mul_buf_scaled(z_im_u, dim_u, n, frac_limbs);
+    let s2 = signed_mul_buf(z_im_u * pf, dim_u * pf, n, frac_limbs);
+    assert(s2 == z_im_u * dim_u * pf);
+
+    // s3 = z_re * dim. Spec: z_re_u * dim_u.
+    assert(z_re_u * dim_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= z_re_u, z_re_u <= r_u, -r_u <= dim_u, dim_u <= r_u;
+    assert(-(r_u * r_u) <= z_re_u * dim_u) by(nonlinear_arith)
+        requires -r_u <= z_re_u, z_re_u <= r_u, -r_u <= dim_u, dim_u <= r_u;
+    assert(z_re_u * dim_u * pf < pn) by(nonlinear_arith)
+        requires z_re_u * dim_u <= r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < z_re_u * dim_u * pf) by(nonlinear_arith)
+        requires -(r_u * r_u) <= z_re_u * dim_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_mul_buf_scaled(z_re_u, dim_u, n, frac_limbs);
+    let s3 = signed_mul_buf(z_re_u * pf, dim_u * pf, n, frac_limbs);
+    assert(s3 == z_re_u * dim_u * pf);
+
+    // s4 = z_im * dre. Spec: z_im_u * dre_u.
+    assert(z_im_u * dre_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= z_im_u, z_im_u <= r_u, -r_u <= dre_u, dre_u <= r_u;
+    assert(-(r_u * r_u) <= z_im_u * dre_u) by(nonlinear_arith)
+        requires -r_u <= z_im_u, z_im_u <= r_u, -r_u <= dre_u, dre_u <= r_u;
+    assert(z_im_u * dre_u * pf < pn) by(nonlinear_arith)
+        requires z_im_u * dre_u <= r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < z_im_u * dre_u * pf) by(nonlinear_arith)
+        requires -(r_u * r_u) <= z_im_u * dre_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_mul_buf_scaled(z_im_u, dre_u, n, frac_limbs);
+    let s4 = signed_mul_buf(z_im_u * pf, dre_u * pf, n, frac_limbs);
+    assert(s4 == z_im_u * dre_u * pf);
+
+    // d1 = s1 - s2, spec s1u - s2u where s1u = z_re_u * dre_u, s2u = z_im_u * dim_u
+    let s1u = z_re_u * dre_u;
+    let s2u = z_im_u * dim_u;
+    assert(s1u - s2u <= 2 * r_u * r_u) by(nonlinear_arith)
+        requires s1u == z_re_u * dre_u, s2u == z_im_u * dim_u,
+                 z_re_u * dre_u <= r_u * r_u, z_im_u * dim_u >= -(r_u * r_u);
+    assert(-(2 * r_u * r_u) <= s1u - s2u) by(nonlinear_arith)
+        requires s1u == z_re_u * dre_u, s2u == z_im_u * dim_u,
+                 z_re_u * dre_u >= -(r_u * r_u), z_im_u * dim_u <= r_u * r_u;
+    assert((s1u - s2u) * pf < pn) by(nonlinear_arith)
+        requires s1u - s2u <= 2 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (s1u - s2u) * pf) by(nonlinear_arith)
+        requires -(2 * r_u * r_u) <= s1u - s2u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    // s1 - s2 = (s1u * pf) - (s2u * pf) = (s1u - s2u) * pf
+    assert(s1 - s2 == (s1u - s2u) * pf) by(nonlinear_arith)
+        requires s1 == s1u * pf, s2 == s2u * pf;
+    lemma_signed_sub_buf_scaled(s1u, s2u, n, frac_limbs);
+    let d1 = signed_sub_buf(s1u * pf, s2u * pf, n);
+    assert(d1 == (s1u - s2u) * pf);
+    // signed_sub_buf only uses the values, not their "spec form", so this equates:
+    assert(signed_sub_buf(s1, s2, n) == d1) by {
+        assert(s1 == s1u * pf);
+        assert(s2 == s2u * pf);
+    }
+
+    // tzd_re = d1 + d1 = 2*(s1u - s2u) * pf
+    assert((s1u - s2u) + (s1u - s2u) == 2 * (s1u - s2u)) by(nonlinear_arith);
+    assert(2 * (s1u - s2u) <= 4 * r_u * r_u) by(nonlinear_arith)
+        requires s1u - s2u <= 2 * r_u * r_u;
+    assert(-(4 * r_u * r_u) <= 2 * (s1u - s2u)) by(nonlinear_arith)
+        requires s1u - s2u >= -(2 * r_u * r_u);
+    assert(2 * (s1u - s2u) * pf < pn) by(nonlinear_arith)
+        requires 2 * (s1u - s2u) <= 4 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < 2 * (s1u - s2u) * pf) by(nonlinear_arith)
+        requires 2 * (s1u - s2u) >= -(4 * r_u * r_u), 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_add_buf_scaled(s1u - s2u, s1u - s2u, n, frac_limbs);
+    let tzd_re = signed_add_buf((s1u - s2u) * pf, (s1u - s2u) * pf, n);
+    assert(tzd_re == 2 * (s1u - s2u) * pf) by(nonlinear_arith)
+        requires tzd_re == ((s1u - s2u) + (s1u - s2u)) * pf;
+    // Connect back to d1:
+    assert(signed_add_buf(d1, d1, n) == tzd_re) by {
+        assert(d1 == (s1u - s2u) * pf);
+    }
+
+    // d2 = s3 + s4, spec s3u + s4u
+    let s3u = z_re_u * dim_u;
+    let s4u = z_im_u * dre_u;
+    assert(s3u + s4u <= 2 * r_u * r_u) by(nonlinear_arith)
+        requires s3u == z_re_u * dim_u, s4u == z_im_u * dre_u,
+                 z_re_u * dim_u <= r_u * r_u, z_im_u * dre_u <= r_u * r_u;
+    assert(-(2 * r_u * r_u) <= s3u + s4u) by(nonlinear_arith)
+        requires s3u == z_re_u * dim_u, s4u == z_im_u * dre_u,
+                 z_re_u * dim_u >= -(r_u * r_u), z_im_u * dre_u >= -(r_u * r_u);
+    assert((s3u + s4u) * pf < pn) by(nonlinear_arith)
+        requires s3u + s4u <= 2 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (s3u + s4u) * pf) by(nonlinear_arith)
+        requires -(2 * r_u * r_u) <= s3u + s4u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_add_buf_scaled(s3u, s4u, n, frac_limbs);
+    let d2 = signed_add_buf(s3u * pf, s4u * pf, n);
+    assert(d2 == (s3u + s4u) * pf);
+    assert(signed_add_buf(s3, s4, n) == d2) by {
+        assert(s3 == s3u * pf);
+        assert(s4 == s4u * pf);
+    }
+
+    // tzd_im = d2 + d2 = 2*(s3u + s4u) * pf
+    assert((s3u + s4u) + (s3u + s4u) == 2 * (s3u + s4u)) by(nonlinear_arith);
+    assert(2 * (s3u + s4u) <= 4 * r_u * r_u) by(nonlinear_arith)
+        requires s3u + s4u <= 2 * r_u * r_u;
+    assert(-(4 * r_u * r_u) <= 2 * (s3u + s4u)) by(nonlinear_arith)
+        requires s3u + s4u >= -(2 * r_u * r_u);
+    assert(2 * (s3u + s4u) * pf < pn) by(nonlinear_arith)
+        requires 2 * (s3u + s4u) <= 4 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < 2 * (s3u + s4u) * pf) by(nonlinear_arith)
+        requires 2 * (s3u + s4u) >= -(4 * r_u * r_u), 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_add_buf_scaled(s3u + s4u, s3u + s4u, n, frac_limbs);
+    let tzd_im = signed_add_buf((s3u + s4u) * pf, (s3u + s4u) * pf, n);
+    assert(tzd_im == 2 * (s3u + s4u) * pf) by(nonlinear_arith)
+        requires tzd_im == ((s3u + s4u) + (s3u + s4u)) * pf;
+    assert(signed_add_buf(d2, d2, n) == tzd_im) by {
+        assert(d2 == (s3u + s4u) * pf);
+    }
+
+    // ── Part B: δ² ──
+    // drs = dre² = dre_u²
+    assert(dre_u * dre_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= dre_u, dre_u <= r_u;
+    assert(dre_u * dre_u >= 0) by(nonlinear_arith);
+    assert(dre_u * dre_u * pf >= 0) by(nonlinear_arith)
+        requires dre_u * dre_u >= 0, pf > 0;
+    assert(dre_u * dre_u * pf < pn) by(nonlinear_arith)
+        requires dre_u * dre_u <= r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < dre_u * dre_u * pf) by(nonlinear_arith)
+        requires dre_u * dre_u * pf >= 0, pn > 0;
+    lemma_signed_mul_buf_scaled(dre_u, dre_u, n, frac_limbs);
+    let drs = signed_mul_buf(dre_u * pf, dre_u * pf, n, frac_limbs);
+    assert(drs == dre_u * dre_u * pf);
+
+    // dis = dim² = dim_u²
+    assert(dim_u * dim_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= dim_u, dim_u <= r_u;
+    assert(dim_u * dim_u >= 0) by(nonlinear_arith);
+    assert(dim_u * dim_u * pf >= 0) by(nonlinear_arith)
+        requires dim_u * dim_u >= 0, pf > 0;
+    assert(dim_u * dim_u * pf < pn) by(nonlinear_arith)
+        requires dim_u * dim_u <= r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < dim_u * dim_u * pf) by(nonlinear_arith)
+        requires dim_u * dim_u * pf >= 0, pn > 0;
+    lemma_signed_mul_buf_scaled(dim_u, dim_u, n, frac_limbs);
+    let dis = signed_mul_buf(dim_u * pf, dim_u * pf, n, frac_limbs);
+    assert(dis == dim_u * dim_u * pf);
+
+    // dri = dre + dim
+    assert(dre_u + dim_u <= 2 * r_u) by(nonlinear_arith)
+        requires -r_u <= dre_u, dre_u <= r_u, -r_u <= dim_u, dim_u <= r_u;
+    assert(-(2 * r_u) <= dre_u + dim_u) by(nonlinear_arith)
+        requires -r_u <= dre_u, dre_u <= r_u, -r_u <= dim_u, dim_u <= r_u;
+    // 2*r_u * pf <= 12*r_u*r_u*pf ... need careful bound
+    // dre_u + dim_u fits in pk because 2*r_u <= 12*r_u*r_u (for r_u >= 1) OR dre_u+dim_u == 0 (r_u=0).
+    assert((dre_u + dim_u) * pf < pn) by(nonlinear_arith)
+        requires dre_u + dim_u <= 2 * r_u, r_u >= 0, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (dre_u + dim_u) * pf) by(nonlinear_arith)
+        requires dre_u + dim_u >= -(2 * r_u), r_u >= 0, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_add_buf_scaled(dre_u, dim_u, n, frac_limbs);
+    let dri = signed_add_buf(dre_u * pf, dim_u * pf, n);
+    assert(dri == (dre_u + dim_u) * pf);
+
+    // dri2 = dri² = (dre_u + dim_u)²
+    assert((dre_u + dim_u) * (dre_u + dim_u) <= 4 * r_u * r_u) by(nonlinear_arith)
+        requires -(2 * r_u) <= dre_u + dim_u, dre_u + dim_u <= 2 * r_u, r_u >= 0;
+    assert((dre_u + dim_u) * (dre_u + dim_u) >= 0) by(nonlinear_arith);
+    assert((dre_u + dim_u) * (dre_u + dim_u) * pf >= 0) by(nonlinear_arith)
+        requires (dre_u + dim_u) * (dre_u + dim_u) >= 0, pf > 0;
+    assert((dre_u + dim_u) * (dre_u + dim_u) * pf < pn) by(nonlinear_arith)
+        requires (dre_u + dim_u) * (dre_u + dim_u) <= 4 * r_u * r_u,
+                 12 * r_u * r_u + e_u < pk, pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (dre_u + dim_u) * (dre_u + dim_u) * pf) by(nonlinear_arith)
+        requires (dre_u + dim_u) * (dre_u + dim_u) * pf >= 0, pn > 0;
+    lemma_signed_mul_buf_scaled(dre_u + dim_u, dre_u + dim_u, n, frac_limbs);
+    let dri2 = signed_mul_buf((dre_u + dim_u) * pf, (dre_u + dim_u) * pf, n, frac_limbs);
+    assert(dri2 == (dre_u + dim_u) * (dre_u + dim_u) * pf);
+    assert(signed_mul_buf(dri, dri, n, frac_limbs) == dri2) by {
+        assert(dri == (dre_u + dim_u) * pf);
+    }
+
+    // dsq_re = drs - dis = dre_u² - dim_u²
+    let drs_u = dre_u * dre_u;
+    let dis_u = dim_u * dim_u;
+    assert(drs_u - dis_u <= 2 * r_u * r_u) by(nonlinear_arith)
+        requires drs_u == dre_u * dre_u, dis_u == dim_u * dim_u,
+                 drs_u <= r_u * r_u, dis_u >= 0;
+    assert(-(2 * r_u * r_u) <= drs_u - dis_u) by(nonlinear_arith)
+        requires drs_u == dre_u * dre_u, dis_u == dim_u * dim_u,
+                 drs_u >= 0, dis_u <= r_u * r_u;
+    assert((drs_u - dis_u) * pf < pn) by(nonlinear_arith)
+        requires drs_u - dis_u <= 2 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (drs_u - dis_u) * pf) by(nonlinear_arith)
+        requires -(2 * r_u * r_u) <= drs_u - dis_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_sub_buf_scaled(drs_u, dis_u, n, frac_limbs);
+    let dsq_re = signed_sub_buf(drs_u * pf, dis_u * pf, n);
+    assert(dsq_re == (drs_u - dis_u) * pf);
+    assert(signed_sub_buf(drs, dis, n) == dsq_re) by {
+        assert(drs == drs_u * pf);
+        assert(dis == dis_u * pf);
+    }
+
+    // q1 = dri2 - drs = (dre_u + dim_u)² - dre_u²
+    let dri2_u = (dre_u + dim_u) * (dre_u + dim_u);
+    assert(dri2_u - drs_u <= 5 * r_u * r_u) by(nonlinear_arith)
+        requires dri2_u == (dre_u + dim_u) * (dre_u + dim_u), drs_u == dre_u * dre_u,
+                 dri2_u <= 4 * r_u * r_u, drs_u >= 0;
+    assert(-(5 * r_u * r_u) <= dri2_u - drs_u) by(nonlinear_arith)
+        requires dri2_u == (dre_u + dim_u) * (dre_u + dim_u), drs_u == dre_u * dre_u,
+                 dri2_u >= 0, drs_u <= r_u * r_u;
+    assert((dri2_u - drs_u) * pf < pn) by(nonlinear_arith)
+        requires dri2_u - drs_u <= 5 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (dri2_u - drs_u) * pf) by(nonlinear_arith)
+        requires -(5 * r_u * r_u) <= dri2_u - drs_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_sub_buf_scaled(dri2_u, drs_u, n, frac_limbs);
+    let q1 = signed_sub_buf(dri2_u * pf, drs_u * pf, n);
+    assert(q1 == (dri2_u - drs_u) * pf);
+    assert(signed_sub_buf(dri2, drs, n) == q1) by {
+        assert(dri2 == dri2_u * pf);
+        assert(drs == drs_u * pf);
+    }
+
+    // dsq_im = q1 - dis = (dri2_u - drs_u) - dis_u
+    let q1_u = dri2_u - drs_u;
+    assert(q1_u - dis_u <= 6 * r_u * r_u) by(nonlinear_arith)
+        requires q1_u == dri2_u - drs_u, dis_u == dim_u * dim_u,
+                 q1_u <= 5 * r_u * r_u, dis_u >= 0;
+    assert(-(6 * r_u * r_u) <= q1_u - dis_u) by(nonlinear_arith)
+        requires q1_u == dri2_u - drs_u, dis_u == dim_u * dim_u,
+                 q1_u >= -(5 * r_u * r_u), dis_u <= r_u * r_u;
+    assert((q1_u - dis_u) * pf < pn) by(nonlinear_arith)
+        requires q1_u - dis_u <= 6 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (q1_u - dis_u) * pf) by(nonlinear_arith)
+        requires -(6 * r_u * r_u) <= q1_u - dis_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_sub_buf_scaled(q1_u, dis_u, n, frac_limbs);
+    let dsq_im = signed_sub_buf(q1_u * pf, dis_u * pf, n);
+    assert(dsq_im == (q1_u - dis_u) * pf);
+    assert(signed_sub_buf(q1, dis, n) == dsq_im) by {
+        assert(q1 == q1_u * pf);
+        assert(dis == dis_u * pf);
+    }
+    // Algebraic simplification: q1_u - dis_u = (dre_u+dim_u)² - dre_u² - dim_u² = 2*dre_u*dim_u
+    assert(q1_u - dis_u == 2 * dre_u * dim_u) by(nonlinear_arith)
+        requires q1_u == (dre_u + dim_u) * (dre_u + dim_u) - dre_u * dre_u,
+                 dis_u == dim_u * dim_u;
+    assert(dsq_im == 2 * dre_u * dim_u * pf);
+
+    // ── Part C: δ' = (2*Z*δ) + δ² + Δc ──
+    // p1 = tzd_re + dsq_re = 2*(s1u - s2u) + (drs_u - dis_u)
+    let tzd_re_u = 2 * (s1u - s2u);
+    let dsq_re_u = drs_u - dis_u;
+    assert(tzd_re_u + dsq_re_u <= 6 * r_u * r_u) by(nonlinear_arith)
+        requires tzd_re_u == 2 * (s1u - s2u), s1u - s2u <= 2 * r_u * r_u,
+                 dsq_re_u == drs_u - dis_u, drs_u - dis_u <= 2 * r_u * r_u;
+    assert(-(6 * r_u * r_u) <= tzd_re_u + dsq_re_u) by(nonlinear_arith)
+        requires tzd_re_u == 2 * (s1u - s2u), s1u - s2u >= -(2 * r_u * r_u),
+                 dsq_re_u == drs_u - dis_u, drs_u - dis_u >= -(2 * r_u * r_u);
+    assert((tzd_re_u + dsq_re_u) * pf < pn) by(nonlinear_arith)
+        requires tzd_re_u + dsq_re_u <= 6 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (tzd_re_u + dsq_re_u) * pf) by(nonlinear_arith)
+        requires -(6 * r_u * r_u) <= tzd_re_u + dsq_re_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_add_buf_scaled(tzd_re_u, dsq_re_u, n, frac_limbs);
+    let p1 = signed_add_buf(tzd_re_u * pf, dsq_re_u * pf, n);
+    assert(p1 == (tzd_re_u + dsq_re_u) * pf);
+    assert(signed_add_buf(tzd_re, dsq_re, n) == p1) by {
+        assert(tzd_re == tzd_re_u * pf);
+        assert(dsq_re == dsq_re_u * pf);
+    }
+
+    // new_dre = p1 + dcre = (tzd_re_u + dsq_re_u) + dcre_u
+    let p1_u = tzd_re_u + dsq_re_u;
+    assert(p1_u + dcre_u <= 6 * r_u * r_u + e_u) by(nonlinear_arith)
+        requires p1_u <= 6 * r_u * r_u, dcre_u <= e_u;
+    assert(-(6 * r_u * r_u + e_u) <= p1_u + dcre_u) by(nonlinear_arith)
+        requires p1_u >= -(6 * r_u * r_u), dcre_u >= -e_u;
+    assert((p1_u + dcre_u) * pf < pn) by(nonlinear_arith)
+        requires p1_u + dcre_u <= 6 * r_u * r_u + e_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0;
+    assert(-(pn as int) < (p1_u + dcre_u) * pf) by(nonlinear_arith)
+        requires -(6 * r_u * r_u + e_u) <= p1_u + dcre_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0;
+    lemma_signed_add_buf_scaled(p1_u, dcre_u, n, frac_limbs);
+    let new_dre = signed_add_buf(p1_u * pf, dcre_u * pf, n);
+    assert(new_dre == (p1_u + dcre_u) * pf);
+    assert(signed_add_buf(p1, dcre_u * pf, n) == new_dre) by {
+        assert(p1 == p1_u * pf);
+    }
+
+    // p2 = tzd_im + dsq_im = 2*(s3u + s4u) + 2*dre_u*dim_u
+    let tzd_im_u = 2 * (s3u + s4u);
+    let dsq_im_u = 2 * dre_u * dim_u;
+    assert(tzd_im_u + dsq_im_u <= 10 * r_u * r_u) by(nonlinear_arith)
+        requires tzd_im_u == 2 * (s3u + s4u), s3u + s4u <= 2 * r_u * r_u,
+                 dsq_im_u == 2 * dre_u * dim_u, dsq_im_u == q1_u - dis_u,
+                 q1_u - dis_u <= 6 * r_u * r_u;
+    assert(-(10 * r_u * r_u) <= tzd_im_u + dsq_im_u) by(nonlinear_arith)
+        requires tzd_im_u == 2 * (s3u + s4u), s3u + s4u >= -(2 * r_u * r_u),
+                 dsq_im_u == 2 * dre_u * dim_u, dsq_im_u == q1_u - dis_u,
+                 q1_u - dis_u >= -(6 * r_u * r_u);
+    assert((tzd_im_u + dsq_im_u) * pf < pn) by(nonlinear_arith)
+        requires tzd_im_u + dsq_im_u <= 10 * r_u * r_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    assert(-(pn as int) < (tzd_im_u + dsq_im_u) * pf) by(nonlinear_arith)
+        requires -(10 * r_u * r_u) <= tzd_im_u + dsq_im_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0, e_u >= 0;
+    lemma_signed_add_buf_scaled(tzd_im_u, dsq_im_u, n, frac_limbs);
+    let p2 = signed_add_buf(tzd_im_u * pf, dsq_im_u * pf, n);
+    assert(p2 == (tzd_im_u + dsq_im_u) * pf);
+    assert(signed_add_buf(tzd_im, dsq_im, n) == p2) by {
+        assert(tzd_im == tzd_im_u * pf);
+        assert(dsq_im == dsq_im_u * pf);
+    }
+
+    // new_dim = p2 + dcim
+    let p2_u = tzd_im_u + dsq_im_u;
+    assert(p2_u + dcim_u <= 10 * r_u * r_u + e_u) by(nonlinear_arith)
+        requires p2_u <= 10 * r_u * r_u, dcim_u <= e_u;
+    assert(-(10 * r_u * r_u + e_u) <= p2_u + dcim_u) by(nonlinear_arith)
+        requires p2_u >= -(10 * r_u * r_u), dcim_u >= -e_u;
+    assert((p2_u + dcim_u) * pf < pn) by(nonlinear_arith)
+        requires p2_u + dcim_u <= 10 * r_u * r_u + e_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0;
+    assert(-(pn as int) < (p2_u + dcim_u) * pf) by(nonlinear_arith)
+        requires -(10 * r_u * r_u + e_u) <= p2_u + dcim_u, 12 * r_u * r_u + e_u < pk,
+                 pn == pf * pk, pf > 0;
+    lemma_signed_add_buf_scaled(p2_u, dcim_u, n, frac_limbs);
+    let new_dim = signed_add_buf(p2_u * pf, dcim_u * pf, n);
+    assert(new_dim == (p2_u + dcim_u) * pf);
+    assert(signed_add_buf(p2, dcim_u * pf, n) == new_dim) by {
+        assert(p2 == p2_u * pf);
+    }
+
+    // ── Final spec equality ──
+    // new_dre == spec.re * pf where spec.re == 2*z_re_u*dre_u - 2*z_im_u*dim_u + dre_u² - dim_u² + dcre_u
+    // We have new_dre == (p1_u + dcre_u) * pf
+    //                 == (tzd_re_u + dsq_re_u + dcre_u) * pf
+    //                 == (2*(s1u - s2u) + (drs_u - dis_u) + dcre_u) * pf
+    //                 == (2*(z_re_u*dre_u - z_im_u*dim_u) + dre_u² - dim_u² + dcre_u) * pf
+    //                 == (2*z_re_u*dre_u - 2*z_im_u*dim_u + dre_u² - dim_u² + dcre_u) * pf
+    assert(new_dre == (2 * z_re_u * dre_u - 2 * z_im_u * dim_u
+                        + dre_u * dre_u - dim_u * dim_u + dcre_u) * pf)
+        by(nonlinear_arith)
+        requires
+            new_dre == (p1_u + dcre_u) * pf,
+            p1_u == tzd_re_u + dsq_re_u,
+            tzd_re_u == 2 * (s1u - s2u),
+            dsq_re_u == drs_u - dis_u,
+            s1u == z_re_u * dre_u, s2u == z_im_u * dim_u,
+            drs_u == dre_u * dre_u, dis_u == dim_u * dim_u;
+
+    // new_dim == spec.im * pf
+    assert(new_dim == (2 * z_re_u * dim_u + 2 * z_im_u * dre_u
+                        + 2 * dre_u * dim_u + dcim_u) * pf)
+        by(nonlinear_arith)
+        requires
+            new_dim == (p2_u + dcim_u) * pf,
+            p2_u == tzd_im_u + dsq_im_u,
+            tzd_im_u == 2 * (s3u + s4u),
+            dsq_im_u == 2 * dre_u * dim_u,
+            s3u == z_re_u * dim_u, s4u == z_im_u * dre_u;
 }
 
 // ═══════════════════════════════════════════════════════════════
