@@ -32,4 +32,7 @@ pub mod gpu_mandelbrot_kernel;
 // pub mod gpu_kernel_n4;
 
 #[cfg(verus_keep_ghost)]
+pub mod gpu_perturbation_proofs;
+
+#[cfg(verus_keep_ghost)]
 pub mod gpu_perturbation_entry;

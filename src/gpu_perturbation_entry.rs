@@ -11,6 +11,13 @@ use vstd::slice::SliceAdditionalExecFns;
 use verus_fixed_point::fixed_point::limb_ops::*;
 #[cfg(verus_keep_ghost)]
 use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
+#[cfg(verus_keep_ghost)]
+use crate::gpu_perturbation_proofs::{
+    pert_step_buf_int, signed_mul_buf, signed_add_buf, signed_sub_buf,
+    lemma_signed_mul_postcond_to_buf,
+    lemma_disjunction_to_signed_add_buf,
+    lemma_disjunction_to_signed_sub_buf,
+};
 
 verus! {
 
@@ -212,9 +219,10 @@ fn copy_limbs(src: &Vec<u32>, src_off: u32, dst: &mut Vec<u32>, n: u32)
 /// can be added inside a focused Z3 context, instead of polluting the
 /// kernel function with ~30 buffer ops per iteration.
 ///
-/// Stage A provides only structural postconditions (sizes, sign validity,
-/// `valid_limbs`). Stage B will add a value-equation postcondition.
-#[verifier::rlimit(50)]
+/// Stage B provides a value-equation postcondition: the output
+/// `(delta_re, delta_im)` buffers, viewed as signed integers, equal
+/// `pert_step_buf_int` applied to the input signed integer values.
+#[verifier::rlimit(500)]
 fn perturbation_iteration_step(
     z_re_slice: &[u32], z_re_sign: u32,
     z_im_slice: &[u32], z_im_sign: u32,
@@ -278,51 +286,327 @@ fn perturbation_iteration_step(
         // Valid limbs preserved on outputs
         valid_limbs(delta_re@),
         valid_limbs(delta_im@),
+        // Value equation: the output (δ_re, δ_im) signed integers equal
+        // pert_step_buf_int applied to the input signed integers.
+        ({
+            let z_re_int = signed_val_of(z_re_slice@.subrange(0, n as int), z_re_sign as int);
+            let z_im_int = signed_val_of(z_im_slice@.subrange(0, n as int), z_im_sign as int);
+            let dre_in_int = signed_val_of(old(delta_re)@, delta_re_sign_in as int);
+            let dim_in_int = signed_val_of(old(delta_im)@, delta_im_sign_in as int);
+            let dcre_int = signed_val_of(dc_re@, dc_re_sign as int);
+            let dcim_int = signed_val_of(dc_im@, dc_im_sign as int);
+            let result = pert_step_buf_int(
+                z_re_int, z_im_int,
+                dre_in_int, dim_in_int,
+                dcre_int, dcim_int,
+                n as nat, frac_limbs as nat,
+            );
+            signed_val_of(delta_re@, out.0 as int) == result.0
+            && signed_val_of(delta_im@, out.1 as int) == result.1
+        }),
 {
     let n_us = n as usize;
     let frac_us = frac_limbs as usize;
 
+    // ── Capture input subranges + signed-int values ──
+    let ghost z_re_seq = z_re_slice@.subrange(0, n as int);
+    let ghost z_im_seq = z_im_slice@.subrange(0, n as int);
+    let ghost dre_in_seq = delta_re@.subrange(0, n as int);
+    let ghost dim_in_seq = delta_im@.subrange(0, n as int);
+    let ghost dcre_seq = dc_re@.subrange(0, n as int);
+    let ghost dcim_seq = dc_im@.subrange(0, n as int);
+    proof {
+        // Length-n inputs are equal to their subrange(0, n).
+        assert(dre_in_seq =~= delta_re@);
+        assert(dim_in_seq =~= delta_im@);
+        assert(dcre_seq =~= dc_re@);
+        assert(dcim_seq =~= dc_im@);
+        // valid_limbs is preserved across this trivial subrange.
+        assert(valid_limbs(dre_in_seq));
+        assert(valid_limbs(dim_in_seq));
+        assert(valid_limbs(dcre_seq));
+        assert(valid_limbs(dcim_seq));
+    }
+    let ghost z_re_int = signed_val_of(z_re_seq, z_re_sign as int);
+    let ghost z_im_int = signed_val_of(z_im_seq, z_im_sign as int);
+    let ghost dre_in_int = signed_val_of(dre_in_seq, delta_re_sign_in as int);
+    let ghost dim_in_int = signed_val_of(dim_in_seq, delta_im_sign_in as int);
+    let ghost dcre_int = signed_val_of(dcre_seq, dc_re_sign as int);
+    let ghost dcim_int = signed_val_of(dcim_seq, dc_im_sign as int);
+
     // ── Part A: 2*Z*δ (4 multiplies) ──
     let s1 = signed_mul_to(z_re_slice, &z_re_sign, &**delta_re, &delta_re_sign_in,
                            t1, 0usize, lprod, 0usize, n_us, frac_us);
+    let ghost t1_seq_a = t1@.subrange(0, n as int);
+    let ghost s1_int = signed_val_of(t1_seq_a, s1 as int);
+    proof {
+        lemma_signed_mul_postcond_to_buf::<u32>(
+            z_re_seq, z_re_sign as int,
+            dre_in_seq, delta_re_sign_in as int,
+            t1_seq_a, s1 as int,
+            n as nat, frac_limbs as nat,
+        );
+    }
+
     let s2 = signed_mul_to(z_im_slice, &z_im_sign, &**delta_im, &delta_im_sign_in,
                            t2, 0usize, lprod, 0usize, n_us, frac_us);
+    let ghost t2_seq_a = t2@.subrange(0, n as int);
+    let ghost s2_int = signed_val_of(t2_seq_a, s2 as int);
+    proof {
+        lemma_signed_mul_postcond_to_buf::<u32>(
+            z_im_seq, z_im_sign as int,
+            dim_in_seq, delta_im_sign_in as int,
+            t2_seq_a, s2 as int,
+            n as nat, frac_limbs as nat,
+        );
+    }
+
     let s3 = signed_mul_to(z_re_slice, &z_re_sign, &**delta_im, &delta_im_sign_in,
                            t3, 0usize, lprod, 0usize, n_us, frac_us);
+    let ghost t3_seq_a = t3@.subrange(0, n as int);
+    let ghost s3_int = signed_val_of(t3_seq_a, s3 as int);
+    proof {
+        lemma_signed_mul_postcond_to_buf::<u32>(
+            z_re_seq, z_re_sign as int,
+            dim_in_seq, delta_im_sign_in as int,
+            t3_seq_a, s3 as int,
+            n as nat, frac_limbs as nat,
+        );
+    }
+
     let s4 = signed_mul_to(z_im_slice, &z_im_sign, &**delta_re, &delta_re_sign_in,
                            t4, 0usize, lprod, 0usize, n_us, frac_us);
+    let ghost t4_seq_a = t4@.subrange(0, n as int);
+    let ghost s4_int = signed_val_of(t4_seq_a, s4 as int);
+    proof {
+        lemma_signed_mul_postcond_to_buf::<u32>(
+            z_im_seq, z_im_sign as int,
+            dre_in_seq, delta_re_sign_in as int,
+            t4_seq_a, s4 as int,
+            n as nat, frac_limbs as nat,
+        );
+    }
 
     // 2*Z*δ real = 2*(t1 - t2)
     let d1_s = signed_sub_to(&**t1, &s1, &**t2, &s2, t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost t5_seq_d1 = t5@.subrange(0, n as int);
+    let ghost d1_int = signed_val_of(t5_seq_d1, d1_s as int);
+    proof {
+        assert(t1@.subrange(0, n as int) == t1_seq_a);
+        assert(t2@.subrange(0, n as int) == t2_seq_a);
+        lemma_disjunction_to_signed_sub_buf::<u32>(
+            t1_seq_a, s1 as int,
+            t2_seq_a, s2 as int,
+            t5_seq_d1, d1_s as int,
+            n as nat,
+        );
+    }
+
     let tzd_re_s = signed_add_to(&**t5, &d1_s, &**t5, &d1_s, t1, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost t1_seq_tzdre = t1@.subrange(0, n as int);
+    let ghost tzd_re_int = signed_val_of(t1_seq_tzdre, tzd_re_s as int);
+    proof {
+        assert(t5@.subrange(0, n as int) == t5_seq_d1);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            t5_seq_d1, d1_s as int,
+            t5_seq_d1, d1_s as int,
+            t1_seq_tzdre, tzd_re_s as int,
+            n as nat,
+        );
+    }
+
     // 2*Z*δ imag = 2*(t3 + t4)
     let d2_s = signed_add_to(&**t3, &s3, &**t4, &s4, t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost t5_seq_d2 = t5@.subrange(0, n as int);
+    let ghost d2_int = signed_val_of(t5_seq_d2, d2_s as int);
+    proof {
+        assert(t3@.subrange(0, n as int) == t3_seq_a);
+        assert(t4@.subrange(0, n as int) == t4_seq_a);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            t3_seq_a, s3 as int,
+            t4_seq_a, s4 as int,
+            t5_seq_d2, d2_s as int,
+            n as nat,
+        );
+    }
+
     let tzd_im_s = signed_add_to(&**t5, &d2_s, &**t5, &d2_s, t2, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost t2_seq_tzdim = t2@.subrange(0, n as int);
+    let ghost tzd_im_int = signed_val_of(t2_seq_tzdim, tzd_im_s as int);
+    proof {
+        assert(t5@.subrange(0, n as int) == t5_seq_d2);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            t5_seq_d2, d2_s as int,
+            t5_seq_d2, d2_s as int,
+            t2_seq_tzdim, tzd_im_s as int,
+            n as nat,
+        );
+    }
 
     // ── Part B: δ² (3 multiplies, Karatsuba) ──
     let drs_s = signed_mul_to(&**delta_re, &delta_re_sign_in, &**delta_re, &delta_re_sign_in,
                               t3, 0usize, lprod, 0usize, n_us, frac_us);
+    let ghost t3_seq_drs = t3@.subrange(0, n as int);
+    let ghost drs_int = signed_val_of(t3_seq_drs, drs_s as int);
+    proof {
+        assert(delta_re@.subrange(0, n as int) == dre_in_seq);
+        lemma_signed_mul_postcond_to_buf::<u32>(
+            dre_in_seq, delta_re_sign_in as int,
+            dre_in_seq, delta_re_sign_in as int,
+            t3_seq_drs, drs_s as int,
+            n as nat, frac_limbs as nat,
+        );
+    }
+
     let dis_s = signed_mul_to(&**delta_im, &delta_im_sign_in, &**delta_im, &delta_im_sign_in,
                               t4, 0usize, lprod, 0usize, n_us, frac_us);
+    let ghost t4_seq_dis = t4@.subrange(0, n as int);
+    let ghost dis_int = signed_val_of(t4_seq_dis, dis_s as int);
+    proof {
+        assert(delta_im@.subrange(0, n as int) == dim_in_seq);
+        lemma_signed_mul_postcond_to_buf::<u32>(
+            dim_in_seq, delta_im_sign_in as int,
+            dim_in_seq, delta_im_sign_in as int,
+            t4_seq_dis, dis_s as int,
+            n as nat, frac_limbs as nat,
+        );
+    }
+
     let dri_s = signed_add_to(&**delta_re, &delta_re_sign_in, &**delta_im, &delta_im_sign_in,
                               t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost t5_seq_dri = t5@.subrange(0, n as int);
+    let ghost dri_int = signed_val_of(t5_seq_dri, dri_s as int);
+    proof {
+        assert(delta_re@.subrange(0, n as int) == dre_in_seq);
+        assert(delta_im@.subrange(0, n as int) == dim_in_seq);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            dre_in_seq, delta_re_sign_in as int,
+            dim_in_seq, delta_im_sign_in as int,
+            t5_seq_dri, dri_s as int,
+            n as nat,
+        );
+    }
+
     let dri2_s = signed_mul_to(&**t5, &dri_s, &**t5, &dri_s,
                                ls1, 0usize, lprod, 0usize, n_us, frac_us);
+    let ghost ls1_seq_dri2 = ls1@.subrange(0, n as int);
+    let ghost dri2_int = signed_val_of(ls1_seq_dri2, dri2_s as int);
+    proof {
+        assert(t5@.subrange(0, n as int) == t5_seq_dri);
+        lemma_signed_mul_postcond_to_buf::<u32>(
+            t5_seq_dri, dri_s as int,
+            t5_seq_dri, dri_s as int,
+            ls1_seq_dri2, dri2_s as int,
+            n as nat, frac_limbs as nat,
+        );
+    }
 
     // δ² real = δ_re² - δ_im²
     let dsq_re_s = signed_sub_to(&**t3, &drs_s, &**t4, &dis_s, t5, 0usize, delta_re, 0usize, delta_im, 0usize, n_us);
+    let ghost t5_seq_dsqre = t5@.subrange(0, n as int);
+    let ghost dsq_re_int = signed_val_of(t5_seq_dsqre, dsq_re_s as int);
+    proof {
+        assert(t3@.subrange(0, n as int) == t3_seq_drs);
+        assert(t4@.subrange(0, n as int) == t4_seq_dis);
+        lemma_disjunction_to_signed_sub_buf::<u32>(
+            t3_seq_drs, drs_s as int,
+            t4_seq_dis, dis_s as int,
+            t5_seq_dsqre, dsq_re_s as int,
+            n as nat,
+        );
+    }
+
     // δ² imag = (δ_re+δ_im)² - δ_re² - δ_im²
     let q1_s = signed_sub_to(&**ls1, &dri2_s, &**t3, &drs_s, delta_re, 0usize, ls2, 0usize, delta_im, 0usize, n_us);
+    let ghost dre_seq_q1 = delta_re@.subrange(0, n as int);
+    let ghost q1_int = signed_val_of(dre_seq_q1, q1_s as int);
+    proof {
+        assert(ls1@.subrange(0, n as int) == ls1_seq_dri2);
+        assert(t3@.subrange(0, n as int) == t3_seq_drs);
+        assert(dre_seq_q1 =~= delta_re@);
+        lemma_disjunction_to_signed_sub_buf::<u32>(
+            ls1_seq_dri2, dri2_s as int,
+            t3_seq_drs, drs_s as int,
+            dre_seq_q1, q1_s as int,
+            n as nat,
+        );
+    }
+
     let dsq_im_s = signed_sub_to(&**delta_re, &q1_s, &**t4, &dis_s, t3, 0usize, ls2, 0usize, delta_im, 0usize, n_us);
+    let ghost t3_seq_dsqim = t3@.subrange(0, n as int);
+    let ghost dsq_im_int = signed_val_of(t3_seq_dsqim, dsq_im_s as int);
+    proof {
+        assert(delta_re@.subrange(0, n as int) =~= dre_seq_q1);
+        assert(t4@.subrange(0, n as int) == t4_seq_dis);
+        lemma_disjunction_to_signed_sub_buf::<u32>(
+            dre_seq_q1, q1_s as int,
+            t4_seq_dis, dis_s as int,
+            t3_seq_dsqim, dsq_im_s as int,
+            n as nat,
+        );
+    }
 
     // ── Part C: δ' = (2*Z*δ) + δ² + Δc ──
     let p1_s = signed_add_to(&**t1, &tzd_re_s, &**t5, &dsq_re_s, t4, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost t4_seq_p1 = t4@.subrange(0, n as int);
+    let ghost p1_int = signed_val_of(t4_seq_p1, p1_s as int);
+    proof {
+        assert(t1@.subrange(0, n as int) == t1_seq_tzdre);
+        assert(t5@.subrange(0, n as int) == t5_seq_dsqre);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            t1_seq_tzdre, tzd_re_s as int,
+            t5_seq_dsqre, dsq_re_s as int,
+            t4_seq_p1, p1_s as int,
+            n as nat,
+        );
+    }
+
     let new_dr_s = signed_add_to(&**t4, &p1_s, dc_re, &dc_re_sign, delta_re, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost dre_out_seq = delta_re@.subrange(0, n as int);
+    let ghost new_dre_int = signed_val_of(dre_out_seq, new_dr_s as int);
+    proof {
+        assert(t4@.subrange(0, n as int) == t4_seq_p1);
+        assert(dc_re@.subrange(0, n as int) =~= dcre_seq);
+        assert(dre_out_seq =~= delta_re@);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            t4_seq_p1, p1_s as int,
+            dcre_seq, dc_re_sign as int,
+            dre_out_seq, new_dr_s as int,
+            n as nat,
+        );
+    }
 
     let p2_s = signed_add_to(&**t2, &tzd_im_s, &**t3, &dsq_im_s, t4, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost t4_seq_p2 = t4@.subrange(0, n as int);
+    let ghost p2_int = signed_val_of(t4_seq_p2, p2_s as int);
+    proof {
+        assert(t2@.subrange(0, n as int) == t2_seq_tzdim);
+        assert(t3@.subrange(0, n as int) == t3_seq_dsqim);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            t2_seq_tzdim, tzd_im_s as int,
+            t3_seq_dsqim, dsq_im_s as int,
+            t4_seq_p2, p2_s as int,
+            n as nat,
+        );
+    }
+
     let new_di_s = signed_add_to(&**t4, &p2_s, dc_im, &dc_im_sign, delta_im, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+    let ghost dim_out_seq = delta_im@.subrange(0, n as int);
+    let ghost new_dim_int = signed_val_of(dim_out_seq, new_di_s as int);
+    proof {
+        assert(t4@.subrange(0, n as int) == t4_seq_p2);
+        assert(dc_im@.subrange(0, n as int) =~= dcim_seq);
+        assert(dim_out_seq =~= delta_im@);
+        lemma_disjunction_to_signed_add_buf::<u32>(
+            t4_seq_p2, p2_s as int,
+            dcim_seq, dc_im_sign as int,
+            dim_out_seq, new_di_s as int,
+            n as nat,
+        );
+    }
 
     proof {
+        // valid_limbs from forall postconditions of last signed_add_to calls
         assert(valid_limbs(delta_re@)) by {
             assert forall |k: int| 0 <= k < delta_re@.len()
                 implies 0 <= (#[trigger] delta_re@[k]).sem()
@@ -333,6 +617,20 @@ fn perturbation_iteration_step(
                 implies 0 <= (#[trigger] delta_im@[k]).sem()
                     && delta_im@[k].sem() < LIMB_BASE() by { }
         }
+
+        // ── Compose all the steps to match pert_step_buf_int ──
+        // pert_step_buf_int unfolds (it's open spec) into the same chain
+        // of signed_mul_buf / signed_add_buf / signed_sub_buf calls.
+        // Z3 should chase the let-bindings and identify each intermediate
+        // ghost int we built up above.
+        let result = pert_step_buf_int(
+            z_re_int, z_im_int,
+            dre_in_int, dim_in_int,
+            dcre_int, dcim_int,
+            n as nat, frac_limbs as nat,
+        );
+        assert(result.0 == new_dre_int);
+        assert(result.1 == new_dim_int);
     }
 
     (new_dr_s, new_di_s)
