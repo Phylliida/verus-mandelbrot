@@ -142,6 +142,35 @@ proof fn lemma_orbit_access_safe(iter: int, z_stride: int, max_iters: int)
         requires z_stride >= 4;
 }
 
+/// Count the number of positions in `mem[base..base+end]` that hold a
+/// strictly-positive value. Used by the vote scan invariant to track
+/// how many glitched-pixel votes have been seen so far.
+spec fn count_positive(mem: Seq<u32>, base: int, end: int) -> nat
+    decreases end,
+{
+    if end <= 0 {
+        0nat
+    } else if mem[base + end - 1] > 0u32 {
+        count_positive(mem, base, end - 1) + 1
+    } else {
+        count_positive(mem, base, end - 1)
+    }
+}
+
+/// Maximum of `mem[base..base+end]`, treating the empty prefix as 0.
+/// Used by the vote scan invariant to characterise `best_vote`.
+spec fn max_prefix(mem: Seq<u32>, base: int, end: int) -> u32
+    decreases end,
+{
+    if end <= 0 {
+        0u32
+    } else {
+        let prev = max_prefix(mem, base, end - 1);
+        let here = mem[base + end - 1];
+        if here > prev { here } else { prev }
+    }
+}
+
 /// Proves colorize arithmetic is safe: t_col <= 254, half_t <= 127, 255 - half_t >= 128.
 proof fn lemma_colorize_safe(escaped_iter: int, max_iters: int)
     requires
@@ -1059,7 +1088,7 @@ fn mandelbrot_perturbation(
 
     let mut round = 0u32;
     while round < max_rounds
-        invariant_except_break
+        invariant
             round <= max_rounds,
             max_rounds == 5u32,
             // Kernel parameters are unchanged
@@ -1451,6 +1480,13 @@ fn mandelbrot_perturbation(
                     escaped_iter <= max_iters,
                     glitch_iter < max_iters,
                     is_glitched == 0u32 || is_glitched == 1u32,
+                    // (#2) Semantic invariant for escaped_iter: it is either
+                    // the initial sentinel (max_iters, "no escape recorded") or
+                    // strictly less than the current iteration count (which
+                    // means it was set by a past iteration's escape check).
+                    // Catches bugs like setting escaped_iter to iter+k or to
+                    // max_iters+1.
+                    escaped_iter == max_iters || escaped_iter < iter,
                     // Buffer sizes preserved
                     wg_mem@.len() >= 8192,
                     // Local array sizes preserved
@@ -1799,12 +1835,25 @@ fn mandelbrot_perturbation(
                     wg_mem@.len() >= 8192,
                     vote_base + 256u32 < 8192u32,
                     g_count <= i,
+                    // (#3) g_count counts glitched votes in the prefix scanned so far.
+                    g_count as nat == count_positive(wg_mem@, vote_base as int, i as int),
+                    // (#5) best_vote is the maximum vote in the scanned prefix.
+                    best_vote == max_prefix(wg_mem@, vote_base as int, i as int),
+                    // When any vote was seen, best_idx points at a position in
+                    // [0, i) whose vote equals best_vote. (When best_vote == 0,
+                    // best_idx is still its initial 0.)
+                    best_vote > 0u32 ==> (
+                        best_idx < i
+                        && wg_mem@[vote_base as int + best_idx as int] == best_vote
+                    ),
+                    best_vote == 0u32 ==> best_idx == 0u32,
             {
-                if vget(wg_mem, vote_base + i) > best_vote {
-                    best_vote = vget(wg_mem, vote_base + i);
+                let v = vget(wg_mem, vote_base + i);
+                if v > best_vote {
+                    best_vote = v;
                     best_idx = i;
                 }
-                if vget(wg_mem, vote_base + i) > 0u32 {
+                if v > 0u32 {
                     g_count = g_count + 1u32;
                 }
             }
@@ -1813,6 +1862,23 @@ fn mandelbrot_perturbation(
 
             // Update ref_c to the best pixel's c value
             if g_count > 0u32 {
+                // (#6) The u32 subtractions `gid_x - lid_x` and `gid_y - lid_y`
+                // are safe: the kernel precondition guarantees gid_x >= lid_x
+                // and gid_y >= lid_y (carried by the refinement loop
+                // invariant). Also bound the result so (result + 16) fits in u32.
+                proof {
+                    assert(gid_x >= lid_x);
+                    assert(gid_y >= lid_y);
+                    assert(best_idx < 256u32);
+                    assert(best_idx % 16u32 < 16u32) by(bit_vector)
+                        requires best_idx < 256u32;
+                    assert(best_idx / 16u32 < 16u32) by(bit_vector)
+                        requires best_idx < 256u32;
+                    // gid_x < width <= 0xFFFF and lid_x < 16, so
+                    // gid_x - lid_x + 15 < 0x10000 < u32_max.
+                    assert((gid_x - lid_x) as int + 16 < u32_max());
+                    assert((gid_y - lid_y) as int + 16 < u32_max());
+                }
                 let best_gx_raw = gid_x - lid_x + (best_idx % 16u32);
                 let best_gy_raw = gid_y - lid_y + (best_idx / 16u32);
                 // Clamp to grid bounds (border workgroups may exceed width/height)
@@ -1849,6 +1915,21 @@ fn mandelbrot_perturbation(
         round = round + 1u32;
     }
 
+    // (#1) Post-loop termination state.
+    // The refinement loop either exited normally (round == max_rounds) or
+    // via `break` when all glitches were resolved (glitch_count == 0).
+    // In both cases, the invariant-carried state holds:
+    //   escaped_iter <= max_iters
+    //   is_glitched ∈ {0, 1}
+    //   glitch_iter < max_iters
+    // These three facts cover every pixel output state: "escaped at iter k",
+    // "inside the set (ran full max_iters)", or "glitched at iter k".
+    proof {
+        assert(escaped_iter <= max_iters);
+        assert(is_glitched == 0u32 || is_glitched == 1u32);
+        assert(glitch_iter < max_iters);
+    }
+
     // ── Colorize ──
     // PROVED: output pixel correspondence.
     // tid = gid_y * width + gid_x: standard row-major linearization.
@@ -1857,9 +1938,15 @@ fn mandelbrot_perturbation(
     proof {
         assert(tid == gid_y * width + gid_x);
         assert((tid as int) < (width as int) * (height as int));
-        // Injectivity: if gid_y1 * w + gid_x1 == gid_y2 * w + gid_x2
-        // with 0 <= gid_x < w, then gid_x1 == gid_x2 and gid_y1 == gid_y2.
-        // (Standard row-major property, holds because gid_x < width.)
+        // Formal injectivity: if any other (gy', gx') would produce the same
+        // tid with 0 <= gx' < width and 0 <= gy', they must equal (gid_y, gid_x).
+        assert forall |gy2: int, gx2: int|
+            0 <= gx2 && gx2 < width as int && 0 <= gy2
+                && #[trigger] (gy2 * width as int + gx2) == tid as int
+            implies gx2 == gid_x as int && gy2 == gid_y as int
+        by {
+            lemma_tid_injective(gid_y as int, gid_x as int, gy2, gx2, width as int);
+        }
     }
     let alpha = 4278190080u32;
     if escaped_iter >= max_iters {
