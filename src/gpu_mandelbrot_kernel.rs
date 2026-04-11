@@ -1586,6 +1586,145 @@ proof fn theorem_glitch_detection_soundness(
             r > 0, t > 0, eps >= 0;
 }
 
+// ───────────────────────────────────────────────────────────────
+// Refined glitch criterion (#80)
+// ───────────────────────────────────────────────────────────────
+
+/// The mathematical perturbation glitch criterion.
+///
+/// Perturbation theory's linearization `(Z+δ)² ≈ Z² + 2Zδ` is valid only
+/// when `|δ²|` is small compared to `|2Zδ|`, i.e., when `|δ| << 2|Z|`.
+///
+/// We declare a glitch when `max(|δ_re|, |δ_im|) >= 2 * z_max`, where
+/// `z_max` bounds both `|Z_re|` and `|Z_im|`. With `z_max = 2` (escape
+/// radius), this means glitch when `|δ| ≥ 4`.
+///
+/// At this threshold, the `δ²` correction term equals the `2Zδ` linear
+/// term in magnitude — the linearization has completely broken down.
+pub open spec fn is_perturbation_glitch(
+    delta_re: int, delta_im: int, z_max: int,
+) -> bool {
+    let abs_d_re = if delta_re < 0 { -delta_re } else { delta_re };
+    let abs_d_im = if delta_im < 0 { -delta_im } else { delta_im };
+    abs_d_re >= 2 * z_max || abs_d_im >= 2 * z_max
+}
+
+/// SOUNDNESS: The kernel's coarse `δ[n-1] > 3` check (which fires when
+/// `vec_val(δ) >= 4 * BASE^(n-1)`) implies the math glitch criterion
+/// `is_perturbation_glitch` for `z_max = 2` and a fixed-point scaling
+/// where `frac_limbs == n - 1` (one integer limb).
+///
+/// Argument: `vec_val(δ) >= 4 * BASE^(n-1) == 4 * S`, so the physical
+/// value `vec_val(δ) / S >= 4 == 2 * z_max`. The math criterion holds.
+proof fn theorem_glitch_check_sound(
+    delta_re_unsigned: int,
+    delta_im_unsigned: int,
+    delta_re_signed: int,
+    delta_im_signed: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n > 0,
+        frac_limbs == (n - 1) as nat,
+        delta_re_unsigned >= 0,
+        delta_im_unsigned >= 0,
+        // Sign-magnitude relationship
+        delta_re_signed == delta_re_unsigned || delta_re_signed == -delta_re_unsigned,
+        delta_im_signed == delta_im_unsigned || delta_im_signed == -delta_im_unsigned,
+    ensures
+        // If either component's unsigned value reaches 4 * BASE^(n-1) = 4 * S,
+        // the math glitch criterion holds at z_max = 2 (physical units after
+        // dividing by S = limb_power(frac_limbs) = limb_power(n-1)).
+        ({
+            let s = limb_power((n - 1) as nat);
+            (delta_re_unsigned >= 4 * s || delta_im_unsigned >= 4 * s)
+                ==> is_perturbation_glitch(
+                        delta_re_signed / s,
+                        delta_im_signed / s,
+                        2)
+        }),
+{
+    let s = limb_power((n - 1) as nat);
+    lemma_limb_power_positive((n - 1) as nat);
+    assert(s > 0);
+
+    // Establish: |delta_re_signed| == delta_re_unsigned, similarly for im
+    let abs_d_re = if delta_re_signed < 0 { -delta_re_signed } else { delta_re_signed };
+    let abs_d_im = if delta_im_signed < 0 { -delta_im_signed } else { delta_im_signed };
+    assert(abs_d_re == delta_re_unsigned);
+    assert(abs_d_im == delta_im_unsigned);
+
+    if delta_re_unsigned >= 4 * s || delta_im_unsigned >= 4 * s {
+        // The physical scale: divide by s
+        let phys_re = delta_re_signed / s;
+        let phys_im = delta_im_signed / s;
+        let abs_phys_re = if phys_re < 0 { -phys_re } else { phys_re };
+        let abs_phys_im = if phys_im < 0 { -phys_im } else { phys_im };
+
+        // Show that at least one of |phys_re|, |phys_im| >= 4 == 2 * 2
+        if delta_re_unsigned >= 4 * s {
+            // delta_re_unsigned == abs_d_re and abs_d_re / s is the physical magnitude.
+            // We need: abs_phys_re >= 4.
+            // abs(x/s) for x = delta_re_signed: this depends on sign convention.
+            // For Verus int division (truncation toward zero):
+            //   if delta_re_signed >= 0: phys_re == delta_re_signed/s
+            //                         == delta_re_unsigned/s >= 4 (since unsigned >= 4*s)
+            //   if delta_re_signed < 0: phys_re == delta_re_signed/s
+            //                         == -delta_re_unsigned/s
+            //                         <= -4 (since unsigned >= 4*s)
+            //   Either way: abs_phys_re >= 4.
+            assert(delta_re_unsigned / s >= 4) by(nonlinear_arith)
+                requires delta_re_unsigned >= 4 * s, s > 0;
+            if delta_re_signed >= 0 {
+                assert(delta_re_signed == delta_re_unsigned);
+                assert(phys_re == delta_re_unsigned / s);
+                assert(phys_re >= 4);
+                assert(abs_phys_re >= 4);
+            } else {
+                // delta_re_signed == -delta_re_unsigned, with delta_re_unsigned > 0
+                assert(delta_re_signed == -delta_re_unsigned);
+                vstd::arithmetic::div_mod::lemma_fundamental_div_mod(-delta_re_unsigned, s);
+                assert(phys_re <= 0);
+                assert(-phys_re * s >= delta_re_unsigned - s + 1) by(nonlinear_arith)
+                    requires phys_re * s + (-delta_re_unsigned) % s == -delta_re_unsigned,
+                             0 <= (-delta_re_unsigned) % s, (-delta_re_unsigned) % s < s,
+                             s > 0;
+                assert(-phys_re >= 4) by(nonlinear_arith)
+                    requires -phys_re * s >= delta_re_unsigned - s + 1,
+                             delta_re_unsigned >= 4 * s, s > 0;
+                assert(abs_phys_re == -phys_re);
+                assert(abs_phys_re >= 4);
+            }
+            assert(is_perturbation_glitch(phys_re, phys_im, 2));
+        } else {
+            assert(delta_im_unsigned >= 4 * s);
+            // Symmetric argument for im
+            assert(delta_im_unsigned / s >= 4) by(nonlinear_arith)
+                requires delta_im_unsigned >= 4 * s, s > 0;
+            if delta_im_signed >= 0 {
+                assert(delta_im_signed == delta_im_unsigned);
+                assert(phys_im == delta_im_unsigned / s);
+                assert(phys_im >= 4);
+                assert(abs_phys_im >= 4);
+            } else {
+                assert(delta_im_signed == -delta_im_unsigned);
+                vstd::arithmetic::div_mod::lemma_fundamental_div_mod(-delta_im_unsigned, s);
+                assert(phys_im <= 0);
+                assert(-phys_im * s >= delta_im_unsigned - s + 1) by(nonlinear_arith)
+                    requires phys_im * s + (-delta_im_unsigned) % s == -delta_im_unsigned,
+                             0 <= (-delta_im_unsigned) % s, (-delta_im_unsigned) % s < s,
+                             s > 0;
+                assert(-phys_im >= 4) by(nonlinear_arith)
+                    requires -phys_im * s >= delta_im_unsigned - s + 1,
+                             delta_im_unsigned >= 4 * s, s > 0;
+                assert(abs_phys_im == -phys_im);
+                assert(abs_phys_im >= 4);
+            }
+            assert(is_perturbation_glitch(phys_re, phys_im, 2));
+        }
+    }
+}
+
 /// Concrete instantiation: R=2, T=3, eps=1 gives bound=43.
 /// 43 fits in a single u32 limb (43 << 2^32), so no overflow.
 proof fn corollary_mandelbrot_no_overflow(
