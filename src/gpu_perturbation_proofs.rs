@@ -12,7 +12,7 @@ use verus_fixed_point::fixed_point::limb_ops::{
 };
 use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
 use crate::gpu_mandelbrot_kernel::{
-    SpecComplex, spec_ref_step, spec_pert_step,
+    SpecComplex, spec_complex_square, spec_ref_step, spec_pert_step,
     perturbation_step_correct, theorem_perturbation_n_steps,
 };
 
@@ -928,6 +928,230 @@ pub proof fn lemma_pert_step_buf_matches_spec(
         by(nonlinear_arith)
         requires new_dim == 2 * (s3 + s4) + 2 * dre * dim + dcim,
                  s3 == z_re * dim, s4 == z_im * dre;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Reference-step buffer spec: Z_{k+1} = Z_k² + c_ref (Mandelbrot)
+//
+// Mirrors the 9-op sequence the kernel's reference-orbit loop uses
+// (Karatsuba squaring + adds with c_ref). Used for bridge lemmas and
+// for per-iteration tracking in the ref-orbit loop.
+// ═══════════════════════════════════════════════════════════════
+
+/// Buffer-level reference step: Z_{k+1} = Z_k² + c_ref.
+///
+/// Uses the same Karatsuba structure the kernel's iteration body does:
+///   re² = re * re
+///   im² = im * im
+///   (re+im)² = (re+im) * (re+im)
+///   new_re = (re² - im²) + c_re
+///   2*re*im = (re+im)² - re² - im²
+///   new_im = 2*re*im + c_im
+pub open spec fn ref_step_buf_int(
+    z_re: int, z_im: int,
+    c_re: int, c_im: int,
+    n: nat, frac_limbs: nat,
+) -> (int, int) {
+    // Squaring pieces
+    let z_re_sq = signed_mul_buf(z_re, z_re, n, frac_limbs);
+    let z_im_sq = signed_mul_buf(z_im, z_im, n, frac_limbs);
+    let z_sum = signed_add_buf(z_re, z_im, n);
+    let z_sum_sq = signed_mul_buf(z_sum, z_sum, n, frac_limbs);
+
+    // z² real = re² - im²
+    let zsq_re = signed_sub_buf(z_re_sq, z_im_sq, n);
+    // z² imag = (re+im)² - re² - im² (= 2*re*im after cancellation)
+    let q1 = signed_sub_buf(z_sum_sq, z_re_sq, n);
+    let zsq_im = signed_sub_buf(q1, z_im_sq, n);
+
+    // Add c
+    let new_re = signed_add_buf(zsq_re, c_re, n);
+    let new_im = signed_add_buf(zsq_im, c_im, n);
+
+    (new_re, new_im)
+}
+
+/// Single-bound predicate for the reference step's no-overflow precondition.
+/// All inputs (Z_re, Z_im, c_re, c_im) bounded by `r`, with
+/// `6 * r * r < limb_power(n)` — the ref step's max intermediate is `5*r*r`
+/// in the imaginary branch's q1 (from `(re+im)² - re²` bounded by `4*r² + r²`).
+pub open spec fn ref_step_no_overflow(
+    z_re: int, z_im: int,
+    c_re: int, c_im: int,
+    r: int,
+    n: nat,
+) -> bool {
+    &&& -r <= z_re && z_re <= r
+    &&& -r <= z_im && z_im <= r
+    &&& -r <= c_re && c_re <= r
+    &&& -r <= c_im && c_im <= r
+    &&& r >= 0
+    &&& 6 * r * r + r < limb_power(n)
+}
+
+/// Integer bridge: the buffer reference step matches the mathematical
+/// `spec_ref_step` (which uses `spec_complex_square + spec_complex_add`)
+/// when no intermediate value overflows.
+///
+/// Restricted to `frac_limbs == 0` (integer case). The fixed-point
+/// version follows by scaling, analogous to Stage E's scaled bridge.
+pub proof fn lemma_ref_step_buf_matches_spec(
+    z_re: int, z_im: int,
+    c_re: int, c_im: int,
+    r: int,
+    n: nat,
+)
+    requires
+        n >= 1,
+        ref_step_no_overflow(z_re, z_im, c_re, c_im, r, n),
+    ensures
+        ({
+            let buf = ref_step_buf_int(z_re, z_im, c_re, c_im, n, 0);
+            let spec = spec_ref_step(
+                SpecComplex { re: z_re, im: z_im },
+                SpecComplex { re: c_re, im: c_im },
+            );
+            buf.0 == spec.re && buf.1 == spec.im
+        }),
+{
+    lemma_limb_power_pos(n);
+    let p = limb_power(n) as int;
+    assert(p > 0);
+    assert(r * r >= 0) by(nonlinear_arith);
+    assert(6 * r * r >= 0) by(nonlinear_arith) requires r * r >= 0;
+
+    // z_re * z_re: bound r*r
+    assert(z_re * z_re <= r * r) by(nonlinear_arith)
+        requires -r <= z_re, z_re <= r;
+    assert(z_re * z_re >= 0) by(nonlinear_arith);
+    assert(z_re * z_re < p) by(nonlinear_arith)
+        requires z_re * z_re <= r * r, 6 * r * r + r < p, r >= 0;
+    assert(z_re * z_re > -p) by(nonlinear_arith)
+        requires z_re * z_re >= 0, p > 0;
+    lemma_signed_mul_buf_no_wrap(z_re, z_re, n);
+    let z_re_sq = signed_mul_buf(z_re, z_re, n, 0);
+    assert(z_re_sq == z_re * z_re);
+
+    // z_im * z_im: bound r*r
+    assert(z_im * z_im <= r * r) by(nonlinear_arith)
+        requires -r <= z_im, z_im <= r;
+    assert(z_im * z_im >= 0) by(nonlinear_arith);
+    assert(z_im * z_im < p) by(nonlinear_arith)
+        requires z_im * z_im <= r * r, 6 * r * r + r < p, r >= 0;
+    assert(z_im * z_im > -p) by(nonlinear_arith)
+        requires z_im * z_im >= 0, p > 0;
+    lemma_signed_mul_buf_no_wrap(z_im, z_im, n);
+    let z_im_sq = signed_mul_buf(z_im, z_im, n, 0);
+    assert(z_im_sq == z_im * z_im);
+
+    // z_re + z_im: bound 2r
+    assert(z_re + z_im <= 2 * r) by(nonlinear_arith)
+        requires -r <= z_re, z_re <= r, -r <= z_im, z_im <= r;
+    assert(z_re + z_im >= -(2 * r)) by(nonlinear_arith)
+        requires -r <= z_re, z_re <= r, -r <= z_im, z_im <= r;
+    assert(z_re + z_im < p) by(nonlinear_arith)
+        requires z_re + z_im <= 2 * r, r >= 0, 6 * r * r + r < p;
+    assert(z_re + z_im > -p) by(nonlinear_arith)
+        requires z_re + z_im >= -(2 * r), r >= 0, 6 * r * r + r < p;
+    lemma_signed_add_buf_no_wrap(z_re, z_im, n);
+    let z_sum = signed_add_buf(z_re, z_im, n);
+    assert(z_sum == z_re + z_im);
+
+    // (z_re + z_im)²: bound 4*r*r
+    let sum = z_re + z_im;
+    assert(sum * sum <= 4 * r * r) by(nonlinear_arith)
+        requires sum == z_re + z_im, -(2 * r) <= sum, sum <= 2 * r, r >= 0;
+    assert(sum * sum >= 0) by(nonlinear_arith);
+    assert(sum * sum < p) by(nonlinear_arith)
+        requires sum * sum <= 4 * r * r, 6 * r * r + r < p, r >= 0;
+    assert(sum * sum > -p) by(nonlinear_arith)
+        requires sum * sum >= 0, p > 0;
+    lemma_signed_mul_buf_no_wrap(sum, sum, n);
+    let z_sum_sq = signed_mul_buf(sum, sum, n, 0);
+    assert(z_sum_sq == sum * sum);
+
+    // z² real = z_re_sq - z_im_sq: bound 2*r*r
+    assert(z_re_sq - z_im_sq <= 2 * r * r) by(nonlinear_arith)
+        requires z_re_sq == z_re * z_re, z_im_sq == z_im * z_im,
+                 z_re * z_re <= r * r, z_im * z_im >= 0;
+    assert(z_re_sq - z_im_sq >= -(2 * r * r)) by(nonlinear_arith)
+        requires z_re_sq == z_re * z_re, z_im_sq == z_im * z_im,
+                 z_re * z_re >= 0, z_im * z_im <= r * r;
+    assert(z_re_sq - z_im_sq < p) by(nonlinear_arith)
+        requires z_re_sq - z_im_sq <= 2 * r * r, 6 * r * r + r < p, r >= 0;
+    assert(z_re_sq - z_im_sq > -p) by(nonlinear_arith)
+        requires z_re_sq - z_im_sq >= -(2 * r * r), 6 * r * r + r < p, r >= 0;
+    lemma_signed_sub_buf_no_wrap(z_re_sq, z_im_sq, n);
+    let zsq_re = signed_sub_buf(z_re_sq, z_im_sq, n);
+    assert(zsq_re == z_re * z_re - z_im * z_im);
+
+    // q1 = z_sum_sq - z_re_sq: bound 5*r*r
+    assert(z_sum_sq - z_re_sq <= 5 * r * r) by(nonlinear_arith)
+        requires z_sum_sq == sum * sum, sum * sum <= 4 * r * r,
+                 z_re_sq == z_re * z_re, z_re * z_re >= 0;
+    assert(z_sum_sq - z_re_sq >= -(5 * r * r)) by(nonlinear_arith)
+        requires z_sum_sq == sum * sum, sum * sum >= 0,
+                 z_re_sq == z_re * z_re, z_re * z_re <= r * r;
+    assert(z_sum_sq - z_re_sq < p) by(nonlinear_arith)
+        requires z_sum_sq - z_re_sq <= 5 * r * r, 6 * r * r + r < p, r >= 0;
+    assert(z_sum_sq - z_re_sq > -p) by(nonlinear_arith)
+        requires z_sum_sq - z_re_sq >= -(5 * r * r), 6 * r * r + r < p, r >= 0;
+    lemma_signed_sub_buf_no_wrap(z_sum_sq, z_re_sq, n);
+    let q1 = signed_sub_buf(z_sum_sq, z_re_sq, n);
+    assert(q1 == sum * sum - z_re * z_re);
+
+    // zsq_im = q1 - z_im_sq = (z_re+z_im)² - z_re² - z_im² = 2*z_re*z_im
+    assert(q1 - z_im_sq <= 6 * r * r) by(nonlinear_arith)
+        requires q1 == sum * sum - z_re * z_re, sum * sum <= 4 * r * r,
+                 z_re * z_re >= 0, z_im_sq == z_im * z_im, z_im * z_im >= 0;
+    assert(q1 - z_im_sq >= -(6 * r * r)) by(nonlinear_arith)
+        requires q1 == sum * sum - z_re * z_re, sum * sum >= 0,
+                 z_re * z_re <= r * r, z_im_sq == z_im * z_im, z_im * z_im <= r * r;
+    assert(q1 - z_im_sq < p) by(nonlinear_arith)
+        requires q1 - z_im_sq <= 6 * r * r, 6 * r * r + r < p, r >= 0;
+    assert(q1 - z_im_sq > -p) by(nonlinear_arith)
+        requires q1 - z_im_sq >= -(6 * r * r), 6 * r * r + r < p, r >= 0;
+    lemma_signed_sub_buf_no_wrap(q1, z_im_sq, n);
+    let zsq_im = signed_sub_buf(q1, z_im_sq, n);
+    // Algebra: (z_re + z_im)² - z_re² - z_im² == 2*z_re*z_im
+    assert(zsq_im == 2 * z_re * z_im) by(nonlinear_arith)
+        requires zsq_im == sum * sum - z_re * z_re - z_im * z_im,
+                 sum == z_re + z_im;
+
+    // new_re = zsq_re + c_re
+    assert(zsq_re + c_re <= 2 * r * r + r) by(nonlinear_arith)
+        requires zsq_re == z_re * z_re - z_im * z_im,
+                 z_re * z_re - z_im * z_im <= 2 * r * r, c_re <= r;
+    assert(zsq_re + c_re >= -(2 * r * r + r)) by(nonlinear_arith)
+        requires zsq_re == z_re * z_re - z_im * z_im,
+                 z_re * z_re - z_im * z_im >= -(2 * r * r), c_re >= -r;
+    assert(zsq_re + c_re < p) by(nonlinear_arith)
+        requires zsq_re + c_re <= 2 * r * r + r, 6 * r * r + r < p, r >= 0;
+    assert(zsq_re + c_re > -p) by(nonlinear_arith)
+        requires zsq_re + c_re >= -(2 * r * r + r), 6 * r * r + r < p, r >= 0;
+    lemma_signed_add_buf_no_wrap(zsq_re, c_re, n);
+    let new_re = signed_add_buf(zsq_re, c_re, n);
+    assert(new_re == z_re * z_re - z_im * z_im + c_re);
+
+    // new_im = zsq_im + c_im
+    assert(zsq_im + c_im <= 2 * r * r + r) by(nonlinear_arith)
+        requires zsq_im == 2 * z_re * z_im, c_im <= r,
+                 -r <= z_re, z_re <= r, -r <= z_im, z_im <= r;
+    assert(zsq_im + c_im >= -(2 * r * r + r)) by(nonlinear_arith)
+        requires zsq_im == 2 * z_re * z_im, c_im >= -r,
+                 -r <= z_re, z_re <= r, -r <= z_im, z_im <= r;
+    assert(zsq_im + c_im < p) by(nonlinear_arith)
+        requires zsq_im + c_im <= 2 * r * r + r, 6 * r * r + r < p, r >= 0;
+    assert(zsq_im + c_im > -p) by(nonlinear_arith)
+        requires zsq_im + c_im >= -(2 * r * r + r), 6 * r * r + r < p, r >= 0;
+    lemma_signed_add_buf_no_wrap(zsq_im, c_im, n);
+    let new_im = signed_add_buf(zsq_im, c_im, n);
+    assert(new_im == 2 * z_re * z_im + c_im);
+
+    // spec_ref_step = spec_complex_add(spec_complex_square(z), c):
+    //   spec.re = z_re² - z_im² + c_re
+    //   spec.im = 2 * z_re * z_im + c_im
+    // new_re == spec.re and new_im == spec.im by construction.
 }
 
 // ═══════════════════════════════════════════════════════════════
