@@ -1237,28 +1237,31 @@ fn mandelbrot_perturbation(
 
             let ref_escaped = vget(wg_mem, ref_escape_addr);
 
-            // ── Task #78: Ghost value tracking for kernel spec connection ──
-            // ATTEMPTED: tracking delta_re_int, delta_im_int across iterations as
-            // ghost ints with a loop invariant. RESULT: even with rlimit(200), the
-            // perturbation while loop's Z3 context exceeded its budget. The two
-            // new ghost invariants for the signed-magnitude values were the
-            // straw that broke the camel's back.
+            // ── Task #78: Ghost value tracking across the perturbation loop ──
+            // The perturbation_iteration_step helper (Task #81) exports a value
+            // postcondition that ties the output buffers to pert_step_buf_int
+            // applied to the input signed integers. The kernel uses this to
+            // carry ghost δ_re_int / δ_im_int across iterations: the loop
+            // invariant says signed_val_of(delta_re@, sign) == delta_re_int,
+            // and after each helper call we update the ghost via pert_step_buf_int.
             //
-            // CONCLUSION: Task #78 cannot be done in-place. The perturbation
-            // loop body (~30 buffer ops, ~150 lines) must first be extracted
-            // into a focused helper function with explicit requires/ensures.
-            // The helper would have its own clean Z3 context and could carry
-            // the ghost invariants without polluting the kernel function.
-            //
-            // PLAN (for follow-up sessions):
-            //   1. Extract the perturbation iteration body into
-            //      `perturbation_iteration_step` helper
-            //   2. Helper takes the buffers + ghost δ_spec as preconditions
-            //   3. Helper proves the post-state matches spec_pert_step
-            //   4. Kernel calls the helper, carries ghost δ_spec across iters
-            //      via a much simpler loop invariant
-            //
-            // Documented in exec-verification-roadmap.md.
+            // δ_0 = 0, so the initial ghost values are 0.
+            let ghost mut delta_re_int: int = 0;
+            let ghost mut delta_im_int: int = 0;
+            proof {
+                // δ_0 = 0: vec_val(delta_re@) == 0 (proved above), so
+                // signed_val_of(delta_re@, 0) == 0 == delta_re_int.
+                assert(signed_val_of(delta_re@.subrange(0, n as int), delta_re_sign as int)
+                    == delta_re_int) by {
+                    assert(delta_re@.subrange(0, n as int) =~= delta_re@);
+                    assert(vec_val(delta_re@) == 0);
+                }
+                assert(signed_val_of(delta_im@.subrange(0, n as int), delta_im_sign as int)
+                    == delta_im_int) by {
+                    assert(delta_im@.subrange(0, n as int) =~= delta_im@);
+                    assert(vec_val(delta_im@) == 0);
+                }
+            }
 
             let mut iter = 0u32;
             while iter < max_iters
@@ -1306,6 +1309,13 @@ fn mandelbrot_perturbation(
                     (c_re_off as int) + (c_stride_px as int) <= c_data@.len() as int,
                     c_stride_px == 2u32 * n + 2u32,
                     (c_re_off as int) + (c_stride_px as int) < u32_max(),
+                    // ── Task #78: ghost value tracking ──
+                    // The signed integer values of delta_re/delta_im match the
+                    // ghost ints we update via pert_step_buf_int after each call.
+                    signed_val_of(delta_re@.subrange(0, n as int), delta_re_sign as int)
+                        == delta_re_int,
+                    signed_val_of(delta_im@.subrange(0, n as int), delta_im_sign as int)
+                        == delta_im_int,
                 decreases max_iters - iter,
             {
                 // If reference orbit escaped, Z values after this are garbage.
@@ -1349,6 +1359,11 @@ fn mandelbrot_perturbation(
                 // Extracted to perturbation_iteration_step (Task #81 Stage A).
                 let zn_re_slc = vslice(wg_mem, zn_re);
                 let zn_im_slc = vslice(wg_mem, zn_im);
+                // Capture old delta_re@ for the post-helper ghost update.
+                let ghost old_dre_seq = delta_re@;
+                let ghost old_dim_seq = delta_im@;
+                let ghost old_dre_sign = delta_re_sign as int;
+                let ghost old_dim_sign = delta_im_sign as int;
                 let (new_dr_s, new_di_s) = perturbation_iteration_step(
                     zn_re_slc, zn_re_s,
                     zn_im_slc, zn_im_s,
@@ -1363,6 +1378,50 @@ fn mandelbrot_perturbation(
                 );
                 delta_re_sign = new_dr_s;
                 delta_im_sign = new_di_s;
+
+                // ── Task #78: Update ghost δ_re_int / δ_im_int via pert_step_buf_int.
+                proof {
+                    // Compute the same intermediates the helper's postcondition uses.
+                    let z_re_int_now = signed_val_of(
+                        zn_re_slc@.subrange(0, n as int), zn_re_s as int);
+                    let z_im_int_now = signed_val_of(
+                        zn_im_slc@.subrange(0, n as int), zn_im_s as int);
+                    let dre_in_int_now = signed_val_of(old_dre_seq, old_dre_sign);
+                    let dim_in_int_now = signed_val_of(old_dim_seq, old_dim_sign);
+                    let dcre_int_now = signed_val_of(dc_re@, dc_re_sign as int);
+                    let dcim_int_now = signed_val_of(dc_im@, dc_im_sign as int);
+                    let result = pert_step_buf_int(
+                        z_re_int_now, z_im_int_now,
+                        dre_in_int_now, dim_in_int_now,
+                        dcre_int_now, dcim_int_now,
+                        n as nat, frac_limbs as nat,
+                    );
+
+                    // The helper's postcondition asserts:
+                    //   signed_val_of(delta_re@, new_dr_s as int) == result.0
+                    //   signed_val_of(delta_im@, new_di_s as int) == result.1
+                    assert(signed_val_of(delta_re@, new_dr_s as int) == result.0);
+                    assert(signed_val_of(delta_im@, new_di_s as int) == result.1);
+
+                    // Old loop invariant: signed_val_of(old δ subrange, old sign) == δ_int.
+                    // Connect via extensional equality of subrange to full Seq.
+                    assert(old_dre_seq.subrange(0, n as int) =~= old_dre_seq);
+                    assert(old_dim_seq.subrange(0, n as int) =~= old_dim_seq);
+                    assert(dre_in_int_now == delta_re_int);
+                    assert(dim_in_int_now == delta_im_int);
+
+                    // Update ghost ints to match the new buffer values.
+                    delta_re_int = result.0;
+                    delta_im_int = result.1;
+
+                    // Re-establish the loop invariant on the new state.
+                    assert(delta_re@.subrange(0, n as int) =~= delta_re@);
+                    assert(delta_im@.subrange(0, n as int) =~= delta_im@);
+                    assert(signed_val_of(delta_re@.subrange(0, n as int), delta_re_sign as int)
+                        == delta_re_int);
+                    assert(signed_val_of(delta_im@.subrange(0, n as int), delta_im_sign as int)
+                        == delta_im_int);
+                }
 
                 // ── Glitch check: fixed-point overflow detection ──
                 // With multi-precision fixed-point, perturbation stays accurate even
