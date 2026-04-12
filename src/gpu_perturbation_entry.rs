@@ -13,10 +13,13 @@ use verus_fixed_point::fixed_point::limb_ops::*;
 use verus_fixed_point::fixed_point::limb_ops_proofs::signed_val_of;
 #[cfg(verus_keep_ghost)]
 use crate::gpu_perturbation_proofs::{
-    pert_step_buf_int, signed_mul_buf, signed_add_buf, signed_sub_buf,
+    pert_step_buf_int, ref_step_buf_int,
+    signed_mul_buf, signed_add_buf, signed_sub_buf,
     lemma_signed_mul_postcond_to_buf,
     lemma_disjunction_to_signed_add_buf,
     lemma_disjunction_to_signed_sub_buf,
+    lemma_ref_orbit_chain,
+    lemma_pointwise_to_valid_limbs,
 };
 
 verus! {
@@ -422,7 +425,9 @@ fn copy_limbs(src: &Vec<u32>, src_off: u32, dst: &mut Vec<u32>, n: u32)
 /// Stage B provides a value-equation postcondition: the output
 /// `(delta_re, delta_im)` buffers, viewed as signed integers, equal
 /// `pert_step_buf_int` applied to the input signed integer values.
-#[verifier::rlimit(500)]
+/// rlimit bump: 500→700 due to ref_orbit sub-helpers added to module
+/// (module-level context pollution, see rlimit tips anti-pattern).
+#[verifier::rlimit(700)]
 fn perturbation_iteration_step(
     z_re_slice: &[u32], z_re_sign: u32,
     z_im_slice: &[u32], z_im_sign: u32,
@@ -836,23 +841,555 @@ fn perturbation_iteration_step(
     (new_dr_s, new_di_s)
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Reference orbit sub-helpers (Phase B Stage 2)
+//
+// Split the 9-op ref orbit step into 3 focused sub-helpers to keep
+// each Z3 context under ~20 assertions (shared-buffer frame reasoning
+// is expensive). Each sub-helper does 3 ops, establishes value equations,
+// and provides frame conditions for subsequent parts.
+// ═══════════════════════════════════════════════════════════════
+
+/// Part A of reference orbit step: ops 1-3 (re², im², re+im).
+///
+/// Computes the three squaring/sum intermediates needed by the Karatsuba
+/// decomposition of Z² + c. Writes to temp region [t0_re2, t0_re2+3n).
+#[verifier::rlimit(500)]
+fn ref_orbit_step_part_a(
+    wg_mem: &mut Vec<u32>,
+    zk_re: u32, zk_im: u32,
+    zk_re_s: u32, zk_im_s: u32,
+    t0_re2: u32,
+    ref_a: &mut Vec<u32>, ref_b: &mut Vec<u32>,
+    n: u32, frac_limbs: u32,
+) -> (out: (u32, u32, u32))
+    requires
+        n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+        frac_limbs <= n, frac_limbs + n <= 2 * n,
+        old(wg_mem)@.len() >= 8192,
+        old(ref_a)@.len() == n as int,
+        old(ref_b)@.len() == n as int,
+        zk_re_s <= 1u32, zk_im_s <= 1u32,
+        (zk_re as int) + (n as int) <= old(wg_mem)@.len(),
+        (zk_im as int) + (n as int) <= old(wg_mem)@.len(),
+        zk_re + n < u32_max(),
+        zk_im + n < u32_max(),
+        (zk_re as int) + (n as int) <= t0_re2 as int,
+        (zk_im as int) + (n as int) <= t0_re2 as int,
+        t0_re2 + 10u32 * n < 8192u32,
+        valid_limbs(old(wg_mem)@.subrange(zk_re as int, zk_re as int + n as int)),
+        valid_limbs(old(wg_mem)@.subrange(zk_im as int, zk_im as int + n as int)),
+    ensures
+        wg_mem@.len() == old(wg_mem)@.len(),
+        ref_a@.len() == n as int,
+        ref_b@.len() == n as int,
+        // Signs: self-mul always gives sign 0
+        out.0 == 0u32, out.1 == 0u32,
+        out.2 == 0u32 || out.2 == 1u32,
+        // Valid limbs on outputs
+        valid_limbs(wg_mem@.subrange(t0_re2 as int, t0_re2 as int + n as int)),
+        valid_limbs(wg_mem@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int)),
+        valid_limbs(wg_mem@.subrange(t0_re2 as int + 2 * n as int, t0_re2 as int + 3 * n as int)),
+        // Frame: everything below t0_re2 unchanged
+        forall |j: int| 0 <= j < t0_re2 as int ==> wg_mem@[j] == old(wg_mem)@[j],
+        // Op 1 value: re²
+        vec_val(wg_mem@.subrange(t0_re2 as int, t0_re2 as int + n as int))
+            == (vec_val(old(wg_mem)@.subrange(zk_re as int, zk_re as int + n as int))
+                * vec_val(old(wg_mem)@.subrange(zk_re as int, zk_re as int + n as int))
+                / limb_power(frac_limbs as nat)) % limb_power(n as nat),
+        // Op 2 value: im²
+        vec_val(wg_mem@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int))
+            == (vec_val(old(wg_mem)@.subrange(zk_im as int, zk_im as int + n as int))
+                * vec_val(old(wg_mem)@.subrange(zk_im as int, zk_im as int + n as int))
+                / limb_power(frac_limbs as nat)) % limb_power(n as nat),
+        // Op 3 value: re + im (3-way disjunction)
+        ({
+            let va = vec_val(old(wg_mem)@.subrange(zk_re as int, zk_re as int + n as int));
+            let vb = vec_val(old(wg_mem)@.subrange(zk_im as int, zk_im as int + n as int));
+            let vo = vec_val(wg_mem@.subrange(t0_re2 as int + 2 * n as int, t0_re2 as int + 3 * n as int));
+            let sa = if zk_re_s == 0u32 { va } else { -va };
+            let sb = if zk_im_s == 0u32 { vb } else { -vb };
+            let so = if out.2 == 0u32 { vo } else { -vo };
+            let p = limb_power(n as nat);
+            so == sa + sb
+                || (so == sa + sb - p && sa + sb >= p)
+                || (so == sa + sb + p && sa + sb <= -(p as int))
+        }),
+{
+    let t0_im2 = t0_re2 + n;
+    let t0_rpi = t0_re2 + 2u32 * n;
+    let t0_prod = t0_re2 + 5u32 * n;
+    let t0_stmp1 = t0_re2 + 7u32 * n;
+    let t0_stmp2 = t0_re2 + 8u32 * n;
+
+    let ghost old_wg = wg_mem@;
+
+    // Op 1: re² = mul(zk_re, zk_re)
+    copy_limbs(wg_mem, zk_re, ref_a, n);
+    // ref_a now holds old_wg[zk_re..+n]; wg_mem unchanged (copy_limbs takes &Vec)
+    proof {
+        assert(ref_a@.subrange(0, n as int) =~= old_wg.subrange(zk_re as int, zk_re as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j]
+                    == old_wg.subrange(zk_re as int, zk_re as int + n as int)[j] by {}
+        }
+    }
+    let re2_s = signed_mul_to_buf(
+        &**ref_a, &zk_re_s, &**ref_a, &zk_re_s,
+        wg_mem, t0_re2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+    let ghost re2_out = wg_mem@.subrange(t0_re2 as int, t0_re2 as int + n as int);
+
+    // Op 2: im² = mul(zk_im, zk_im)
+    copy_limbs(wg_mem, zk_im, ref_a, n);
+    // zk_im region below t0_re2 → unchanged by op 1
+    proof {
+        assert(ref_a@.subrange(0, n as int) =~= old_wg.subrange(zk_im as int, zk_im as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j]
+                    == old_wg.subrange(zk_im as int, zk_im as int + n as int)[j] by {
+                // ref_a@[j] == wg_mem@[zk_im+j] (copy_limbs)
+                // wg_mem@[zk_im+j] == old_wg[zk_im+j] (op 1 frame: zk_im+j < t0_re2)
+                assert(zk_im as int + j < t0_re2 as int);
+            }
+        }
+    }
+    let im2_s = signed_mul_to_buf(
+        &**ref_a, &zk_im_s, &**ref_a, &zk_im_s,
+        wg_mem, t0_im2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+    let ghost im2_out = wg_mem@.subrange(t0_im2 as int, t0_im2 as int + n as int);
+
+    // Op 3: re + im
+    copy_limbs(wg_mem, zk_re, ref_a, n);
+    copy_limbs(wg_mem, zk_im, ref_b, n);
+    proof {
+        assert(ref_a@.subrange(0, n as int) =~= old_wg.subrange(zk_re as int, zk_re as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j]
+                    == old_wg.subrange(zk_re as int, zk_re as int + n as int)[j] by {
+                assert(zk_re as int + j < t0_re2 as int);
+            }
+        }
+        assert(ref_b@.subrange(0, n as int) =~= old_wg.subrange(zk_im as int, zk_im as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_b@.subrange(0, n as int)[j]
+                    == old_wg.subrange(zk_im as int, zk_im as int + n as int)[j] by {
+                assert(zk_im as int + j < t0_re2 as int);
+            }
+        }
+    }
+    let rpi_s = signed_add_to_buf(
+        &**ref_a, &zk_re_s, &**ref_b, &zk_im_s,
+        wg_mem, t0_rpi as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    proof {
+        lemma_pointwise_to_valid_limbs(wg_mem@, t0_re2 as int, n as nat);
+        lemma_pointwise_to_valid_limbs(wg_mem@, t0_im2 as int, n as nat);
+        lemma_pointwise_to_valid_limbs(wg_mem@, t0_rpi as int, n as nat);
+
+        // Frame: re2 output from op 1 preserved through ops 2-3
+        assert(wg_mem@.subrange(t0_re2 as int, t0_re2 as int + n as int) =~= re2_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(t0_re2 as int, t0_re2 as int + n as int)[j] == re2_out[j] by {
+                assert(wg_mem@[t0_re2 as int + j] == re2_out[j]);
+            }
+        }
+        // Frame: im2 output from op 2 preserved through op 3
+        assert(wg_mem@.subrange(t0_im2 as int, t0_im2 as int + n as int) =~= im2_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(t0_im2 as int, t0_im2 as int + n as int)[j] == im2_out[j] by {
+                assert(wg_mem@[t0_im2 as int + j] == im2_out[j]);
+            }
+        }
+    }
+
+    (re2_s, im2_s, rpi_s)
+}
+
+/// Part B of reference orbit step: ops 4-6 ((re+im)², re²-im², diff+c_re).
+///
+/// Computes the new real component. Writes new_re to zn output slot and
+/// intermediates to temp region [t0_re2+3n, t0_re2+5n).
+#[verifier::rlimit(500)]
+fn ref_orbit_step_part_b(
+    wg_mem: &mut Vec<u32>,
+    re2_s: u32, im2_s: u32, rpi_s: u32,
+    ref_c_re_s: u32,
+    t0_re2: u32, zn: u32, ref_c_base: u32,
+    ref_a: &mut Vec<u32>, ref_b: &mut Vec<u32>,
+    n: u32, frac_limbs: u32,
+) -> (out: (u32, u32, u32))
+    requires
+        n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+        frac_limbs <= n, frac_limbs + n <= 2 * n,
+        old(wg_mem)@.len() >= 8192,
+        old(ref_a)@.len() == n as int,
+        old(ref_b)@.len() == n as int,
+        re2_s <= 1u32, im2_s <= 1u32, rpi_s <= 1u32, ref_c_re_s <= 1u32,
+        t0_re2 + 10u32 * n < 8192u32,
+        zn + 2u32 * n + 1u32 < u32_max(),
+        (zn as int) + 2 * (n as int) + 2 <= t0_re2 as int,
+        (zn as int) + (n as int) <= ref_c_base as int,
+        (ref_c_base as int) + 2 * (n as int) + 2 <= t0_re2 as int,
+        ref_c_base + n + 1u32 + n < u32_max(),
+        // Valid limbs on inputs (from Part A outputs + original c_ref)
+        valid_limbs(old(wg_mem)@.subrange(t0_re2 as int, t0_re2 as int + n as int)),
+        valid_limbs(old(wg_mem)@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int)),
+        valid_limbs(old(wg_mem)@.subrange(t0_re2 as int + 2 * n as int, t0_re2 as int + 3 * n as int)),
+        valid_limbs(old(wg_mem)@.subrange(ref_c_base as int, ref_c_base as int + n as int)),
+    ensures
+        wg_mem@.len() == old(wg_mem)@.len(),
+        ref_a@.len() == n as int,
+        ref_b@.len() == n as int,
+        out.0 == 0u32,
+        out.1 == 0u32 || out.1 == 1u32,
+        out.2 == 0u32 || out.2 == 1u32,
+        // Valid limbs on outputs
+        valid_limbs(wg_mem@.subrange(t0_re2 as int + 3 * n as int, t0_re2 as int + 4 * n as int)),
+        valid_limbs(wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int)),
+        valid_limbs(wg_mem@.subrange(zn as int, zn as int + n as int)),
+        // Frame: Part A outputs [t0_re2, t0_re2+3n) preserved
+        forall |j: int| t0_re2 as int <= j < t0_re2 as int + 3 * n as int
+            ==> wg_mem@[j] == old(wg_mem)@[j],
+        // Frame: c_ref region preserved (zn+n ≤ ref_c_base, so op 6 doesn't touch c_ref)
+        forall |j: int| ref_c_base as int <= j < ref_c_base as int + 2 * n as int + 2
+            ==> wg_mem@[j] == old(wg_mem)@[j],
+        // Op 4 value: (re+im)²
+        vec_val(wg_mem@.subrange(t0_re2 as int + 3 * n as int, t0_re2 as int + 4 * n as int))
+            == (vec_val(old(wg_mem)@.subrange(t0_re2 as int + 2 * n as int, t0_re2 as int + 3 * n as int))
+                * vec_val(old(wg_mem)@.subrange(t0_re2 as int + 2 * n as int, t0_re2 as int + 3 * n as int))
+                / limb_power(frac_limbs as nat)) % limb_power(n as nat),
+        // Op 5 value: re² - im² (3-way disjunction)
+        ({
+            let va = vec_val(old(wg_mem)@.subrange(t0_re2 as int, t0_re2 as int + n as int));
+            let vb = vec_val(old(wg_mem)@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int));
+            let vo = vec_val(wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int));
+            let sa = if re2_s == 0u32 { va } else { -va };
+            let sb = if im2_s == 0u32 { vb } else { -vb };
+            let so = if out.1 == 0u32 { vo } else { -vo };
+            let p = limb_power(n as nat);
+            so == sa - sb
+                || (so == sa - sb - p && sa - sb >= p)
+                || (so == sa - sb + p && sa - sb <= -(p as int))
+        }),
+        // Op 6 value: diff + c_re (3-way disjunction)
+        ({
+            let va = vec_val(wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int));
+            let vb = vec_val(old(wg_mem)@.subrange(ref_c_base as int, ref_c_base as int + n as int));
+            let vo = vec_val(wg_mem@.subrange(zn as int, zn as int + n as int));
+            let sa = if out.1 == 0u32 { va } else { -va };
+            let sb = if ref_c_re_s == 0u32 { vb } else { -vb };
+            let so = if out.2 == 0u32 { vo } else { -vo };
+            let p = limb_power(n as nat);
+            so == sa + sb
+                || (so == sa + sb - p && sa + sb >= p)
+                || (so == sa + sb + p && sa + sb <= -(p as int))
+        }),
+{
+    let ghost old_wg = wg_mem@;
+    let t0_im2 = t0_re2 + n;
+    let t0_rpi = t0_re2 + 2u32 * n;
+    let t0_sum2 = t0_re2 + 3u32 * n;
+    let t0_diff = t0_re2 + 4u32 * n;
+    let t0_prod = t0_re2 + 5u32 * n;
+    let t0_stmp1 = t0_re2 + 7u32 * n;
+    let t0_stmp2 = t0_re2 + 8u32 * n;
+
+    // Op 4: (re+im)²
+    copy_limbs(wg_mem, t0_rpi, ref_a, n);
+    proof {
+        assert(ref_a@.subrange(0, n as int) =~= old_wg.subrange(t0_rpi as int, t0_rpi as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j]
+                    == old_wg.subrange(t0_rpi as int, t0_rpi as int + n as int)[j] by {}
+        }
+    }
+    let sum2_s = signed_mul_to_buf(
+        &**ref_a, &rpi_s, &**ref_a, &rpi_s,
+        wg_mem, t0_sum2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+    let ghost sum2_out = wg_mem@.subrange(t0_sum2 as int, t0_sum2 as int + n as int);
+
+    // Op 5: re² - im²
+    copy_limbs(wg_mem, t0_re2, ref_a, n);
+    copy_limbs(wg_mem, t0_im2, ref_b, n);
+    // t0_re2 (0n) and t0_im2 (1n) unchanged by op 4 (wrote to 3n+ and 5n+)
+    proof {
+        assert(ref_a@.subrange(0, n as int) =~= old_wg.subrange(t0_re2 as int, t0_re2 as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j]
+                    == old_wg.subrange(t0_re2 as int, t0_re2 as int + n as int)[j] by {
+                assert(t0_re2 as int + j < t0_sum2 as int);
+            }
+        }
+        assert(ref_b@.subrange(0, n as int) =~= old_wg.subrange(t0_im2 as int, t0_im2 as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_b@.subrange(0, n as int)[j]
+                    == old_wg.subrange(t0_im2 as int, t0_im2 as int + n as int)[j] by {
+                assert(t0_im2 as int + j < t0_sum2 as int);
+            }
+        }
+        // Explicit vec_val equalities for the sub disjunction postcondition
+        assert(vec_val(ref_a@.subrange(0, n as int)) == vec_val(old_wg.subrange(t0_re2 as int, t0_re2 as int + n as int)));
+        assert(vec_val(ref_b@.subrange(0, n as int)) == vec_val(old_wg.subrange(t0_im2 as int, t0_im2 as int + n as int)));
+    }
+    let diff_s = signed_sub_to_buf(
+        &**ref_a, &re2_s, &**ref_b, &im2_s,
+        wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+    let ghost diff_out = wg_mem@.subrange(t0_diff as int, t0_diff as int + n as int);
+
+    // Op 6: diff + c_re → new_re at zn
+    copy_limbs(wg_mem, t0_diff, ref_a, n);
+    copy_limbs(wg_mem, ref_c_base, ref_b, n);
+    proof {
+        // ref_a holds op 5's t0_diff output
+        assert(ref_a@.subrange(0, n as int) =~= diff_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j] == diff_out[j] by {}
+        }
+        // ref_c_base below t0_re2, unchanged by ops 4-5
+        assert(ref_b@.subrange(0, n as int) =~= old_wg.subrange(ref_c_base as int, ref_c_base as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_b@.subrange(0, n as int)[j]
+                    == old_wg.subrange(ref_c_base as int, ref_c_base as int + n as int)[j] by {
+                assert(ref_c_base as int + j < t0_re2 as int);
+            }
+        }
+        assert(vec_val(ref_b@.subrange(0, n as int)) == vec_val(old_wg.subrange(ref_c_base as int, ref_c_base as int + n as int)));
+    }
+    let new_re_s = signed_add_to_buf(
+        &**ref_a, &diff_s, &**ref_b, &ref_c_re_s,
+        wg_mem, zn as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    proof {
+        lemma_pointwise_to_valid_limbs(wg_mem@, t0_sum2 as int, n as nat);
+        lemma_pointwise_to_valid_limbs(wg_mem@, t0_diff as int, n as nat);
+        lemma_pointwise_to_valid_limbs(wg_mem@, zn as int, n as nat);
+
+        // Frame: t0_sum2 from op 4 preserved through ops 5-6
+        assert(wg_mem@.subrange(t0_sum2 as int, t0_sum2 as int + n as int) =~= sum2_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(t0_sum2 as int, t0_sum2 as int + n as int)[j] == sum2_out[j] by {
+                assert(wg_mem@[t0_sum2 as int + j] == sum2_out[j]);
+            }
+        }
+        // Frame: t0_diff from op 5 preserved through op 6 (op 6 writes to zn, stmp1, stmp2)
+        assert(wg_mem@.subrange(t0_diff as int, t0_diff as int + n as int) =~= diff_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(t0_diff as int, t0_diff as int + n as int)[j] == diff_out[j] by {
+                assert(wg_mem@[t0_diff as int + j] == diff_out[j]);
+            }
+        }
+    }
+
+    (sum2_s, diff_s, new_re_s)
+}
+
+/// Part C of reference orbit step: ops 7-9 ((re+im)²-re², t1-im², t2+c_im).
+///
+/// Computes the new imaginary component using the 2*re*im = (re+im)²-re²-im²
+/// identity. Writes new_im to zn+n+1 output slot.
+#[verifier::rlimit(500)]
+fn ref_orbit_step_part_c(
+    wg_mem: &mut Vec<u32>,
+    re2_s: u32, im2_s: u32, sum2_s: u32,
+    ref_c_im_s: u32,
+    t0_re2: u32, zn: u32, ref_c_base: u32,
+    ref_a: &mut Vec<u32>, ref_b: &mut Vec<u32>,
+    n: u32,
+) -> (out: (u32, u32, u32))
+    requires
+        n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+        old(wg_mem)@.len() >= 8192,
+        old(ref_a)@.len() == n as int,
+        old(ref_b)@.len() == n as int,
+        re2_s <= 1u32, im2_s <= 1u32, sum2_s <= 1u32, ref_c_im_s <= 1u32,
+        t0_re2 + 10u32 * n < 8192u32,
+        zn + 2u32 * n + 1u32 < u32_max(),
+        (zn as int) + 2 * (n as int) + 2 <= t0_re2 as int,
+        (zn as int) + 2 * (n as int) + 2 <= ref_c_base as int,
+        (ref_c_base as int) + 2 * (n as int) + 2 <= t0_re2 as int,
+        ref_c_base + n + 1u32 + n < u32_max(),
+        // Valid limbs on inputs
+        valid_limbs(old(wg_mem)@.subrange(t0_re2 as int, t0_re2 as int + n as int)),
+        valid_limbs(old(wg_mem)@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int)),
+        valid_limbs(old(wg_mem)@.subrange(t0_re2 as int + 3 * n as int, t0_re2 as int + 4 * n as int)),
+        valid_limbs(old(wg_mem)@.subrange(
+            ref_c_base as int + n as int + 1, ref_c_base as int + 2 * n as int + 1)),
+    ensures
+        wg_mem@.len() == old(wg_mem)@.len(),
+        ref_a@.len() == n as int,
+        ref_b@.len() == n as int,
+        out.0 == 0u32 || out.0 == 1u32,
+        out.1 == 0u32 || out.1 == 1u32,
+        out.2 == 0u32 || out.2 == 1u32,
+        // Valid limbs on outputs
+        valid_limbs(wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int)),
+        valid_limbs(wg_mem@.subrange(t0_re2 as int + 9 * n as int, t0_re2 as int + 10 * n as int)),
+        valid_limbs(wg_mem@.subrange(
+            zn as int + n as int + 1, zn as int + 2 * n as int + 1)),
+        // Frame: Part A re2/im2 [t0_re2, t0_re2+2n) preserved
+        forall |j: int| t0_re2 as int <= j < t0_re2 as int + 2 * n as int
+            ==> wg_mem@[j] == old(wg_mem)@[j],
+        // Frame: zn [zn, zn+n) preserved (new_re from Part B)
+        forall |j: int| zn as int <= j < zn as int + n as int
+            ==> wg_mem@[j] == old(wg_mem)@[j],
+        // Op 7 value: (re+im)² - re² (3-way disjunction)
+        ({
+            let va = vec_val(old(wg_mem)@.subrange(t0_re2 as int + 3 * n as int, t0_re2 as int + 4 * n as int));
+            let vb = vec_val(old(wg_mem)@.subrange(t0_re2 as int, t0_re2 as int + n as int));
+            let vo = vec_val(wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int));
+            let sa = if sum2_s == 0u32 { va } else { -va };
+            let sb = if re2_s == 0u32 { vb } else { -vb };
+            let so = if out.0 == 0u32 { vo } else { -vo };
+            let p = limb_power(n as nat);
+            so == sa - sb
+                || (so == sa - sb - p && sa - sb >= p)
+                || (so == sa - sb + p && sa - sb <= -(p as int))
+        }),
+        // Op 8 value: t1 - im² (3-way disjunction)
+        ({
+            let va = vec_val(wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int));
+            let vb = vec_val(old(wg_mem)@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int));
+            let vo = vec_val(wg_mem@.subrange(t0_re2 as int + 9 * n as int, t0_re2 as int + 10 * n as int));
+            let sa = if out.0 == 0u32 { va } else { -va };
+            let sb = if im2_s == 0u32 { vb } else { -vb };
+            let so = if out.1 == 0u32 { vo } else { -vo };
+            let p = limb_power(n as nat);
+            so == sa - sb
+                || (so == sa - sb - p && sa - sb >= p)
+                || (so == sa - sb + p && sa - sb <= -(p as int))
+        }),
+        // Op 9 value: t2 + c_im (3-way disjunction)
+        ({
+            let va = vec_val(wg_mem@.subrange(t0_re2 as int + 9 * n as int, t0_re2 as int + 10 * n as int));
+            let vb = vec_val(old(wg_mem)@.subrange(
+                ref_c_base as int + n as int + 1, ref_c_base as int + 2 * n as int + 1));
+            let vo = vec_val(wg_mem@.subrange(
+                zn as int + n as int + 1, zn as int + 2 * n as int + 1));
+            let sa = if out.1 == 0u32 { va } else { -va };
+            let sb = if ref_c_im_s == 0u32 { vb } else { -vb };
+            let so = if out.2 == 0u32 { vo } else { -vo };
+            let p = limb_power(n as nat);
+            so == sa + sb
+                || (so == sa + sb - p && sa + sb >= p)
+                || (so == sa + sb + p && sa + sb <= -(p as int))
+        }),
+{
+    let ghost old_wg = wg_mem@;
+    let t0_re2_off = t0_re2;
+    let t0_im2 = t0_re2 + n;
+    let t0_sum2 = t0_re2 + 3u32 * n;
+    let t0_diff = t0_re2 + 4u32 * n;
+    let t0_stmp1 = t0_re2 + 7u32 * n;
+    let t0_stmp2 = t0_re2 + 8u32 * n;
+    let t0_stmp3 = t0_re2 + 9u32 * n;
+
+    // Op 7: (re+im)² - re²
+    copy_limbs(wg_mem, t0_sum2, ref_a, n);
+    copy_limbs(wg_mem, t0_re2_off, ref_b, n);
+    // First op — wg_mem == old_wg
+    proof {
+        assert(ref_a@.subrange(0, n as int) =~= old_wg.subrange(t0_sum2 as int, t0_sum2 as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j]
+                    == old_wg.subrange(t0_sum2 as int, t0_sum2 as int + n as int)[j] by {}
+        }
+        assert(ref_b@.subrange(0, n as int) =~= old_wg.subrange(t0_re2 as int, t0_re2 as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_b@.subrange(0, n as int)[j]
+                    == old_wg.subrange(t0_re2 as int, t0_re2 as int + n as int)[j] by {}
+        }
+    }
+    let t1_s = signed_sub_to_buf(
+        &**ref_a, &sum2_s, &**ref_b, &re2_s,
+        wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+    let ghost diff_out = wg_mem@.subrange(t0_diff as int, t0_diff as int + n as int);
+
+    // Op 8: t1 - im²
+    copy_limbs(wg_mem, t0_diff, ref_a, n);
+    copy_limbs(wg_mem, t0_im2, ref_b, n);
+    proof {
+        // ref_a holds op 7's t0_diff output
+        assert(ref_a@.subrange(0, n as int) =~= diff_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j] == diff_out[j] by {}
+        }
+        // t0_im2 at 1n — unchanged by op 7 (wrote to 4n, 7n, 8n)
+        assert(ref_b@.subrange(0, n as int) =~= old_wg.subrange(t0_im2 as int, t0_im2 as int + n as int)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_b@.subrange(0, n as int)[j]
+                    == old_wg.subrange(t0_im2 as int, t0_im2 as int + n as int)[j] by {
+                assert(t0_im2 as int + j < t0_diff as int);
+            }
+        }
+        assert(vec_val(ref_b@.subrange(0, n as int)) == vec_val(old_wg.subrange(t0_im2 as int, t0_im2 as int + n as int)));
+    }
+    let t2_s = signed_sub_to_buf(
+        &**ref_a, &t1_s, &**ref_b, &im2_s,
+        wg_mem, t0_stmp3 as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+    let ghost stmp3_out = wg_mem@.subrange(t0_stmp3 as int, t0_stmp3 as int + n as int);
+
+    // Op 9: t2 + c_im → new_im at zn+n+1
+    copy_limbs(wg_mem, t0_stmp3, ref_a, n);
+    copy_limbs(wg_mem, (ref_c_base + n + 1u32), ref_b, n);
+    proof {
+        // ref_a holds op 8's t0_stmp3 output
+        assert(ref_a@.subrange(0, n as int) =~= stmp3_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_a@.subrange(0, n as int)[j] == stmp3_out[j] by {}
+        }
+        // c_im at ref_c_base+n+1 — below t0_re2, unchanged by ops 7-8
+        assert(ref_b@.subrange(0, n as int) =~= old_wg.subrange(
+            ref_c_base as int + n as int + 1, ref_c_base as int + 2 * n as int + 1)) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                ref_b@.subrange(0, n as int)[j]
+                    == old_wg.subrange(
+                        ref_c_base as int + n as int + 1,
+                        ref_c_base as int + 2 * n as int + 1)[j] by {
+                assert(ref_c_base as int + n as int + 1 + j < t0_re2 as int);
+            }
+        }
+        assert(vec_val(ref_b@.subrange(0, n as int)) == vec_val(old_wg.subrange(
+            ref_c_base as int + n as int + 1, ref_c_base as int + 2 * n as int + 1)));
+    }
+    let new_im_s = signed_add_to_buf(
+        &**ref_a, &t2_s, &**ref_b, &ref_c_im_s,
+        wg_mem, (zn + n + 1u32) as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+
+    proof {
+        lemma_pointwise_to_valid_limbs(wg_mem@, t0_diff as int, n as nat);
+        lemma_pointwise_to_valid_limbs(wg_mem@, t0_stmp3 as int, n as nat);
+        lemma_pointwise_to_valid_limbs(wg_mem@, (zn + n + 1u32) as int, n as nat);
+
+        // Frame: t0_diff (op 7 output) preserved through ops 8-9
+        // (op 8 writes to 9n, 7n, 8n; op 9 writes to zn+n+1, 7n, 8n — none touch 4n)
+        assert(wg_mem@.subrange(t0_diff as int, t0_diff as int + n as int) =~= diff_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(t0_diff as int, t0_diff as int + n as int)[j] == diff_out[j] by {
+                assert(wg_mem@[t0_diff as int + j] == diff_out[j]);
+            }
+        }
+        // Frame: t0_stmp3 (op 8 output) preserved through op 9
+        // (op 9 writes to zn+n+1, 7n, 8n — not 9n)
+        assert(wg_mem@.subrange(t0_stmp3 as int, t0_stmp3 as int + n as int) =~= stmp3_out) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(t0_stmp3 as int, t0_stmp3 as int + n as int)[j] == stmp3_out[j] by {
+                assert(wg_mem@[t0_stmp3 as int + j] == stmp3_out[j]);
+            }
+        }
+    }
+
+    (t1_s, t2_s, new_im_s)
+}
+
 /// One iteration of the reference orbit: Z_{k+1} = Z_k² + c_ref.
 ///
 /// Extracted from the thread-0 reference-orbit loop in
-/// `mandelbrot_perturbation` (Task #4 Phase B Stage 1) to isolate the
-/// 9-op Karatsuba squaring + c-add sequence into a focused Z3 context,
-/// mirroring the Stage A extraction for the perturbation helper.
-///
-/// Writes the new orbit point's real and imaginary bytes to
-/// `wg_mem[zn..zn+n]` and `wg_mem[zn+n+1..zn+2n+1]`, respectively.
-/// Returns the signs `(new_re_s, new_im_s)` which the caller stores at
-/// `wg_mem[zn+n]` and `wg_mem[zn+2n+1]`.
-///
-/// Stage 1 provides only structural postconditions (size preservation,
-/// sign validity, valid_limbs on the new slot). A later Stage 2 could
-/// add a value-equation postcondition tying the output to
-/// `ref_step_buf_int` on the input Z_k / c_ref values.
-#[verifier::rlimit(100)]
+/// `mandelbrot_perturbation` (Task #4 Phase B). Delegates to three
+/// focused sub-helpers (Part A/B/C, 3 ops each) to keep each Z3 context
+/// under ~20 assertions, then calls `lemma_ref_orbit_chain` to prove the
+/// value equation: the output signed integers equal `ref_step_buf_int`
+/// applied to the input Z_k and c_ref.
+#[verifier::rlimit(1000)]
 fn ref_orbit_iteration_step(
     wg_mem: &mut Vec<u32>,
     zk_re: u32, zk_im: u32,
@@ -904,6 +1441,8 @@ fn ref_orbit_iteration_step(
         (zk_re as int) + (n as int) <= t0_re2 as int,
         (zk_im as int) + (n as int) <= t0_re2 as int,
         (ref_c_base as int) + 2 * (n as int) + 2 <= t0_re2 as int,
+        // Non-overlap: zn output slots don't touch c_ref
+        (zn as int) + 2 * (n as int) + 2 <= ref_c_base as int,
         // Valid limbs on Z_k and c_ref regions
         valid_limbs(old(wg_mem)@.subrange(zk_re as int, zk_re as int + n as int)),
         valid_limbs(old(wg_mem)@.subrange(zk_im as int, zk_im as int + n as int)),
@@ -922,83 +1461,272 @@ fn ref_orbit_iteration_step(
         valid_limbs(wg_mem@.subrange(
             zn as int + n as int + 1,
             zn as int + 2 * n as int + 1)),
+        // Value equation: output equals ref_step_buf_int on inputs.
+        ({
+            let z_re_int = signed_val_of(
+                old(wg_mem)@.subrange(zk_re as int, zk_re as int + n as int), zk_re_s as int);
+            let z_im_int = signed_val_of(
+                old(wg_mem)@.subrange(zk_im as int, zk_im as int + n as int), zk_im_s as int);
+            let c_re_int = signed_val_of(
+                old(wg_mem)@.subrange(ref_c_base as int, ref_c_base as int + n as int), ref_c_re_s as int);
+            let c_im_int = signed_val_of(
+                old(wg_mem)@.subrange(
+                    ref_c_base as int + n as int + 1,
+                    ref_c_base as int + 2 * n as int + 1),
+                ref_c_im_s as int);
+            let result = ref_step_buf_int(
+                z_re_int, z_im_int, c_re_int, c_im_int, n as nat, frac_limbs as nat);
+            &&& signed_val_of(
+                wg_mem@.subrange(zn as int, zn as int + n as int), out.0 as int) == result.0
+            &&& signed_val_of(
+                wg_mem@.subrange(
+                    zn as int + n as int + 1, zn as int + 2 * n as int + 1),
+                out.1 as int) == result.1
+        }),
 {
-    // Copy Z_k re from wg_mem to ref_a (avoids borrow aliasing)
-    copy_limbs(wg_mem, zk_re, ref_a, n);
-    let re2_s = signed_mul_to_buf(
-        &**ref_a, &zk_re_s, &**ref_a, &zk_re_s,
-        wg_mem, t0_re2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+    // ── Capture ghost input Seqs ──
+    let ghost z_re_seq = wg_mem@.subrange(zk_re as int, zk_re as int + n as int);
+    let ghost z_im_seq = wg_mem@.subrange(zk_im as int, zk_im as int + n as int);
+    let ghost c_re_seq = wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int);
+    let ghost c_im_seq = wg_mem@.subrange(
+        ref_c_base as int + n as int + 1,
+        ref_c_base as int + 2 * n as int + 1);
 
-    copy_limbs(wg_mem, zk_im, ref_a, n);
-    let im2_s = signed_mul_to_buf(
-        &**ref_a, &zk_im_s, &**ref_a, &zk_im_s,
-        wg_mem, t0_im2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
+    // ── Part A: ops 1-3 (re², im², re+im) ──
+    let (re2_s, im2_s, rpi_s) = ref_orbit_step_part_a(
+        wg_mem, zk_re, zk_im, zk_re_s, zk_im_s,
+        t0_re2, ref_a, ref_b, n, frac_limbs);
 
-    // re + im
-    copy_limbs(wg_mem, zk_re, ref_a, n);
-    copy_limbs(wg_mem, zk_im, ref_b, n);
-    let rpi_s = signed_add_to_buf(
-        &**ref_a, &zk_re_s, &**ref_b, &zk_im_s,
-        wg_mem, t0_rpi as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
+    // Capture Part A outputs
+    let ghost t0_re2_seq = wg_mem@.subrange(t0_re2 as int, t0_re2 as int + n as int);
+    let ghost t0_im2_seq = wg_mem@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int);
+    let ghost t0_rpi_seq = wg_mem@.subrange(t0_re2 as int + 2 * n as int, t0_re2 as int + 3 * n as int);
 
-    // (re+im)^2
-    copy_limbs(wg_mem, t0_rpi, ref_a, n);
-    let sum2_s = signed_mul_to_buf(
-        &**ref_a, &rpi_s, &**ref_a, &rpi_s,
-        wg_mem, t0_sum2 as usize, t0_prod as usize, n as usize, frac_limbs as usize);
-
-    // new_re = re^2 - im^2 + c_re
-    copy_limbs(wg_mem, t0_re2, ref_a, n);
-    copy_limbs(wg_mem, t0_im2, ref_b, n);
-    let diff_s = signed_sub_to_buf(
-        &**ref_a, &re2_s, &**ref_b, &im2_s,
-        wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-    copy_limbs(wg_mem, t0_diff, ref_a, n);
-    copy_limbs(wg_mem, ref_c_base, ref_b, n);
-    let new_re_s = signed_add_to_buf(
-        &**ref_a, &diff_s, &**ref_b, &ref_c_re_s,
-        wg_mem, zn as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-    // new_im = (re+im)^2 - re^2 - im^2 + c_im
-    copy_limbs(wg_mem, t0_sum2, ref_a, n);
-    copy_limbs(wg_mem, t0_re2, ref_b, n);
-    let t1_s = signed_sub_to_buf(
-        &**ref_a, &sum2_s, &**ref_b, &re2_s,
-        wg_mem, t0_diff as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-    copy_limbs(wg_mem, t0_diff, ref_a, n);
-    copy_limbs(wg_mem, t0_im2, ref_b, n);
-    let t2_s = signed_sub_to_buf(
-        &**ref_a, &t1_s, &**ref_b, &im2_s,
-        wg_mem, t0_stmp3 as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-    copy_limbs(wg_mem, t0_stmp3, ref_a, n);
-    copy_limbs(wg_mem, (ref_c_base + n + 1u32), ref_b, n);
-    let new_im_s = signed_add_to_buf(
-        &**ref_a, &t2_s, &**ref_b, &ref_c_im_s,
-        wg_mem, (zn + n + 1u32) as usize, t0_stmp1 as usize, t0_stmp2 as usize, n as usize);
-
-    // Convert the per-index forall postconditions of signed_add_to_buf
-    // into the valid_limbs predicate on the new orbit slots.
+    // Part A frame: c_ref regions unchanged — assert =~= in outer scope
+    // so it's visible to the chain lemma proof block later
     proof {
-        let new_re_seq = wg_mem@.subrange(zn as int, zn as int + n as int);
-        let new_im_seq = wg_mem@.subrange(
-            zn as int + n as int + 1,
-            zn as int + 2 * n as int + 1);
-        assert(valid_limbs(new_re_seq)) by {
-            assert forall |k: int| 0 <= k < new_re_seq.len()
-                implies 0 <= (#[trigger] new_re_seq[k]).sem()
-                    && new_re_seq[k].sem() < LIMB_BASE() by {
-                assert(new_re_seq[k] == wg_mem@[zn as int + k]);
-            }
+        assert(wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int) =~= c_re_seq) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int)[j]
+                    == c_re_seq[j] by {}
         }
-        assert(valid_limbs(new_im_seq)) by {
-            assert forall |k: int| 0 <= k < new_im_seq.len()
-                implies 0 <= (#[trigger] new_im_seq[k]).sem()
-                    && new_im_seq[k].sem() < LIMB_BASE() by {
-                assert(new_im_seq[k] == wg_mem@[(zn as int + n as int + 1) + k]);
-            }
+    }
+
+    // ── Part B: ops 4-6 ((re+im)², re²-im², diff+c_re → new_re) ──
+    let (sum2_s, diff_s, new_re_s) = ref_orbit_step_part_b(
+        wg_mem, re2_s, im2_s, rpi_s, ref_c_re_s,
+        t0_re2, zn, ref_c_base,
+        ref_a, ref_b, n, frac_limbs);
+
+    // Capture Part B outputs
+    let ghost t0_sum2_seq = wg_mem@.subrange(t0_re2 as int + 3 * n as int, t0_re2 as int + 4 * n as int);
+    let ghost t0_diff_seq = wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int);
+    let ghost new_re_seq = wg_mem@.subrange(zn as int, zn as int + n as int);
+
+    // Part B frame: re2, im2 preserved; c_im region preserved
+    proof {
+        assert(wg_mem@.subrange(t0_re2 as int, t0_re2 as int + n as int) =~= t0_re2_seq);
+        assert(wg_mem@.subrange(t0_re2 as int + n as int, t0_re2 as int + 2 * n as int) =~= t0_im2_seq);
+        // c_im =~= visible in outer scope for chain lemma
+        assert(wg_mem@.subrange(
+            ref_c_base as int + n as int + 1,
+            ref_c_base as int + 2 * n as int + 1) =~= c_im_seq) by {
+            assert forall |j: int| 0 <= j < n as int implies
+                wg_mem@.subrange(
+                    ref_c_base as int + n as int + 1,
+                    ref_c_base as int + 2 * n as int + 1)[j]
+                        == c_im_seq[j] by {}
+        }
+    }
+
+    // ── Part C: ops 7-9 ((re+im)²-re², t1-im², t2+c_im → new_im) ──
+    let (t1_s, t2_s, new_im_s) = ref_orbit_step_part_c(
+        wg_mem, re2_s, im2_s, sum2_s, ref_c_im_s,
+        t0_re2, zn, ref_c_base,
+        ref_a, ref_b, n);
+
+    // Capture Part C outputs
+    let ghost t0_diff_seq2 = wg_mem@.subrange(t0_re2 as int + 4 * n as int, t0_re2 as int + 5 * n as int);
+    let ghost t0_stmp3_seq = wg_mem@.subrange(t0_re2 as int + 9 * n as int, t0_re2 as int + 10 * n as int);
+    let ghost new_im_seq = wg_mem@.subrange(
+        zn as int + n as int + 1, zn as int + 2 * n as int + 1);
+
+    // Part C frame: zn (new_re) preserved
+    proof {
+        assert(wg_mem@.subrange(zn as int, zn as int + n as int) =~= new_re_seq);
+    }
+
+    // ── Chain lemma: connect all 9 ops to ref_step_buf_int ──
+    // Scoped inside assert-by to prevent 48+ chain lemma precondition
+    // assertions from polluting the outer Z3 context (rlimit tips:
+    // "Functions with >50 assertions consistently fail").
+    proof {
+        assert({
+            let zk_re_int = signed_val_of(z_re_seq, zk_re_s as int);
+            let zk_im_int = signed_val_of(z_im_seq, zk_im_s as int);
+            let c_re_int = signed_val_of(c_re_seq, ref_c_re_s as int);
+            let c_im_int = signed_val_of(c_im_seq, ref_c_im_s as int);
+            let result = ref_step_buf_int(
+                zk_re_int, zk_im_int, c_re_int, c_im_int, n as nat, frac_limbs as nat);
+            signed_val_of(new_re_seq, new_re_s as int) == result.0
+                && signed_val_of(new_im_seq, new_im_s as int) == result.1
+        }) by {
+            // Stepping stones for chain lemma preconditions (scoped in assert-by
+            // to not pollute the outer function's Z3 context).
+
+            // Lengths
+            assert(z_re_seq.len() == n as nat);
+            assert(z_im_seq.len() == n as nat);
+            assert(c_re_seq.len() == n as nat);
+            assert(c_im_seq.len() == n as nat);
+            assert(t0_re2_seq.len() == n as nat);
+            assert(t0_im2_seq.len() == n as nat);
+            assert(t0_rpi_seq.len() == n as nat);
+            assert(t0_sum2_seq.len() == n as nat);
+            assert(t0_diff_seq.len() == n as nat);
+            assert(new_re_seq.len() == n as nat);
+            assert(t0_diff_seq2.len() == n as nat);
+            assert(t0_stmp3_seq.len() == n as nat);
+            assert(new_im_seq.len() == n as nat);
+
+            // Valid limbs (all 13)
+            assert(valid_limbs(z_re_seq));
+            assert(valid_limbs(z_im_seq));
+            assert(valid_limbs(c_re_seq));
+            assert(valid_limbs(c_im_seq));
+            assert(valid_limbs(t0_re2_seq));
+            assert(valid_limbs(t0_im2_seq));
+            assert(valid_limbs(t0_rpi_seq));
+            assert(valid_limbs(t0_sum2_seq));
+            assert(valid_limbs(t0_diff_seq));
+            assert(valid_limbs(new_re_seq));
+            assert(valid_limbs(t0_diff_seq2));
+            assert(valid_limbs(t0_stmp3_seq));
+            assert(valid_limbs(new_im_seq));
+
+            // Signs (int form)
+            assert(zk_re_s as int == 0 || zk_re_s as int == 1);
+            assert(zk_im_s as int == 0 || zk_im_s as int == 1);
+            assert(ref_c_re_s as int == 0 || ref_c_re_s as int == 1);
+            assert(ref_c_im_s as int == 0 || ref_c_im_s as int == 1);
+            assert(re2_s as int == 0 || re2_s as int == 1);
+            assert(im2_s as int == 0 || im2_s as int == 1);
+            assert(rpi_s as int == 0 || rpi_s as int == 1);
+            assert(sum2_s as int == 0 || sum2_s as int == 1);
+            assert(diff_s as int == 0 || diff_s as int == 1);
+            assert(new_re_s as int == 0 || new_re_s as int == 1);
+            assert(t1_s as int == 0 || t1_s as int == 1);
+            assert(t2_s as int == 0 || t2_s as int == 1);
+            assert(new_im_s as int == 0 || new_im_s as int == 1);
+
+            // Mul value equations (Ops 1, 2, 4 — from sub-helper postconditions)
+            assert(vec_val(t0_re2_seq) == (vec_val(z_re_seq) * vec_val(z_re_seq)
+                / limb_power(frac_limbs as nat)) % limb_power(n as nat));
+            assert(vec_val(t0_im2_seq) == (vec_val(z_im_seq) * vec_val(z_im_seq)
+                / limb_power(frac_limbs as nat)) % limb_power(n as nat));
+            assert(vec_val(t0_sum2_seq) == (vec_val(t0_rpi_seq) * vec_val(t0_rpi_seq)
+                / limb_power(frac_limbs as nat)) % limb_power(n as nat));
+
+            // Op 3 disjunction (add: re + im)
+            assert(({
+                let va = vec_val(z_re_seq);
+                let vb = vec_val(z_im_seq);
+                let vo = vec_val(t0_rpi_seq);
+                let sa = if zk_re_s as int == 0 { va } else { -va };
+                let sb = if zk_im_s as int == 0 { vb } else { -vb };
+                let so = if rpi_s as int == 0 { vo } else { -vo };
+                let p = limb_power(n as nat);
+                so == sa + sb
+                    || (so == sa + sb - p && sa + sb >= p)
+                    || (so == sa + sb + p && sa + sb <= -(p as int))
+            }));
+
+            // Op 5 disjunction (sub: re²-im²)
+            assert(({
+                let va = vec_val(t0_re2_seq);
+                let vb = vec_val(t0_im2_seq);
+                let vo = vec_val(t0_diff_seq);
+                let sa = if re2_s as int == 0 { va } else { -va };
+                let sb = if im2_s as int == 0 { vb } else { -vb };
+                let so = if diff_s as int == 0 { vo } else { -vo };
+                let p = limb_power(n as nat);
+                so == sa - sb
+                    || (so == sa - sb - p && sa - sb >= p)
+                    || (so == sa - sb + p && sa - sb <= -(p as int))
+            }));
+
+            // Op 6 disjunction (add: diff+c_re)
+            assert(({
+                let va = vec_val(t0_diff_seq);
+                let vb = vec_val(c_re_seq);
+                let vo = vec_val(new_re_seq);
+                let sa = if diff_s as int == 0 { va } else { -va };
+                let sb = if ref_c_re_s as int == 0 { vb } else { -vb };
+                let so = if new_re_s as int == 0 { vo } else { -vo };
+                let p = limb_power(n as nat);
+                so == sa + sb
+                    || (so == sa + sb - p && sa + sb >= p)
+                    || (so == sa + sb + p && sa + sb <= -(p as int))
+            }));
+
+            // Op 7 disjunction (sub: sum²-re²)
+            assert(({
+                let va = vec_val(t0_sum2_seq);
+                let vb = vec_val(t0_re2_seq);
+                let vo = vec_val(t0_diff_seq2);
+                let sa = if sum2_s as int == 0 { va } else { -va };
+                let sb = if re2_s as int == 0 { vb } else { -vb };
+                let so = if t1_s as int == 0 { vo } else { -vo };
+                let p = limb_power(n as nat);
+                so == sa - sb
+                    || (so == sa - sb - p && sa - sb >= p)
+                    || (so == sa - sb + p && sa - sb <= -(p as int))
+            }));
+
+            // Op 8 disjunction (sub: t1-im²)
+            assert(({
+                let va = vec_val(t0_diff_seq2);
+                let vb = vec_val(t0_im2_seq);
+                let vo = vec_val(t0_stmp3_seq);
+                let sa = if t1_s as int == 0 { va } else { -va };
+                let sb = if im2_s as int == 0 { vb } else { -vb };
+                let so = if t2_s as int == 0 { vo } else { -vo };
+                let p = limb_power(n as nat);
+                so == sa - sb
+                    || (so == sa - sb - p && sa - sb >= p)
+                    || (so == sa - sb + p && sa - sb <= -(p as int))
+            }));
+
+            // Op 9 disjunction (add: t2+c_im)
+            assert(({
+                let va = vec_val(t0_stmp3_seq);
+                let vb = vec_val(c_im_seq);
+                let vo = vec_val(new_im_seq);
+                let sa = if t2_s as int == 0 { va } else { -va };
+                let sb = if ref_c_im_s as int == 0 { vb } else { -vb };
+                let so = if new_im_s as int == 0 { vo } else { -vo };
+                let p = limb_power(n as nat);
+                so == sa + sb
+                    || (so == sa + sb - p && sa + sb >= p)
+                    || (so == sa + sb + p && sa + sb <= -(p as int))
+            }));
+
+            lemma_ref_orbit_chain::<u32>(
+                z_re_seq, zk_re_s as int,
+                z_im_seq, zk_im_s as int,
+                c_re_seq, ref_c_re_s as int,
+                c_im_seq, ref_c_im_s as int,
+                t0_re2_seq, re2_s as int,
+                t0_im2_seq, im2_s as int,
+                t0_rpi_seq, rpi_s as int,
+                t0_sum2_seq, sum2_s as int,
+                t0_diff_seq, diff_s as int,
+                new_re_seq, new_re_s as int,
+                t0_diff_seq2, t1_s as int,
+                t0_stmp3_seq, t2_s as int,
+                new_im_seq, new_im_s as int,
+                n as nat, frac_limbs as nat,
+            );
         }
     }
 
