@@ -1,8 +1,8 @@
 # Remaining Verification Work: GPU Mandelbrot Kernel
 
-**Status**: 2026-04-12 (updated 2026-04-12 session 2).
+**Status**: 2026-04-12 (updated 2026-04-12 session 2, items #1-#4 complete).
 
-**Crate state**: verus-mandelbrot 90 verified in `gpu_perturbation_entry`, 282 in `gpu_perturbation_proofs`, 0 errors crate-wide (321 cached). verus-fixed-point 991 verified, 0 errors.
+**Crate state**: verus-mandelbrot 90 verified in `gpu_perturbation_entry`, 336 in `gpu_perturbation_proofs`, 0 errors crate-wide (337 cached). verus-fixed-point 991 verified, 0 errors.
 
 ---
 
@@ -68,7 +68,11 @@ proof {
 
 **Effort**: ~30 minutes once #1 is done (direct analog of #78).
 
-### 3. Perturbation-theory dynamics bounds
+### 3. ~~Perturbation-theory dynamics bounds~~ ✅ DONE
+
+Completed 2026-04-12. Triangle inequality + escape bounds give r_u = 4, e_u = 1; 12·16+1 = 193 < 2³². `lemma_no_escape_end_to_end` composes with Stage G for full correctness.
+
+### ~~3 (original)~~. Perturbation-theory dynamics bounds
 
 **What**: Prove that `spec_orbit_bounded(z0, c_ref, d0, dc, r_u, e_u, n, frac_limbs, n_steps)` holds for realistic Mandelbrot parameters — i.e., that the spec perturbation orbit stays within the no-overflow regime throughout `max_iters` iterations.
 
@@ -89,7 +93,11 @@ proof {
 
 **Effort**: 1-3 days depending on the approach.
 
-### 4. Reference orbit buffer↔spec bridge
+### 4. ~~Reference orbit buffer↔spec bridge~~ ✅ DONE
+
+Completed 2026-04-12. Scaled bridge + inductive orbit proof. `lemma_ref_orbit_buf_matches_spec` proves ghost z_int = spec_ref_orbit * pf for all non-escaped iterations.
+
+### ~~4 (original)~~. Reference orbit buffer↔spec bridge
 
 **What**: Prove that thread 0's reference orbit computation (in `wg_mem`) matches `spec_ref_orbit(z0, c_ref, k)` at every iteration k.
 
@@ -136,9 +144,9 @@ Without a formal memory model, we can't prove that thread 0's writes to `wg_mem`
 ## Priority Order
 
 1. ~~**#1 (ref orbit value postcondition)**~~ ✅ DONE.
-2. **#2 (ghost Z tracking)** — trivial now that #1 is done. ~30 minutes.
-3. **#3 (dynamics bounds)** — Option A (tie to runtime glitch check) is the most practical. ~1-3 days.
-4. **#4 (ref orbit buffer↔spec bridge)** — mechanical composition of #1+#2+Phase A. ~1 day.
+2. ~~**#2 (ghost Z tracking)**~~ ✅ DONE.
+3. ~~**#3 (dynamics bounds)**~~ ✅ DONE.
+4. ~~**#4 (ref orbit buffer↔spec bridge)**~~ ✅ DONE.
 5. **#5 and #6** — research-level, not blocking any kernel-level guarantees.
 
 After #1-#4, the kernel has: "for every non-glitched iteration, the buffer state equals the scaled spec orbit value, and `perturbation_step_correct` holds." That's the strongest statement possible without modeling the GPU memory semantics (#6).
