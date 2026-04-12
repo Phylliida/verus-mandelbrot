@@ -2616,4 +2616,201 @@ pub proof fn lemma_ref_orbit_chain<T: LimbOps>(
     // ref_step_buf_int unfolds and matches each intermediate.
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Perturbation-theory dynamics bounds (#3, Option A)
+//
+// Key mathematical insight: before escape, |Z|² < 4 and |Z+δ|² < 4.
+// Triangle inequality gives |δ| < 4. With r_u = 4, e_u = 1:
+//   12·r_u² + e_u = 193 < 2³² = limb_power(1)
+// So pert_step_no_overflow holds for any config with n - frac_limbs ≥ 1.
+// ═══════════════════════════════════════════════════════════════
+
+/// Triangle inequality for complex components: if |w|² < R² and |z|² < R²,
+/// then each component of (w - z) satisfies (w_c - z_c)² < 4·R².
+///
+/// Proof: (|a| + |b|)² ≤ 2(a² + b²) from AM-GM, so
+/// (w_c - z_c)² ≤ (|w_c| + |z_c|)² ≤ 2(w_c² + z_c²) < 2(R² + R²) = 4R².
+pub proof fn lemma_escape_component_bound(
+    w_re: int, w_im: int, z_re: int, z_im: int, r_sq: int,
+)
+    requires
+        r_sq > 0,
+        w_re * w_re + w_im * w_im < r_sq,
+        z_re * z_re + z_im * z_im < r_sq,
+    ensures
+        (w_re - z_re) * (w_re - z_re) < 4 * r_sq,
+        (w_im - z_im) * (w_im - z_im) < 4 * r_sq,
+{
+    // Non-negativity of squares (needed as preconditions for later steps)
+    assert(w_re * w_re >= 0) by(nonlinear_arith);
+    assert(w_im * w_im >= 0) by(nonlinear_arith);
+    assert(z_re * z_re >= 0) by(nonlinear_arith);
+    assert(z_im * z_im >= 0) by(nonlinear_arith);
+
+    // Component bounds: w_re² < r_sq and z_re² < r_sq
+    assert(w_re * w_re < r_sq);
+    assert(w_im * w_im < r_sq);
+    assert(z_re * z_re < r_sq);
+    assert(z_im * z_im < r_sq);
+
+    // (a - b)² <= 2(a² + b²), from expanding: (a-b)² = a² - 2ab + b² and 2ab <= a² + b²
+    assert((w_re - z_re) * (w_re - z_re) <= 2 * (w_re * w_re + z_re * z_re)) by(nonlinear_arith);
+    assert((w_im - z_im) * (w_im - z_im) <= 2 * (w_im * w_im + z_im * z_im)) by(nonlinear_arith);
+
+    // Chain: 2(w_re² + z_re²) < 2(r_sq + r_sq) = 4*r_sq
+    assert(2 * (w_re * w_re + z_re * z_re) < 4 * r_sq);
+    assert(2 * (w_im * w_im + z_im * z_im) < 4 * r_sq);
+}
+
+/// No-escape implies no-overflow: if the reference orbit hasn't escaped
+/// (|Z|² < 4) and the full orbit hasn't escaped (|Z+δ|² < 4), then
+/// pert_step_no_overflow holds with r = 4, e = 1.
+///
+/// The triangle inequality gives |δ_re|, |δ_im| < 4 and |Z_re|, |Z_im| < 2.
+/// Then 12·4² + 1 = 193 < limb_power(n - frac_limbs) for n - frac_limbs ≥ 1.
+pub proof fn lemma_no_escape_implies_no_overflow(
+    z_re: int, z_im: int,
+    dre: int, dim: int,
+    dcre: int, dcim: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n >= 1, frac_limbs < n,
+        // Reference orbit hasn't escaped
+        z_re * z_re + z_im * z_im < 4,
+        // Full orbit hasn't escaped
+        (z_re + dre) * (z_re + dre) + (z_im + dim) * (z_im + dim) < 4,
+        // Δc bounded
+        -1 <= dcre && dcre <= 1,
+        -1 <= dcim && dcim <= 1,
+        // Integer precision large enough (holds for any n - frac_limbs >= 1 since limb_power(1) = 2^32)
+        194 <= limb_power((n - frac_limbs) as nat),
+    ensures
+        pert_step_no_overflow(z_re, z_im, dre, dim, dcre, dcim, 4, 1, (n - frac_limbs) as nat),
+{
+    // Triangle inequality: δ = (Z + δ) - Z, so |δ_c|² < 4·4 = 16, hence |δ_c| < 4
+    lemma_escape_component_bound(z_re + dre, z_im + dim, z_re, z_im, 4);
+    // This gives: ((z_re+dre) - z_re)² < 16, i.e., dre² < 16
+    assert(dre * dre < 16);
+    assert(dim * dim < 16);
+
+    // Non-negativity of squares
+    assert(z_re * z_re >= 0) by(nonlinear_arith);
+    assert(z_im * z_im >= 0) by(nonlinear_arith);
+
+    // Component bounds on Z: |Z_re|² ≤ |Z|² < 4
+    assert(z_re * z_re < 4);
+    assert(z_im * z_im < 4);
+
+    // Now establish all pert_step_no_overflow conditions with r=4, e=1:
+    // -4 <= z_re, z_im, dre, dim <= 4
+    // Need: z_re² < 4 ⟹ -4 < z_re < 4 ⟹ -4 <= z_re && z_re <= 4
+    assert(-4 <= z_re && z_re <= 4) by(nonlinear_arith) requires z_re * z_re < 4;
+    assert(-4 <= z_im && z_im <= 4) by(nonlinear_arith) requires z_im * z_im < 4;
+    assert(-4 <= dre && dre <= 4) by(nonlinear_arith) requires dre * dre < 16;
+    assert(-4 <= dim && dim <= 4) by(nonlinear_arith) requires dim * dim < 16;
+
+    // 12 * 4 * 4 + 1 = 193 < 194 <= limb_power(n - frac_limbs)
+    assert(12 * 4 * 4 + 1 < limb_power((n - frac_limbs) as nat)) by(nonlinear_arith)
+        requires 194 <= limb_power((n - frac_limbs) as nat);
+}
+
+/// Orbit-level no-escape predicate: both the reference orbit and the
+/// full (perturbed) orbit haven't escaped for iterations 0..n_steps.
+pub open spec fn spec_orbit_no_escape(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    n_steps: nat,
+) -> bool {
+    forall|k: int| 0 <= k < n_steps as int ==> {
+        let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
+        let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
+        &&& z_k.re * z_k.re + z_k.im * z_k.im < 4
+        &&& (z_k.re + d_k.re) * (z_k.re + d_k.re)
+            + (z_k.im + d_k.im) * (z_k.im + d_k.im) < 4
+    }
+}
+
+/// No-escape orbit implies spec_orbit_bounded: if neither orbit has
+/// escaped for n_steps iterations, the buffer computation is provably
+/// correct at every step (under the mild assumption |Δc| ≤ 1 and
+/// at least 1 integer limb).
+pub proof fn lemma_no_escape_orbit_bounded(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    n: nat, frac_limbs: nat, n_steps: nat,
+)
+    requires
+        n >= 1, frac_limbs < n,
+        spec_orbit_no_escape(z0, c_ref, d0, dc, n_steps),
+        -1 <= dc.re && dc.re <= 1,
+        -1 <= dc.im && dc.im <= 1,
+        194 <= limb_power((n - frac_limbs) as nat),
+    ensures
+        spec_orbit_bounded(z0, c_ref, d0, dc, 4, 1, n, frac_limbs, n_steps),
+{
+    assert forall |k: int| 0 <= k < n_steps as int implies {
+        let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
+        let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
+        pert_step_no_overflow(
+            z_k.re, z_k.im, d_k.re, d_k.im, dc.re, dc.im,
+            4, 1, (n - frac_limbs) as nat,
+        )
+    } by {
+        let z_k = spec_ref_orbit(z0, c_ref, k as nat);
+        let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
+        lemma_no_escape_implies_no_overflow(
+            z_k.re, z_k.im, d_k.re, d_k.im, dc.re, dc.im,
+            n, frac_limbs,
+        );
+    }
+}
+
+/// Full end-to-end correctness under no-escape: for non-escaped
+/// Mandelbrot orbits with |Δc| ≤ 1 and at least 1 integer limb,
+/// the fixed-point kernel provably implements mathematical
+/// perturbation theory at every iteration.
+///
+/// Composes `lemma_no_escape_orbit_bounded` with
+/// `lemma_kernel_end_to_end_under_bounds`.
+pub proof fn lemma_no_escape_end_to_end(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    n: nat, frac_limbs: nat, n_steps: nat,
+)
+    requires
+        n >= 1, frac_limbs < n,
+        spec_orbit_no_escape(z0, c_ref, d0, dc, n_steps),
+        -1 <= dc.re && dc.re <= 1,
+        -1 <= dc.im && dc.im <= 1,
+        194 <= limb_power((n - frac_limbs) as nat),
+    ensures
+        // (a) Every buffer step matches the scaled spec step.
+        ({
+            let pf = limb_power(frac_limbs);
+            forall|k: int| 0 <= k < n_steps as int ==> {
+                let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
+                let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
+                let d_k1 = spec_pert_orbit(z0, c_ref, d0, dc, (k + 1) as nat);
+                let buf = pert_step_buf_int(
+                    z_k.re * pf, z_k.im * pf,
+                    d_k.re * pf, d_k.im * pf,
+                    dc.re * pf, dc.im * pf,
+                    n, frac_limbs,
+                );
+                buf.0 == d_k1.re * pf && buf.1 == d_k1.im * pf
+            }
+        }),
+        // (b) The full spec orbit satisfies perturbation_step_correct.
+        ({
+            let z_orbit = spec_ref_orbit_seq(z0, c_ref, n_steps);
+            let d_orbit = spec_pert_orbit_seq(z0, c_ref, d0, dc, n_steps);
+            forall|k: int| 0 <= k < n_steps as int
+                ==> #[trigger] perturbation_step_correct(z_orbit, d_orbit, c_ref, dc, k)
+        }),
+{
+    lemma_no_escape_orbit_bounded(z0, c_ref, d0, dc, n, frac_limbs, n_steps);
+    lemma_kernel_end_to_end_under_bounds(z0, c_ref, d0, dc, 4, 1, n, frac_limbs, n_steps);
+}
+
 } // verus!
