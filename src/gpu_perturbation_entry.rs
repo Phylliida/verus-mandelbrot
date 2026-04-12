@@ -2125,6 +2125,12 @@ fn mandelbrot_perturbation(
                 ref_escaped = 0u32; // invalid ref_c data, skip orbit
             } else {
 
+            // Ghost Z tracking: ghost z_re_int/z_im_int track the reference
+            // orbit's signed integer values via ref_step_buf_int across iterations.
+            // Z_0 = 0 (orbit was zeroed), so initial ghost values are 0.
+            let ghost mut z_re_int: int = 0;
+            let ghost mut z_im_int: int = 0;
+
             for iter in 0u32..max_iters
                 invariant
                     wg_mem@.len() >= 8192, n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
@@ -2258,6 +2264,10 @@ fn mandelbrot_perturbation(
                     assert(ref_c_base + n + 1u32 + n < u32_max());
                     assert(zn + 2u32 * n + 1u32 < u32_max());
 
+                    // Non-overlap: zn output slots don't touch c_ref
+                    // zn + z_stride = (iter+2)*z_stride ≤ (max_iters+1)*z_stride = ref_c_base
+                    assert((zn as int) + 2 * (n as int) + 2 <= ref_c_base as int);
+
                     // Valid limbs on Z_k slots — these were written by previous
                     // iterations or the initial zeroing loop. The kernel doesn't
                     // yet carry this as a per-slot invariant; for now establish
@@ -2303,6 +2313,13 @@ fn mandelbrot_perturbation(
                         }
                     }
                 }
+                // Capture pre-call input values for ghost update
+                let ghost old_zk_re_seq = wg_mem@.subrange(zk_re as int, zk_re as int + n as int);
+                let ghost old_zk_im_seq = wg_mem@.subrange(zk_im as int, zk_im as int + n as int);
+                let ghost old_cre_seq = wg_mem@.subrange(ref_c_base as int, ref_c_base as int + n as int);
+                let ghost old_cim_seq = wg_mem@.subrange(
+                    ref_c_base as int + n as int + 1, ref_c_base as int + 2 * n as int + 1);
+
                 let (new_re_s, new_im_s) = ref_orbit_iteration_step(
                     wg_mem,
                     zk_re, zk_im,
@@ -2318,6 +2335,17 @@ fn mandelbrot_perturbation(
                 );
                 vset(wg_mem, zn + n, new_re_s);
                 vset(wg_mem, zn + 2u32 * n + 1u32, new_im_s);
+
+                // ── Ghost Z update via ref_step_buf_int ──
+                proof {
+                    let c_re_int = signed_val_of(old_cre_seq, ref_c_re_s as int);
+                    let c_im_int = signed_val_of(old_cim_seq, ref_c_im_s as int);
+                    let result = ref_step_buf_int(
+                        z_re_int, z_im_int, c_re_int, c_im_int,
+                        n as nat, frac_limbs as nat);
+                    z_re_int = result.0;
+                    z_im_int = result.1;
+                }
 
                 // Check if reference escaped: |Z_{k+1}|² > 4
                 if ref_escaped == max_iters {
