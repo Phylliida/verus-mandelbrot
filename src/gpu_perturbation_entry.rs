@@ -1,6 +1,12 @@
 /// GPU Mandelbrot kernel with perturbation theory.
 /// VERIFIED by Verus AND transpiled to WGSL.
 ///
+/// To regenerate the WGSL shader from this verified source:
+///   cd verus-gpu-parser
+///   cargo run --release --bin verus-gpu-transpile -- \
+///     ../verus-mandelbrot/src/gpu_perturbation_entry.rs \
+///     -o ../verus-mandelbrot/web/mandelbrot_perturbation.wgsl
+///
 /// Architecture: each 16x16 workgroup:
 /// 1. Thread 0 computes reference orbit Z_0..Z_N in workgroup shared memory
 /// 2. workgroupBarrier()
