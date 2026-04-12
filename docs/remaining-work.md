@@ -1,8 +1,8 @@
 # Remaining Verification Work: GPU Mandelbrot Kernel
 
-**Status**: 2026-04-12 — written after completing the 2026-04-10/11 verification sprint.
+**Status**: 2026-04-12 (updated 2026-04-12 session 2).
 
-**Crate state**: verus-mandelbrot 87 verified in `gpu_perturbation_entry`, 282 in `gpu_perturbation_proofs`, 0 errors crate-wide. verus-fixed-point 991 verified, 0 errors.
+**Crate state**: verus-mandelbrot 90 verified in `gpu_perturbation_entry`, 282 in `gpu_perturbation_proofs`, 0 errors crate-wide (321 cached). verus-fixed-point 991 verified, 0 errors.
 
 ---
 
@@ -23,8 +23,8 @@
 
 ### Reference orbit
 - **Phase A**: `ref_step_buf_int` + `lemma_ref_step_buf_matches_spec` — standalone proof that the 9-op Karatsuba reference step matches `spec_ref_step` under bounds.
-- **Phase B Stage 1**: `ref_orbit_iteration_step` extracted with structural postconditions.
-- **Chain lemma**: `lemma_ref_orbit_chain` — chains all 9 bridge lemmas in a single focused proof fn. Ready to use but not yet wired into the helper (see below).
+- **Phase B Stage 1+2**: `ref_orbit_iteration_step` with full value postcondition — split into 3 sub-helpers (Part A/B/C, 3 ops each) + chain lemma call. Proves output equals `ref_step_buf_int` on inputs.
+- **Chain lemma**: `lemma_ref_orbit_chain` — chains all 9 bridge lemmas, wired into the main helper.
 
 ### Coloring / output
 - RGB channel bounds, monotonicity, alpha-constant validity, bit-packing safety.
@@ -44,37 +44,15 @@
 
 ## What Remains
 
-### 1. Reference orbit value postcondition (Phase B Stage 2)
+### 1. ~~Reference orbit value postcondition (Phase B Stage 2)~~ ✅ DONE
 
-**What**: Wire `lemma_ref_orbit_chain` (already proven) into `ref_orbit_iteration_step`'s postcondition.
-
-**Why it's blocked**: The helper function has ~60 linking/frame assertions needed to establish `lemma_ref_orbit_chain`'s preconditions (subrange equalities, valid_limbs conversions, frame conditions between ops). This exceeds Z3's ~50-assertion comfort zone, blowing rlimit even at 2000.
-
-**How to fix** (per rlimit tips): Split `ref_orbit_iteration_step` into 3 sub-helpers:
-- Part A (ops 1-3): `re² → t0_re2`, `im² → t0_im2`, `re+im → t0_rpi`
-- Part B (ops 4-6): `(re+im)² → t0_sum2`, `re²-im² → t0_diff`, `diff+c_re → zn`
-- Part C (ops 7-9): `(re+im)²-re² → t0_diff`, `t1-im² → t0_stmp3`, `t2+c_im → zn+n+1`
-
-Each sub-helper has ~20 assertions — safely within budget. The main helper calls A→B→C and then `lemma_ref_orbit_chain` with all the captured intermediate Seqs.
-
-**Files to modify**:
-- `gpu_perturbation_entry.rs`: split the helper, update the kernel call site
-- No changes needed to `gpu_perturbation_proofs.rs` — the chain lemma is ready
-
-**Effort**: ~2-3 hours. Mostly mechanical parameter plumbing.
-
-**Key facts to know**:
-- `signed_mul_to_buf` writes to `wg_mem[out_off..out_off+n]` and `wg_mem[prod_off..prod_off+2n]`. Frame: everything else unchanged.
-- `signed_add_to_buf` / `signed_sub_to_buf` write to `wg_mem[out_off..out_off+n]`, `wg_mem[tmp1_off..tmp1_off+n]`, `wg_mem[tmp2_off..tmp2_off+n]`. Frame: everything else unchanged.
-- The temp region offsets are: `t0_re2 = t0_re2`, `t0_im2 = t0_re2+n`, ..., `t0_stmp3 = t0_re2+9n`. Non-overlapping in n-limb chunks (except t0_prod which is 2n wide, at 5n offset, overlapping with no other output region since the gap at 6n is where the prod region ends).
-- After each `copy_limbs(wg_mem, src, ref_a, n)`, `ref_a@[0..n] =~= wg_mem@[src..src+n]`. The `=~=` assertion is REQUIRED for Z3 to chain through the subsequent buffer op's postcondition (which references `a@.subrange(0, n)`). Without it, Z3 doesn't connect the refs.
-- `lemma_pointwise_to_valid_limbs(wg_mem@, offset, n)` converts the per-index `forall` from the buffer op's postcondition into `valid_limbs(wg_mem@.subrange(offset, offset+n))`.
+Completed 2026-04-12. Split into 3 sub-helpers (Part A/B/C) with value equation postconditions + frame assertions. Main helper calls A→B→C + `lemma_ref_orbit_chain` in assert-by scope. 90 verified, 0 errors.
 
 ### 2. Ghost Z tracking in the reference orbit loop
 
 **What**: Add ghost `z_re_int`/`z_im_int` loop invariants to the reference orbit `for` loop, analogous to #78's delta tracking in the perturbation loop.
 
-**Depends on**: #1 (the helper's value postcondition).
+**Depends on**: ~~#1~~ (done).
 
 **How**: After each call to `ref_orbit_iteration_step`, in a proof block:
 ```rust
@@ -157,8 +135,8 @@ Without a formal memory model, we can't prove that thread 0's writes to `wg_mem`
 
 ## Priority Order
 
-1. **#1 (ref orbit value postcondition)** — the sub-helper split is mechanical and unblocks #2 and #4. All infrastructure is ready. ~2-3 hours.
-2. **#2 (ghost Z tracking)** — trivial once #1 lands. ~30 minutes.
+1. ~~**#1 (ref orbit value postcondition)**~~ ✅ DONE.
+2. **#2 (ghost Z tracking)** — trivial now that #1 is done. ~30 minutes.
 3. **#3 (dynamics bounds)** — Option A (tie to runtime glitch check) is the most practical. ~1-3 days.
 4. **#4 (ref orbit buffer↔spec bridge)** — mechanical composition of #1+#2+Phase A. ~1 day.
 5. **#5 and #6** — research-level, not blocking any kernel-level guarantees.
