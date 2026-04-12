@@ -2617,6 +2617,292 @@ pub proof fn lemma_ref_orbit_chain<T: LimbOps>(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Reference orbit buffer↔spec bridge (#4)
+//
+// Proves that the ref orbit buffer computation matches the spec
+// (scaled by limb_power(frac_limbs)) under no-overflow conditions.
+// ═══════════════════════════════════════════════════════════════
+
+/// Scaled bridge for the reference step: if the unscaled values satisfy
+/// `ref_step_no_overflow` at scale `(n - frac_limbs)`, then the buffer step
+/// with P_frac-scaled inputs returns the P_frac-scaled spec result.
+#[verifier::rlimit(500)]
+pub proof fn lemma_ref_step_buf_matches_spec_scaled(
+    z_re_u: int, z_im_u: int,
+    c_re_u: int, c_im_u: int,
+    r_u: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n >= 1,
+        frac_limbs <= n,
+        ref_step_no_overflow(z_re_u, z_im_u, c_re_u, c_im_u, r_u, (n - frac_limbs) as nat),
+    ensures
+        ({
+            let pf = limb_power(frac_limbs);
+            let buf = ref_step_buf_int(
+                z_re_u * pf, z_im_u * pf, c_re_u * pf, c_im_u * pf, n, frac_limbs);
+            let spec = spec_ref_step(
+                SpecComplex { re: z_re_u, im: z_im_u },
+                SpecComplex { re: c_re_u, im: c_im_u },
+            );
+            buf.0 == spec.re * pf && buf.1 == spec.im * pf
+        }),
+{
+    lemma_limb_power_pos(frac_limbs);
+    lemma_limb_power_pos(n);
+    lemma_limb_power_pos((n - frac_limbs) as nat);
+    let pf = limb_power(frac_limbs);
+    let pn = limb_power(n);
+    let pk = limb_power((n - frac_limbs) as nat);
+
+    verus_fixed_point::fixed_point::limb_ops::lemma_limb_power_add(
+        frac_limbs, (n - frac_limbs) as nat);
+    assert(pn == pf * pk);
+
+    assert(r_u >= 0);
+    assert(r_u * r_u >= 0) by(nonlinear_arith);
+    assert(6 * r_u * r_u + r_u < pk);
+
+    // Op 1: z_re² (scaled mul)
+    assert(z_re_u * z_re_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= z_re_u, z_re_u <= r_u;
+    assert(-(r_u * r_u) <= z_re_u * z_re_u) by(nonlinear_arith)
+        requires -r_u <= z_re_u, z_re_u <= r_u;
+    assert(z_re_u * z_re_u * pf < pn) by(nonlinear_arith)
+        requires z_re_u * z_re_u <= r_u * r_u, 6 * r_u * r_u + r_u < pk,
+                 pn == pf * pk, pf > 0;
+    assert(-(pn as int) < z_re_u * z_re_u * pf) by(nonlinear_arith)
+        requires -(r_u * r_u) <= z_re_u * z_re_u, 6 * r_u * r_u + r_u < pk,
+                 pn == pf * pk, pf > 0;
+    lemma_signed_mul_buf_scaled(z_re_u, z_re_u, n, frac_limbs);
+    let z_re_sq = signed_mul_buf(z_re_u * pf, z_re_u * pf, n, frac_limbs);
+    assert(z_re_sq == z_re_u * z_re_u * pf);
+
+    // Op 2: z_im² (scaled mul)
+    assert(z_im_u * z_im_u <= r_u * r_u) by(nonlinear_arith)
+        requires -r_u <= z_im_u, z_im_u <= r_u;
+    assert(-(r_u * r_u) <= z_im_u * z_im_u) by(nonlinear_arith)
+        requires -r_u <= z_im_u, z_im_u <= r_u;
+    assert(z_im_u * z_im_u * pf < pn) by(nonlinear_arith)
+        requires z_im_u * z_im_u <= r_u * r_u, 6 * r_u * r_u + r_u < pk,
+                 pn == pf * pk, pf > 0;
+    assert(-(pn as int) < z_im_u * z_im_u * pf) by(nonlinear_arith)
+        requires -(r_u * r_u) <= z_im_u * z_im_u, 6 * r_u * r_u + r_u < pk,
+                 pn == pf * pk, pf > 0;
+    lemma_signed_mul_buf_scaled(z_im_u, z_im_u, n, frac_limbs);
+    let z_im_sq = signed_mul_buf(z_im_u * pf, z_im_u * pf, n, frac_limbs);
+    assert(z_im_sq == z_im_u * z_im_u * pf);
+
+    // Each op follows: bound the unscaled intermediate, derive the scaled bound,
+    // call the helper lemma, assert the result equals scaled spec value.
+    // Let-binding definitions must be in requires since by(nonlinear_arith) strips context.
+
+    // Op 3: z_re + z_im (scaled add)
+    let sum_u = z_re_u + z_im_u;
+    assert(z_re_u * pf + z_im_u * pf == sum_u * pf) by(nonlinear_arith)
+        requires sum_u == z_re_u + z_im_u;
+    assert(sum_u * pf < pn && sum_u * pf > -(pn as int)) by(nonlinear_arith)
+        requires sum_u == z_re_u + z_im_u, -r_u <= z_re_u, z_re_u <= r_u,
+                 -r_u <= z_im_u, z_im_u <= r_u, r_u >= 0,
+                 6 * r_u * r_u + r_u < pk, pn == pf * pk, pf > 0;
+    lemma_signed_add_buf_no_wrap(z_re_u * pf, z_im_u * pf, n);
+    let z_sum = signed_add_buf(z_re_u * pf, z_im_u * pf, n);
+    assert(z_sum == sum_u * pf) by(nonlinear_arith)
+        requires z_sum == z_re_u * pf + z_im_u * pf, sum_u == z_re_u + z_im_u;
+
+    // Op 4: (z_re + z_im)² (scaled mul)
+    assert(sum_u * sum_u * pf < pn && -(pn as int) < sum_u * sum_u * pf) by(nonlinear_arith)
+        requires sum_u == z_re_u + z_im_u, -r_u <= z_re_u, z_re_u <= r_u,
+                 -r_u <= z_im_u, z_im_u <= r_u, r_u >= 0,
+                 6 * r_u * r_u + r_u < pk, pn == pf * pk, pf > 0;
+    lemma_signed_mul_buf_scaled(sum_u, sum_u, n, frac_limbs);
+    let z_sum_sq = signed_mul_buf(z_sum, z_sum, n, frac_limbs);
+    assert(z_sum_sq == sum_u * sum_u * pf);
+
+    // Op 5: z_re² - z_im² (scaled sub)
+    let zsq_re_u = z_re_u * z_re_u - z_im_u * z_im_u;
+    assert(zsq_re_u * pf < pn && zsq_re_u * pf > -(pn as int)) by(nonlinear_arith)
+        requires zsq_re_u == z_re_u * z_re_u - z_im_u * z_im_u,
+                 -r_u <= z_re_u, z_re_u <= r_u, -r_u <= z_im_u, z_im_u <= r_u,
+                 r_u >= 0, 6 * r_u * r_u + r_u < pk, pn == pf * pk, pf > 0;
+    assert(z_re_sq - z_im_sq == zsq_re_u * pf) by(nonlinear_arith)
+        requires z_re_sq == z_re_u * z_re_u * pf, z_im_sq == z_im_u * z_im_u * pf,
+                 zsq_re_u == z_re_u * z_re_u - z_im_u * z_im_u;
+    lemma_signed_sub_buf_no_wrap(z_re_sq, z_im_sq, n);
+    let zsq_re = signed_sub_buf(z_re_sq, z_im_sq, n);
+    assert(zsq_re == zsq_re_u * pf);
+
+    // Op 6: zsq_re + c_re → new_re
+    let new_re_u = zsq_re_u + c_re_u;
+    assert(new_re_u * pf < pn && new_re_u * pf > -(pn as int)) by(nonlinear_arith)
+        requires new_re_u == zsq_re_u + c_re_u,
+                 zsq_re_u == z_re_u * z_re_u - z_im_u * z_im_u,
+                 -r_u <= z_re_u, z_re_u <= r_u, -r_u <= z_im_u, z_im_u <= r_u,
+                 -r_u <= c_re_u, c_re_u <= r_u, r_u >= 0,
+                 6 * r_u * r_u + r_u < pk, pn == pf * pk, pf > 0;
+    assert(zsq_re + c_re_u * pf == new_re_u * pf) by(nonlinear_arith)
+        requires zsq_re == zsq_re_u * pf, new_re_u == zsq_re_u + c_re_u;
+    lemma_signed_add_buf_no_wrap(zsq_re, c_re_u * pf, n);
+    let new_re = signed_add_buf(zsq_re, c_re_u * pf, n);
+    assert(new_re == new_re_u * pf);
+
+    // Op 7: (z_re+z_im)² - z_re²
+    let q1_u = sum_u * sum_u - z_re_u * z_re_u;
+    assert(q1_u * pf < pn && q1_u * pf > -(pn as int)) by(nonlinear_arith)
+        requires q1_u == sum_u * sum_u - z_re_u * z_re_u,
+                 sum_u == z_re_u + z_im_u,
+                 -r_u <= z_re_u, z_re_u <= r_u, -r_u <= z_im_u, z_im_u <= r_u,
+                 r_u >= 0, 6 * r_u * r_u + r_u < pk, pn == pf * pk, pf > 0;
+    assert(z_sum_sq - z_re_sq == q1_u * pf) by(nonlinear_arith)
+        requires z_sum_sq == sum_u * sum_u * pf, z_re_sq == z_re_u * z_re_u * pf,
+                 q1_u == sum_u * sum_u - z_re_u * z_re_u;
+    lemma_signed_sub_buf_no_wrap(z_sum_sq, z_re_sq, n);
+    let q1 = signed_sub_buf(z_sum_sq, z_re_sq, n);
+    assert(q1 == q1_u * pf);
+
+    // Op 8: q1 - z_im² = 2*z_re*z_im
+    let zsq_im_u = q1_u - z_im_u * z_im_u;
+    assert(zsq_im_u * pf < pn && zsq_im_u * pf > -(pn as int)) by(nonlinear_arith)
+        requires zsq_im_u == q1_u - z_im_u * z_im_u,
+                 q1_u == sum_u * sum_u - z_re_u * z_re_u,
+                 sum_u == z_re_u + z_im_u,
+                 -r_u <= z_re_u, z_re_u <= r_u, -r_u <= z_im_u, z_im_u <= r_u,
+                 r_u >= 0, 6 * r_u * r_u + r_u < pk, pn == pf * pk, pf > 0;
+    assert(q1 - z_im_sq == zsq_im_u * pf) by(nonlinear_arith)
+        requires q1 == q1_u * pf, z_im_sq == z_im_u * z_im_u * pf,
+                 zsq_im_u == q1_u - z_im_u * z_im_u;
+    lemma_signed_sub_buf_no_wrap(q1, z_im_sq, n);
+    let zsq_im = signed_sub_buf(q1, z_im_sq, n);
+    assert(zsq_im == zsq_im_u * pf);
+    assert(zsq_im_u == 2 * z_re_u * z_im_u) by(nonlinear_arith)
+        requires zsq_im_u == q1_u - z_im_u * z_im_u,
+                 q1_u == sum_u * sum_u - z_re_u * z_re_u,
+                 sum_u == z_re_u + z_im_u;
+
+    // Op 9: zsq_im + c_im → new_im
+    let new_im_u = zsq_im_u + c_im_u;
+    assert(new_im_u * pf < pn && new_im_u * pf > -(pn as int)) by(nonlinear_arith)
+        requires new_im_u == zsq_im_u + c_im_u,
+                 zsq_im_u == 2 * z_re_u * z_im_u,
+                 -r_u <= z_re_u, z_re_u <= r_u, -r_u <= z_im_u, z_im_u <= r_u,
+                 -r_u <= c_im_u, c_im_u <= r_u, r_u >= 0,
+                 6 * r_u * r_u + r_u < pk, pn == pf * pk, pf > 0;
+    assert(zsq_im + c_im_u * pf == new_im_u * pf) by(nonlinear_arith)
+        requires zsq_im == zsq_im_u * pf, new_im_u == zsq_im_u + c_im_u;
+    lemma_signed_add_buf_no_wrap(zsq_im, c_im_u * pf, n);
+    let new_im = signed_add_buf(zsq_im, c_im_u * pf, n);
+    assert(new_im == new_im_u * pf);
+
+    // ref_step_buf_int unfolds and matches spec_ref_step.
+    assert(new_re_u == z_re_u * z_re_u - z_im_u * z_im_u + c_re_u);
+    assert(new_im_u == 2 * z_re_u * z_im_u + c_im_u);
+}
+
+/// No-escape implies ref_step_no_overflow: if |Z|² < 4 and |c|² < 4, then
+/// ref_step_no_overflow holds with r = 2. Since 6·4 + 2 = 26, this is
+/// trivially within any limb_power(n) ≥ 26.
+pub proof fn lemma_ref_no_escape_implies_ref_no_overflow(
+    z_re: int, z_im: int, c_re: int, c_im: int,
+    n: nat, frac_limbs: nat,
+)
+    requires
+        n >= 1, frac_limbs < n,
+        z_re * z_re + z_im * z_im < 4,
+        c_re * c_re + c_im * c_im < 4,
+        26 <= limb_power((n - frac_limbs) as nat),
+    ensures
+        ref_step_no_overflow(z_re, z_im, c_re, c_im, 2, (n - frac_limbs) as nat),
+{
+    assert(z_re * z_re >= 0) by(nonlinear_arith);
+    assert(z_im * z_im >= 0) by(nonlinear_arith);
+    assert(c_re * c_re >= 0) by(nonlinear_arith);
+    assert(c_im * c_im >= 0) by(nonlinear_arith);
+    assert(z_re * z_re < 4);
+    assert(z_im * z_im < 4);
+    assert(c_re * c_re < 4);
+    assert(c_im * c_im < 4);
+    assert(-2 <= z_re && z_re <= 2) by(nonlinear_arith) requires z_re * z_re < 4;
+    assert(-2 <= z_im && z_im <= 2) by(nonlinear_arith) requires z_im * z_im < 4;
+    assert(-2 <= c_re && c_re <= 2) by(nonlinear_arith) requires c_re * c_re < 4;
+    assert(-2 <= c_im && c_im <= 2) by(nonlinear_arith) requires c_im * c_im < 4;
+    // 6*2*2 + 2 = 26
+    assert(6 * 2 * 2 + 2 < limb_power((n - frac_limbs) as nat)) by(nonlinear_arith)
+        requires 26 <= limb_power((n - frac_limbs) as nat);
+}
+
+/// Inductive bridge: if the reference orbit doesn't escape and c_ref is
+/// bounded, then ref_step_buf_int iterated from z0*pf with c_ref*pf
+/// equals spec_ref_orbit * pf at every iteration.
+pub proof fn lemma_ref_orbit_buf_matches_spec(
+    z0: SpecComplex, c_ref: SpecComplex,
+    n: nat, frac_limbs: nat, k: nat,
+)
+    requires
+        n >= 1, frac_limbs < n,
+        26 <= limb_power((n - frac_limbs) as nat),
+        c_ref.re * c_ref.re + c_ref.im * c_ref.im < 4,
+        // All orbit points up to k haven't escaped
+        forall|j: int| 0 <= j <= k as int ==> {
+            let z_j = #[trigger] spec_ref_orbit(z0, c_ref, j as nat);
+            z_j.re * z_j.re + z_j.im * z_j.im < 4
+        },
+    ensures
+        ({
+            let pf = limb_power(frac_limbs);
+            let z_k = spec_ref_orbit(z0, c_ref, k);
+            // Iterating ref_step_buf_int from z0*pf for k steps gives z_k*pf
+            spec_ref_orbit_buf(z0, c_ref, n, frac_limbs, k)
+                == SpecComplex { re: z_k.re * pf, im: z_k.im * pf }
+        }),
+    decreases k,
+{
+    let pf = limb_power(frac_limbs);
+    lemma_limb_power_pos(frac_limbs);
+
+    if k == 0 {
+        // Base case: spec_ref_orbit(z0, c_ref, 0) == z0, and
+        // spec_ref_orbit_buf(z0, c_ref, n, frac_limbs, 0) == z0 * pf
+    } else {
+        // Inductive step: use the bridge for step k-1 → k
+        lemma_ref_orbit_buf_matches_spec(z0, c_ref, n, frac_limbs, (k - 1) as nat);
+        let z_prev = spec_ref_orbit(z0, c_ref, (k - 1) as nat);
+        // Induction hypothesis: buf at k-1 == z_prev * pf
+
+        // z_prev hasn't escaped (from precondition)
+        assert(z_prev.re * z_prev.re + z_prev.im * z_prev.im < 4);
+
+        // Apply the scaled bridge at step k-1
+        lemma_ref_no_escape_implies_ref_no_overflow(
+            z_prev.re, z_prev.im, c_ref.re, c_ref.im, n, frac_limbs);
+        lemma_ref_step_buf_matches_spec_scaled(
+            z_prev.re, z_prev.im, c_ref.re, c_ref.im, 2, n, frac_limbs);
+
+        // The scaled bridge gives:
+        // ref_step_buf_int(z_prev.re * pf, z_prev.im * pf, c_ref.re * pf, c_ref.im * pf, n, frac_limbs)
+        // == spec_ref_step(z_prev, c_ref) * pf == spec_ref_orbit(z0, c_ref, k) * pf
+    }
+}
+
+/// Buffer-level reference orbit: iterates ref_step_buf_int from z0*pf
+/// with c_ref*pf. Used in lemma_ref_orbit_buf_matches_spec.
+pub open spec fn spec_ref_orbit_buf(
+    z0: SpecComplex, c_ref: SpecComplex,
+    n: nat, frac_limbs: nat, k: nat,
+) -> SpecComplex
+    decreases k,
+{
+    let pf = limb_power(frac_limbs);
+    if k == 0 {
+        SpecComplex { re: z0.re * pf, im: z0.im * pf }
+    } else {
+        let prev = spec_ref_orbit_buf(z0, c_ref, n, frac_limbs, (k - 1) as nat);
+        let buf = ref_step_buf_int(prev.re, prev.im, c_ref.re * pf, c_ref.im * pf, n, frac_limbs);
+        SpecComplex { re: buf.0, im: buf.1 }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Perturbation-theory dynamics bounds (#3, Option A)
 //
 // Key mathematical insight: before escape, |Z|² < 4 and |Z+δ|² < 4.
