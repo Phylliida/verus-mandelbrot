@@ -1774,7 +1774,7 @@ fn mandelbrot_perturbation(
 )
     requires
         // Params buffer layout
-        params@.len() >= 10,
+        params@.len() >= 10,  // minimum: 5 header + n threshold + 1 max_rounds (n >= 1 → 7+)
         // width, height, max_iters, n, frac_limbs bounds
         params@[0] > 0, params@[0] <= 0xFFFF,   // width
         params@[1] > 0, params@[1] <= 0xFFFF,   // height
@@ -1795,14 +1795,18 @@ fn mandelbrot_perturbation(
         // iter_counts: per-pixel output (with u32 overflow bound)
         old(iter_counts)@.len() as int >= (params@[0] as int) * (params@[1] as int),
         (params@[0] as int) * (params@[1] as int) < u32_max(),
-        // Escape threshold in params[5..5+n]
-        params@.len() as int >= 5 + params@[3] as int,
+        // Escape threshold in params[5..5+n], max_rounds at params[5+n]
+        params@.len() as int >= 6 + params@[3] as int,
+        // max_rounds: 0 < max_rounds (at least 1 round)
+        params@[(5 + params@[3] as int) as int] > 0,
+        params@[(5 + params@[3] as int) as int] <= 256, // bounded for termination
 {
     let width = vget(params, 0u32);
     let height = vget(params, 1u32);
     let max_iters = vget(params, 2u32);
     let n = vget(params, 3u32);
     let frac_limbs = vget(params, 4u32);
+    let max_rounds = vget(params, 5u32 + n);
 
     // (#1) Parameter validation regression test: if preconditions change,
     // these assertions catch invalid n/frac_limbs/max_iters immediately.
@@ -1993,7 +1997,7 @@ fn mandelbrot_perturbation(
     // ═══════════════════════════════════════════════════
     // Iterative refinement loop
     // ═══════════════════════════════════════════════════
-    let max_rounds = 5u32;
+    // max_rounds read from params[5+n] (was hardcoded 5)
 
     // Prove shared memory layout bounds before entering the loop
     // Total layout: (max_iters+2)*z_stride + 10*n + 259 <= 8192
@@ -2007,7 +2011,7 @@ fn mandelbrot_perturbation(
     while round < max_rounds
         invariant
             round <= max_rounds,
-            max_rounds == 5u32,
+            max_rounds > 0, max_rounds <= 256,
             // Kernel parameters are unchanged
             n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
             frac_limbs <= n, frac_limbs + n <= 2 * n,
