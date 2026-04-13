@@ -1859,12 +1859,13 @@ fn direct_computation_fallback(
     }
     let mut esc_borrow = sub_limbs_to(&**t5, thresh, t1, 0usize, n_us);
     if esc_borrow == 0u32 {
-        return 0u32; // |c|^2 >= 4 → escaped immediately
+        escaped_iter = 0u32; // |c|^2 >= 4 → escaped immediately
     }
 
     // Main loop: iter 1..max_iters. re²/im² in t3/t4 carry over from previous escape check.
+    // Skipped entirely if escaped_iter was set above (since 0 < max_iters, but we check escaped_iter).
     let mut iter = 1u32;
-    while iter < max_iters
+    while iter < max_iters && escaped_iter == max_iters
         invariant
             iter >= 1, iter <= max_iters,
             max_iters > 0, max_iters <= 0x1000,
