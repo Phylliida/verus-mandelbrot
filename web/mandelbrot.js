@@ -510,11 +510,17 @@ async function render() {
     currentFracLimbs = frac_limbs;
   }
 
-  // Enforce shared memory constraint: (maxIters+2)*(2n+2) + 10n + 259 <= 8192
+  // Enforce shared memory constraint (perturbation mode only).
+  // Direct mode doesn't use the shared memory orbit buffer, so max_iters is unconstrained.
+  const usePerturbation = document.getElementById('usePerturbation')?.checked ? 1 : 0;
   const sharedMemNeeded = (maxIters + 2) * (2 * n + 2) + 10 * n + 259;
   const maxItersForN = Math.floor((8192 - 10 * n - 259) / (2 * n + 2)) - 2;
-  if (sharedMemNeeded > 8192) {
-    statusEl.textContent = `n=${n} requires max_iters <= ${maxItersForN} (shared memory limit). Reduce iters or N.`;
+  if (usePerturbation && sharedMemNeeded > 8192) {
+    statusEl.textContent = `Perturbation mode: n=${n} requires max_iters <= ${maxItersForN}. Reduce iters, N, or disable perturbation.`;
+    return;
+  }
+  if (maxIters > 4096) {
+    statusEl.textContent = `max_iters cannot exceed 4096 (kernel limit).`;
     return;
   }
 
@@ -557,12 +563,25 @@ async function render() {
     }
   }
 
+  // Diagnostic: log c values for center and adjacent pixel to verify precision
+  {
+    const cx = Math.floor(width / 2), cy = Math.floor(height / 2);
+    const idx0 = (cy * width + cx) * stride;
+    const idx1 = (cy * width + cx + 1) * stride;
+    const limbs0 = Array.from(c_data.slice(idx0, idx0 + n));
+    const limbs1 = Array.from(c_data.slice(idx1, idx1 + n));
+    const diff = limbs0.map((v, i) => v - limbs1[i]);
+    console.log(`[diag] zoom=2^${zoomBig_.toString(2).length-1} n=${n} pixelStep=${pixelStepBig}`);
+    console.log(`[diag] center re limbs: [${limbs0.join(', ')}] sign=${c_data[idx0+n]}`);
+    console.log(`[diag] center+1 re limbs: [${limbs1.join(', ')}] sign=${c_data[idx1+n]}`);
+    console.log(`[diag] diff: [${diff.join(', ')}]`);
+  }
+
   // Build params: [width, height, max_iters, n_limbs, frac_limbs, thresh_limbs(n), max_rounds, use_perturbation]
   // Escape threshold = 4.0 in fixed-point: integer part = 4 in top limb
   const thresh_limbs = new Uint32Array(n);
   thresh_limbs[n - 1] = 4;
   const maxRounds = parseInt(document.getElementById('maxRounds')?.value || '5');
-  const usePerturbation = document.getElementById('usePerturbation')?.checked ? 1 : 0;
   const paramsData = new Uint32Array(7 + n);
   paramsData[0] = width;
   paramsData[1] = height;
