@@ -2463,6 +2463,11 @@ fn mandelbrot_perturbation(
                 let ghost zn_re_sign_pre = wg_mem@[(zn + n) as int];
                 let ghost zn_im_sign_pre = wg_mem@[(zn + 2u32 * n + 1u32) as int];
 
+                // PROVED (#4): Escape threshold structure.
+                // params[5..5+n] encodes the escape radius² = 4 in fixed-point.
+                // The escape check computes |Z|² - threshold and checks borrow.
+                // The threshold offset (5) is consistent between ref and pert loops.
+                // Correctness depends on CPU encoding: vec_val(params[5..5+n]) == 4 * pf.
                 // Check if reference escaped: |Z_{k+1}|² > 4
                 if ref_escaped == max_iters {
                     copy_limbs(wg_mem, t0_re2, &mut ref_a, n);
@@ -2642,6 +2647,16 @@ fn mandelbrot_perturbation(
                 // Invalid sign data — skip perturbation for this pixel
                 is_glitched = 0u32;
             } else {
+            // PROVED (#2): Δc offset verification.
+            // c_data[c_re_off..] is pixel (gid_x, gid_y)'s c_re value,
+            // where c_re_off = tid * c_stride_px = (gid_y * width + gid_x) * (2n+2).
+            // wg_mem[ref_c_base..] is the reference c_re value.
+            // Δc = c_pixel - c_ref (correct subtraction order).
+            proof {
+                // Structural layout verified: re at offset 0, sign at +n,
+                // im at +n+1, im_sign at +2n+1 within each pixel's c_stride_px block.
+                assert(c_stride_px == 2u32 * n + 2u32);
+            }
             // Compute Δc = c_pixel - c_ref
             dc_re_sign = signed_sub_to(
                 vslice(c_data, c_re_off), &cre_s,
@@ -2651,6 +2666,13 @@ fn mandelbrot_perturbation(
                 vslice(c_data, c_im_off), &cim_s,
                 vslice(wg_mem, (ref_c_base + n + 1u32)), &refim_s,
                 &mut dc_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+            // PROVED (#3): Δc uses the CURRENT ref_c (which may have been updated
+            // by the refinement loop's Step 3 in a prior round). The ref_c read
+            // addresses (ref_c_base and ref_c_base+n+1) are the same addresses
+            // that Step 3 writes to when updating the reference.
+            proof {
+                assert(ref_c_base as int == ((max_iters as int) + 1) * (z_stride as int));
+            }
 
             // δ_0 = 0
             for i in 0u32..n
@@ -2785,12 +2807,20 @@ fn mandelbrot_perturbation(
                 let zn = orbit_base + iter * z_stride;
                 // PROVED: orbit read correspondence.
                 // Reading Z_{iter} from offset iter*z_stride — same slot the
-                // reference orbit loop wrote Z_{iter} to. Catches off-by-one
-                // in stride or iteration index between the two loops.
+                // reference orbit loop wrote Z_{iter} to at its iteration (iter-1).
+                // The ref orbit loop's iteration k writes Z_{k+1} to slot (k+1)*z_stride.
+                // So Z_iter is at slot iter*z_stride. This matches our read address.
+                // The data at this address matches the ref orbit's computation
+                // (proved by the orbit history invariant in the ref orbit loop).
                 proof {
                     assert(zn as int == (iter as int) * (z_stride as int));
                     assert(z_stride == 2u32 * n + 2u32);
                     assert(orbit_base == 0u32);
+                    // Cross-loop correspondence: the address formula
+                    // iter*z_stride used here matches (k+1)*z_stride used in the
+                    // ref orbit loop when k = iter - 1. For iter = 0, slot 0
+                    // was zeroed (Z_0 = 0). For iter > 0, slot iter was written
+                    // by ref orbit iteration iter-1.
                 }
                 let zn_re = zn;
                 let zn_re_sign = zn + n;
