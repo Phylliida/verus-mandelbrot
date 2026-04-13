@@ -596,7 +596,10 @@ async function render() {
   const thresh_limbs = new Uint32Array(n);
   thresh_limbs[n - 1] = 4;
   const maxRounds = parseInt(document.getElementById('maxRounds')?.value || '5');
-  const paramsData = new Uint32Array(7 + n);
+  // Params layout: [width, height, max_iters, n, frac_limbs, thresh(n), max_rounds, use_perturbation,
+  //                  center_re(n), center_re_sign, center_im(n), center_im_sign, step(n), step_sign]
+  // Total: 8 + n + 3*(n+1) = 11 + 4n
+  const paramsData = new Uint32Array(11 + 4 * n);
   paramsData[0] = width;
   paramsData[1] = height;
   paramsData[2] = maxIters;
@@ -605,6 +608,20 @@ async function render() {
   paramsData.set(thresh_limbs, 5);
   paramsData[5 + n] = maxRounds;
   paramsData[6 + n] = usePerturbation;
+  // Pack center + step uniforms for GPU-side c computation
+  const uniBase = 7 + n + 1;  // = 8 + n
+  // Center re
+  const centerReFixed = bigintToFixedPoint(centerReBig_, n);
+  paramsData.set(centerReFixed.limbs, uniBase);
+  paramsData[uniBase + n] = centerReFixed.sign;
+  // Center im
+  const centerImFixed = bigintToFixedPoint(centerImBig_, n);
+  paramsData.set(centerImFixed.limbs, uniBase + n + 1);
+  paramsData[uniBase + 2 * n + 1] = centerImFixed.sign;
+  // Pixel step (always positive)
+  const stepFixed = bigintToFixedPoint(pixelStepBig, n);
+  paramsData.set(stepFixed.limbs, uniBase + 2 * (n + 1));
+  paramsData[uniBase + 3 * n + 2] = stepFixed.sign;
 
   // No scratch buffer needed — all intermediates are thread-local arrays
   const iterCountsSize = totalPixels * 4;

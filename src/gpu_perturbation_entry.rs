@@ -2220,12 +2220,17 @@ fn mandelbrot_perturbation(
         ref_a.set((n - 1u32) as usize, dx_abs);
         // dx * step → t1
         let step_sign = vget(params, uni_step_off + n);
+        let center_re_sign = vget(params, uni_cre_off + n);
+        let center_im_sign = vget(params, uni_cim_off + n);
+        // Validate signs from params (must be 0 or 1)
+        if step_sign > 1u32 || center_re_sign > 1u32 || center_im_sign > 1u32 {
+            // Invalid uniform data — skip computation, will render as black
+        } else {
         let dx_step_s = signed_mul_to(
             &ref_a, &dx_sign,
             vslice(params, uni_step_off), &step_sign,
             &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
         // c_pixel_re = center_re + dx * step → dc_re
-        let center_re_sign = vget(params, uni_cre_off + n);
         dc_re_sign = signed_add_to(
             vslice(params, uni_cre_off), &center_re_sign,
             &t1, &dx_step_s,
@@ -2242,11 +2247,11 @@ fn mandelbrot_perturbation(
             &ref_a, &dy_sign,
             vslice(params, uni_step_off), &step_sign,
             &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
-        let center_im_sign = vget(params, uni_cim_off + n);
         dc_im_sign = signed_add_to(
             vslice(params, uni_cim_off), &center_im_sign,
             &t1, &dy_step_s,
             &mut dc_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+        } // else (valid signs)
     }
 
     let ghost wh_cs_bound: int = (width as int) * (height as int) * (c_stride_px as int);
