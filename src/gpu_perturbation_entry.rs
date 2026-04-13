@@ -1804,6 +1804,14 @@ fn mandelbrot_perturbation(
     let n = vget(params, 3u32);
     let frac_limbs = vget(params, 4u32);
 
+    // (#1) Parameter validation regression test: if preconditions change,
+    // these assertions catch invalid n/frac_limbs/max_iters immediately.
+    proof {
+        assert(n >= 1 && n <= 8);
+        assert(frac_limbs <= n);
+        assert(max_iters > 0 && max_iters <= 0x1000);
+    }
+
     if gid_x >= width { return; }
     if gid_y >= height { return; }
 
@@ -2703,6 +2711,9 @@ fn mandelbrot_perturbation(
             }
 
             let ref_escaped = vget(wg_mem, ref_escape_addr);
+            // (#5) ref_escaped address consistency: same ref_escape_addr
+            // variable used for write (line ~2633) and read (here).
+            proof { assert(ref_escape_addr as int == (t0_re2 as int) + 10 * (n as int)); }
 
             // ── Task #78: Ghost value tracking across the perturbation loop ──
             // The perturbation_iteration_step helper (Task #81) exports a value
@@ -2937,6 +2948,10 @@ fn mandelbrot_perturbation(
                     break;
                 }
 
+                // (#6) Double-escape prevention: the glitch check (above, with break)
+                // executes BEFORE the escape check (below). If glitch fires, the
+                // loop breaks and escape check never runs — preventing invalid state
+                // where both is_glitched == 1 and escaped_iter < max_iters.
                 // ── Escape check: |Z_n + δ|² > 4 ──
                 // Capture input subranges for the signed_val connection (#74)
                 let ghost zn_re_slice = wg_mem@.subrange(zn_re as int, wg_mem@.len() as int);
@@ -3247,6 +3262,8 @@ fn mandelbrot_perturbation(
             lemma_tid_injective(gid_y as int, gid_x as int, gy2, gx2, width as int);
         }
     }
+    // (#2) iter_counts output bounds regression test
+    proof { assert(tid < iter_counts@.len()); }
     let alpha = 4278190080u32;
     if escaped_iter >= max_iters {
         vset(iter_counts, tid, alpha);
@@ -3260,6 +3277,15 @@ fn mandelbrot_perturbation(
         // t_col <= 254, so t_col/2 <= 127, so 255 - t_col/2 >= 128
         let half_t = t_col / 2u32;
         let b = 255u32 - half_t;
+        // (#3) RGBA bit-field non-overlap regression test
+        proof {
+            lemma_colorize_channels_bounded(escaped_iter as int, max_iters as int);
+            assert(r <= 255u32);
+            assert(g <= 127u32);
+            assert(b <= 255u32);
+            assert((g << 8u32) & 0xFFu32 == 0u32) by(bit_vector) requires g <= 127u32;
+            assert((b << 16u32) & 0xFFFFu32 == 0u32) by(bit_vector) requires b <= 255u32;
+        }
         vset(iter_counts, tid, alpha | (b << 16u32) | (g << 8u32) | r);
     }
 }
