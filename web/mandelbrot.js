@@ -349,12 +349,14 @@ const refNSlider = document.getElementById('refN');
 const pertNSlider = document.getElementById('pertN');
 const maxItersSlider = document.getElementById('maxIters');
 const resSlider = document.getElementById('resolution');
+const maxRoundsSlider = document.getElementById('maxRounds');
 const renderBtn = document.getElementById('renderBtn');
 
 refNSlider.oninput = () => document.getElementById('refNVal').textContent = (1 << refNSlider.value);
 pertNSlider.oninput = () => document.getElementById('pertNVal').textContent = (1 << pertNSlider.value);
 maxItersSlider.oninput = () => document.getElementById('maxItersVal').textContent = maxItersSlider.value;
 resSlider.oninput = () => document.getElementById('resVal').textContent = resSlider.value;
+if (maxRoundsSlider) maxRoundsSlider.oninput = () => document.getElementById('maxRoundsVal').textContent = maxRoundsSlider.value;
 
 // Initialize display
 refNSlider.oninput();
@@ -507,17 +509,19 @@ async function render() {
     }
   }
 
-  // Build params: [width, height, max_iters, n_limbs, frac_limbs, thresh_limbs(n)]
+  // Build params: [width, height, max_iters, n_limbs, frac_limbs, thresh_limbs(n), max_rounds]
   // Escape threshold = 4.0 in fixed-point: integer part = 4 in top limb
   const thresh_limbs = new Uint32Array(n);
   thresh_limbs[n - 1] = 4;
-  const paramsData = new Uint32Array(5 + n);
+  const maxRounds = parseInt(document.getElementById('maxRounds')?.value || '5');
+  const paramsData = new Uint32Array(6 + n);
   paramsData[0] = width;
   paramsData[1] = height;
   paramsData[2] = maxIters;
   paramsData[3] = n;
   paramsData[4] = frac_limbs;
   paramsData.set(thresh_limbs, 5);
+  paramsData[5 + n] = maxRounds;
 
   // No scratch buffer needed — all intermediates are thread-local arrays
   const iterCountsSize = totalPixels * 4;

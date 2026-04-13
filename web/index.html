@@ -15,7 +15,7 @@
 </style>
 </head>
 <body>
-<h1>Verified Deep-Zoom Mandelbrot <span class="badge">249 proofs, 0 errors</span></h1>
+<h1>Verified Deep-Zoom Mandelbrot <span class="badge">513 proofs, 0 errors</span></h1>
 <div class="info">Perturbation theory + verified multi-precision arithmetic, transpiled to WGSL.
 End-to-end proven: limb arithmetic, truncation error bounds, perturbation correctness, escape detection.
 Click to zoom in, right-click to zoom out.</div>
@@ -24,6 +24,7 @@ Click to zoom in, right-click to zoom out.</div>
   <label>Perturb N: <input type="range" id="pertN" min="2" max="5" value="2"><span id="pertNVal">4</span> limbs</label>
   <label>Max iters: <input type="range" id="maxIters" min="50" max="2000" value="200" step="50"><span id="maxItersVal">200</span></label>
   <label>Resolution: <input type="range" id="resolution" min="256" max="1024" value="512" step="128"><span id="resVal">512</span></label>
+  <label>Refine rounds: <input type="range" id="maxRounds" min="1" max="50" value="5"><span id="maxRoundsVal">5</span></label>
   <button id="renderBtn">Render</button>
   <span id="status">Initializing WebGPU...</span>
 </div>
