@@ -683,19 +683,51 @@ async function render() {
     }
     console.log(`[diag] GPU escape counts at center row: [${gpuCounts.join(', ')}]`);
 
-    // CPU reference: iterate Z = Z^2 + c using f64 for the center pixel
-    const cReF64 = Number(centerReBig_ + 0n * pixelStepBig) / Number(scale);
-    const cImF64 = Number(centerImBig_ + 0n * pixelStepBig) / Number(scale);
-    let zr = 0, zi = 0;
-    let cpuEsc = maxIters;
+    // CPU BigInt reference: exact same arithmetic as GPU kernel's ref_step_buf_int
+    const P = 1n << BigInt(32 * n);
+    const F = 1n << BigInt(32 * frac_limbs);
+    const smul = (a, b) => {  // signed_mul_buf
+      const aa = a < 0n ? -a : a, bb = b < 0n ? -b : b;
+      const mag = (aa * bb / F) % P;
+      return (a < 0n) !== (b < 0n) ? -mag : mag;
+    };
+    const sadd = (a, b) => {  // signed_add_buf (wrapping)
+      let s = a + b;
+      if (s >= P) s -= P; else if (s <= -P) s += P;
+      return s;
+    };
+    const ssub = (a, b) => sadd(a, -b);
+    const cRe = centerReBig_, cIm = centerImBig_;
+    let zr_ = 0n, zi_ = 0n, cpuEsc = maxIters;
+    for (let i = 0; i < Math.min(maxIters, 500); i++) {
+      // ref_step_buf_int: 9 ops matching the GPU kernel exactly
+      const zre_sq = smul(zr_, zr_);
+      const zim_sq = smul(zi_, zi_);
+      const z_sum = sadd(zr_, zi_);
+      const z_sum_sq = smul(z_sum, z_sum);
+      const zsq_re = ssub(zre_sq, zim_sq);
+      const q1 = ssub(z_sum_sq, zre_sq);
+      const zsq_im = ssub(q1, zim_sq);
+      const new_re = sadd(zsq_re, cRe);
+      const new_im = sadd(zsq_im, cIm);
+      zr_ = new_re; zi_ = new_im;
+      // Escape check: |Z|^2 = zre_sq + zim_sq >= 4*F
+      const mag = smul(zr_, zr_) + smul(zi_, zi_);
+      if (mag >= 4n * F) { cpuEsc = i; break; }
+    }
+    // f64 reference
+    const cReF64 = Number(centerReBig_) / Number(scale);
+    const cImF64 = Number(centerImBig_) / Number(scale);
+    let zr = 0, zi = 0, cpuEscF64 = maxIters;
     for (let i = 0; i < maxIters; i++) {
       const zr2 = zr * zr, zi2 = zi * zi;
-      if (zr2 + zi2 >= 4) { cpuEsc = i; break; }
+      if (zr2 + zi2 >= 4) { cpuEscF64 = i; break; }
       const zrNew = zr2 - zi2 + cReF64;
       zi = 2 * zr * zi + cImF64;
       zr = zrNew;
     }
-    console.log(`[diag] CPU f64 reference: c=(${cReF64}, ${cImF64}) escaped at ${cpuEsc}`);
+    console.log(`[diag] CPU BigInt reference (same arithmetic): escaped at ${cpuEsc} (500 iter cap)`);
+    console.log(`[diag] CPU f64 reference: c=(${cReF64}, ${cImF64}) escaped at ${cpuEscF64}`);
   }
 
   // Render to canvas — GPU outputs packed RGBA directly
