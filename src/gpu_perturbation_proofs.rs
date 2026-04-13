@@ -2804,31 +2804,30 @@ pub proof fn lemma_ref_step_buf_matches_spec_scaled(
 /// trivially within any limb_power(n) ≥ 26.
 pub proof fn lemma_ref_no_escape_implies_ref_no_overflow(
     z_re: int, z_im: int, c_re: int, c_im: int,
+    r: int,
     n: nat, frac_limbs: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        z_re * z_re + z_im * z_im < 4,
-        c_re * c_re + c_im * c_im < 4,
-        26 <= limb_power((n - frac_limbs) as nat),
+        r >= 0,
+        z_re * z_re + z_im * z_im <= r * r,
+        c_re * c_re + c_im * c_im <= r * r,
+        6 * r * r + r < limb_power((n - frac_limbs) as nat),
     ensures
-        ref_step_no_overflow(z_re, z_im, c_re, c_im, 2, (n - frac_limbs) as nat),
+        ref_step_no_overflow(z_re, z_im, c_re, c_im, r, (n - frac_limbs) as nat),
 {
     assert(z_re * z_re >= 0) by(nonlinear_arith);
     assert(z_im * z_im >= 0) by(nonlinear_arith);
     assert(c_re * c_re >= 0) by(nonlinear_arith);
     assert(c_im * c_im >= 0) by(nonlinear_arith);
-    assert(z_re * z_re < 4);
-    assert(z_im * z_im < 4);
-    assert(c_re * c_re < 4);
-    assert(c_im * c_im < 4);
-    assert(-2 <= z_re && z_re <= 2) by(nonlinear_arith) requires z_re * z_re < 4;
-    assert(-2 <= z_im && z_im <= 2) by(nonlinear_arith) requires z_im * z_im < 4;
-    assert(-2 <= c_re && c_re <= 2) by(nonlinear_arith) requires c_re * c_re < 4;
-    assert(-2 <= c_im && c_im <= 2) by(nonlinear_arith) requires c_im * c_im < 4;
-    // 6*2*2 + 2 = 26
-    assert(6 * 2 * 2 + 2 < limb_power((n - frac_limbs) as nat)) by(nonlinear_arith)
-        requires 26 <= limb_power((n - frac_limbs) as nat);
+    assert(z_re * z_re <= r * r);
+    assert(z_im * z_im <= r * r);
+    assert(c_re * c_re <= r * r);
+    assert(c_im * c_im <= r * r);
+    assert(-r <= z_re && z_re <= r) by(nonlinear_arith) requires z_re * z_re <= r * r, r >= 0;
+    assert(-r <= z_im && z_im <= r) by(nonlinear_arith) requires z_im * z_im <= r * r, r >= 0;
+    assert(-r <= c_re && c_re <= r) by(nonlinear_arith) requires c_re * c_re <= r * r, r >= 0;
+    assert(-r <= c_im && c_im <= r) by(nonlinear_arith) requires c_im * c_im <= r * r, r >= 0;
 }
 
 /// Inductive bridge: if the reference orbit doesn't escape and c_ref is
@@ -2836,16 +2835,18 @@ pub proof fn lemma_ref_no_escape_implies_ref_no_overflow(
 /// equals spec_ref_orbit * pf at every iteration.
 pub proof fn lemma_ref_orbit_buf_matches_spec(
     z0: SpecComplex, c_ref: SpecComplex,
+    r: int,
     n: nat, frac_limbs: nat, k: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        26 <= limb_power((n - frac_limbs) as nat),
-        c_ref.re * c_ref.re + c_ref.im * c_ref.im < 4,
-        // All orbit points up to k haven't escaped
+        r >= 0,
+        c_ref.re * c_ref.re + c_ref.im * c_ref.im <= r * r,
+        6 * r * r + r < limb_power((n - frac_limbs) as nat),
+        // All orbit points up to k are bounded by r
         forall|j: int| 0 <= j <= k as int ==> {
             let z_j = #[trigger] spec_ref_orbit(z0, c_ref, j as nat);
-            z_j.re * z_j.re + z_j.im * z_j.im < 4
+            z_j.re * z_j.re + z_j.im * z_j.im <= r * r
         },
     ensures
         ({
@@ -2865,18 +2866,15 @@ pub proof fn lemma_ref_orbit_buf_matches_spec(
         // spec_ref_orbit_buf(z0, c_ref, n, frac_limbs, 0) == z0 * pf
     } else {
         // Inductive step: use the bridge for step k-1 → k
-        lemma_ref_orbit_buf_matches_spec(z0, c_ref, n, frac_limbs, (k - 1) as nat);
+        lemma_ref_orbit_buf_matches_spec(z0, c_ref, r, n, frac_limbs, (k - 1) as nat);
         let z_prev = spec_ref_orbit(z0, c_ref, (k - 1) as nat);
-        // Induction hypothesis: buf at k-1 == z_prev * pf
 
-        // z_prev hasn't escaped (from precondition)
-        assert(z_prev.re * z_prev.re + z_prev.im * z_prev.im < 4);
+        assert(z_prev.re * z_prev.re + z_prev.im * z_prev.im <= r * r);
 
-        // Apply the scaled bridge at step k-1
         lemma_ref_no_escape_implies_ref_no_overflow(
-            z_prev.re, z_prev.im, c_ref.re, c_ref.im, n, frac_limbs);
+            z_prev.re, z_prev.im, c_ref.re, c_ref.im, r, n, frac_limbs);
         lemma_ref_step_buf_matches_spec_scaled(
-            z_prev.re, z_prev.im, c_ref.re, c_ref.im, 2, n, frac_limbs);
+            z_prev.re, z_prev.im, c_ref.re, c_ref.im, r, n, frac_limbs);
 
         // The scaled bridge gives:
         // ref_step_buf_int(z_prev.re * pf, z_prev.im * pf, c_ref.re * pf, c_ref.im * pf, n, frac_limbs)
@@ -2949,56 +2947,67 @@ pub proof fn lemma_escape_component_bound(
 }
 
 /// No-escape implies no-overflow: if the reference orbit hasn't escaped
-/// (|Z|² < 4) and the full orbit hasn't escaped (|Z+δ|² < 4), then
-/// pert_step_no_overflow holds with r = 4, e = 1.
+/// (|Z|² < escape_radius_sq) and the full orbit hasn't escaped
+/// (|Z+δ|² < escape_radius_sq), then pert_step_no_overflow holds.
 ///
-/// The triangle inequality gives |δ_re|, |δ_im| < 4 and |Z_re|, |Z_im| < 2.
-/// Then 12·4² + 1 = 193 < limb_power(n - frac_limbs) for n - frac_limbs ≥ 1.
+/// Parameterized by:
+/// - `escape_radius_sq`: squared escape radius (standard Mandelbrot: 4)
+/// - `r`: integer bound for Z and δ components (must satisfy r² ≥ 4·escape_radius_sq)
+/// - `e_u`: bound on |Δc| components
+///
+/// The triangle inequality gives |δ_c|² < 4·escape_radius_sq ≤ r².
+/// So all components satisfy |x| ≤ r, and 12·r² + e_u < P_int.
 pub proof fn lemma_no_escape_implies_no_overflow(
     z_re: int, z_im: int,
     dre: int, dim: int,
     dcre: int, dcim: int,
+    escape_radius_sq: int,
+    r: int, e_u: int,
     n: nat, frac_limbs: nat,
 )
     requires
         n >= 1, frac_limbs < n,
+        escape_radius_sq > 0, r >= 0, e_u >= 0,
+        // r is large enough to cover the triangle inequality bound
+        r * r >= 4 * escape_radius_sq,
         // Reference orbit hasn't escaped
-        z_re * z_re + z_im * z_im < 4,
+        z_re * z_re + z_im * z_im < escape_radius_sq,
         // Full orbit hasn't escaped
-        (z_re + dre) * (z_re + dre) + (z_im + dim) * (z_im + dim) < 4,
-        // Δc bounded
-        -1 <= dcre && dcre <= 1,
-        -1 <= dcim && dcim <= 1,
-        // Integer precision large enough (holds for any n - frac_limbs >= 1 since limb_power(1) = 2^32)
-        194 <= limb_power((n - frac_limbs) as nat),
+        (z_re + dre) * (z_re + dre) + (z_im + dim) * (z_im + dim) < escape_radius_sq,
+        // Δc bounded by e_u
+        -e_u <= dcre && dcre <= e_u,
+        -e_u <= dcim && dcim <= e_u,
+        // Precision large enough
+        12 * r * r + e_u < limb_power((n - frac_limbs) as nat),
     ensures
-        pert_step_no_overflow(z_re, z_im, dre, dim, dcre, dcim, 4, 1, (n - frac_limbs) as nat),
+        pert_step_no_overflow(z_re, z_im, dre, dim, dcre, dcim, r, e_u, (n - frac_limbs) as nat),
 {
-    // Triangle inequality: δ = (Z + δ) - Z, so |δ_c|² < 4·4 = 16, hence |δ_c| < 4
-    lemma_escape_component_bound(z_re + dre, z_im + dim, z_re, z_im, 4);
-    // This gives: ((z_re+dre) - z_re)² < 16, i.e., dre² < 16
-    assert(dre * dre < 16);
-    assert(dim * dim < 16);
+    // Triangle inequality: |δ_c|² < 4·escape_radius_sq ≤ r²
+    lemma_escape_component_bound(z_re + dre, z_im + dim, z_re, z_im, escape_radius_sq);
+    assert(dre * dre < 4 * escape_radius_sq);
+    assert(dim * dim < 4 * escape_radius_sq);
 
-    // Non-negativity of squares
     assert(z_re * z_re >= 0) by(nonlinear_arith);
     assert(z_im * z_im >= 0) by(nonlinear_arith);
+    assert(z_re * z_re < escape_radius_sq);
+    assert(z_im * z_im < escape_radius_sq);
 
-    // Component bounds on Z: |Z_re|² ≤ |Z|² < 4
-    assert(z_re * z_re < 4);
-    assert(z_im * z_im < 4);
+    // Component bounds: x² < 4·R² ≤ r² ⟹ -r ≤ x ≤ r
+    assert(dre * dre <= r * r) by(nonlinear_arith)
+        requires dre * dre < 4 * escape_radius_sq, r * r >= 4 * escape_radius_sq;
+    assert(dim * dim <= r * r) by(nonlinear_arith)
+        requires dim * dim < 4 * escape_radius_sq, r * r >= 4 * escape_radius_sq;
+    assert(z_re * z_re <= r * r) by(nonlinear_arith)
+        requires z_re * z_re < escape_radius_sq, r * r >= 4 * escape_radius_sq,
+                 escape_radius_sq > 0;
+    assert(z_im * z_im <= r * r) by(nonlinear_arith)
+        requires z_im * z_im < escape_radius_sq, r * r >= 4 * escape_radius_sq,
+                 escape_radius_sq > 0;
 
-    // Now establish all pert_step_no_overflow conditions with r=4, e=1:
-    // -4 <= z_re, z_im, dre, dim <= 4
-    // Need: z_re² < 4 ⟹ -4 < z_re < 4 ⟹ -4 <= z_re && z_re <= 4
-    assert(-4 <= z_re && z_re <= 4) by(nonlinear_arith) requires z_re * z_re < 4;
-    assert(-4 <= z_im && z_im <= 4) by(nonlinear_arith) requires z_im * z_im < 4;
-    assert(-4 <= dre && dre <= 4) by(nonlinear_arith) requires dre * dre < 16;
-    assert(-4 <= dim && dim <= 4) by(nonlinear_arith) requires dim * dim < 16;
-
-    // 12 * 4 * 4 + 1 = 193 < 194 <= limb_power(n - frac_limbs)
-    assert(12 * 4 * 4 + 1 < limb_power((n - frac_limbs) as nat)) by(nonlinear_arith)
-        requires 194 <= limb_power((n - frac_limbs) as nat);
+    assert(-r <= z_re && z_re <= r) by(nonlinear_arith) requires z_re * z_re <= r * r, r >= 0;
+    assert(-r <= z_im && z_im <= r) by(nonlinear_arith) requires z_im * z_im <= r * r, r >= 0;
+    assert(-r <= dre && dre <= r) by(nonlinear_arith) requires dre * dre <= r * r, r >= 0;
+    assert(-r <= dim && dim <= r) by(nonlinear_arith) requires dim * dim <= r * r, r >= 0;
 }
 
 /// Orbit-level no-escape predicate: both the reference orbit and the
@@ -3006,14 +3015,15 @@ pub proof fn lemma_no_escape_implies_no_overflow(
 pub open spec fn spec_orbit_no_escape(
     z0: SpecComplex, c_ref: SpecComplex,
     d0: SpecComplex, dc: SpecComplex,
+    escape_radius_sq: int,
     n_steps: nat,
 ) -> bool {
     forall|k: int| 0 <= k < n_steps as int ==> {
         let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
         let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
-        &&& z_k.re * z_k.re + z_k.im * z_k.im < 4
+        &&& z_k.re * z_k.re + z_k.im * z_k.im < escape_radius_sq
         &&& (z_k.re + d_k.re) * (z_k.re + d_k.re)
-            + (z_k.im + d_k.im) * (z_k.im + d_k.im) < 4
+            + (z_k.im + d_k.im) * (z_k.im + d_k.im) < escape_radius_sq
     }
 }
 
@@ -3024,30 +3034,33 @@ pub open spec fn spec_orbit_no_escape(
 pub proof fn lemma_no_escape_orbit_bounded(
     z0: SpecComplex, c_ref: SpecComplex,
     d0: SpecComplex, dc: SpecComplex,
+    escape_radius_sq: int, r: int, e_u: int,
     n: nat, frac_limbs: nat, n_steps: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        spec_orbit_no_escape(z0, c_ref, d0, dc, n_steps),
-        -1 <= dc.re && dc.re <= 1,
-        -1 <= dc.im && dc.im <= 1,
-        194 <= limb_power((n - frac_limbs) as nat),
+        escape_radius_sq > 0, r >= 0, e_u >= 0,
+        r * r >= 4 * escape_radius_sq,
+        spec_orbit_no_escape(z0, c_ref, d0, dc, escape_radius_sq, n_steps),
+        -e_u <= dc.re && dc.re <= e_u,
+        -e_u <= dc.im && dc.im <= e_u,
+        12 * r * r + e_u < limb_power((n - frac_limbs) as nat),
     ensures
-        spec_orbit_bounded(z0, c_ref, d0, dc, 4, 1, n, frac_limbs, n_steps),
+        spec_orbit_bounded(z0, c_ref, d0, dc, r, e_u, n, frac_limbs, n_steps),
 {
     assert forall |k: int| 0 <= k < n_steps as int implies {
         let z_k = #[trigger] spec_ref_orbit(z0, c_ref, k as nat);
         let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
         pert_step_no_overflow(
             z_k.re, z_k.im, d_k.re, d_k.im, dc.re, dc.im,
-            4, 1, (n - frac_limbs) as nat,
+            r, e_u, (n - frac_limbs) as nat,
         )
     } by {
         let z_k = spec_ref_orbit(z0, c_ref, k as nat);
         let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k as nat);
         lemma_no_escape_implies_no_overflow(
             z_k.re, z_k.im, d_k.re, d_k.im, dc.re, dc.im,
-            n, frac_limbs,
+            escape_radius_sq, r, e_u, n, frac_limbs,
         );
     }
 }
@@ -3062,14 +3075,17 @@ pub proof fn lemma_no_escape_orbit_bounded(
 pub proof fn lemma_no_escape_end_to_end(
     z0: SpecComplex, c_ref: SpecComplex,
     d0: SpecComplex, dc: SpecComplex,
+    escape_radius_sq: int, r: int, e_u: int,
     n: nat, frac_limbs: nat, n_steps: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        spec_orbit_no_escape(z0, c_ref, d0, dc, n_steps),
-        -1 <= dc.re && dc.re <= 1,
-        -1 <= dc.im && dc.im <= 1,
-        194 <= limb_power((n - frac_limbs) as nat),
+        escape_radius_sq > 0, r >= 0, e_u >= 0,
+        r * r >= 4 * escape_radius_sq,
+        spec_orbit_no_escape(z0, c_ref, d0, dc, escape_radius_sq, n_steps),
+        -e_u <= dc.re && dc.re <= e_u,
+        -e_u <= dc.im && dc.im <= e_u,
+        12 * r * r + e_u < limb_power((n - frac_limbs) as nat),
     ensures
         // (a) Every buffer step matches the scaled spec step.
         ({
@@ -3095,8 +3111,8 @@ pub proof fn lemma_no_escape_end_to_end(
                 ==> #[trigger] perturbation_step_correct(z_orbit, d_orbit, c_ref, dc, k)
         }),
 {
-    lemma_no_escape_orbit_bounded(z0, c_ref, d0, dc, n, frac_limbs, n_steps);
-    lemma_kernel_end_to_end_under_bounds(z0, c_ref, d0, dc, 4, 1, n, frac_limbs, n_steps);
+    lemma_no_escape_orbit_bounded(z0, c_ref, d0, dc, escape_radius_sq, r, e_u, n, frac_limbs, n_steps);
+    lemma_kernel_end_to_end_under_bounds(z0, c_ref, d0, dc, r, e_u, n, frac_limbs, n_steps);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3112,13 +3128,16 @@ pub proof fn lemma_no_escape_end_to_end(
 /// equivalent to `|Z_u|² ≥ 4`.
 pub proof fn lemma_ref_escape_magnitude_exact(
     z_re_u: int, z_im_u: int,
+    escape_radius_sq: int,
     n: nat, frac_limbs: nat,
 )
     requires
         n >= 1, frac_limbs < n,
+        escape_radius_sq > 0,
         // Before escape
-        z_re_u * z_re_u + z_im_u * z_im_u < 4,
-        26 <= limb_power((n - frac_limbs) as nat),
+        z_re_u * z_re_u + z_im_u * z_im_u < escape_radius_sq,
+        // Magnitude fits: escape_radius_sq * pf < pn
+        escape_radius_sq * limb_power(frac_limbs) < limb_power(n),
     ensures
         ({
             let pf = limb_power(frac_limbs);
@@ -3147,16 +3166,24 @@ pub proof fn lemma_ref_escape_magnitude_exact(
     // Component bounds
     assert(z_re_u * z_re_u >= 0) by(nonlinear_arith);
     assert(z_im_u * z_im_u >= 0) by(nonlinear_arith);
-    assert(z_re_u * z_re_u < 4);
-    assert(z_im_u * z_im_u < 4);
+    assert(z_re_u * z_re_u < escape_radius_sq);
+    assert(z_im_u * z_im_u < escape_radius_sq);
 
-    // Scaled products fit in pn (since 4 * pf < pn when 4 < pk)
-    assert(z_re_u * z_re_u * pf < pn && -(pn as int) < z_re_u * z_re_u * pf) by(nonlinear_arith)
-        requires z_re_u * z_re_u < 4, z_re_u * z_re_u >= 0,
-                 pn == pf * pk, pf > 0, pk >= 26;
-    assert(z_im_u * z_im_u * pf < pn && -(pn as int) < z_im_u * z_im_u * pf) by(nonlinear_arith)
-        requires z_im_u * z_im_u < 4, z_im_u * z_im_u >= 0,
-                 pn == pf * pk, pf > 0, pk >= 26;
+    // Scaled products fit in pn (since escape_radius_sq * pf < pn)
+    assert(z_re_u * z_re_u * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires z_re_u * z_re_u < escape_radius_sq, pf > 0;
+    assert(z_re_u * z_re_u * pf < pn) by(nonlinear_arith)
+        requires z_re_u * z_re_u * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
+    assert(-(pn as int) < z_re_u * z_re_u * pf) by(nonlinear_arith)
+        requires z_re_u * z_re_u >= 0, pn > 0, pf > 0;
+    assert(z_im_u * z_im_u * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires z_im_u * z_im_u < escape_radius_sq, pf > 0;
+    assert(z_im_u * z_im_u * pf < pn) by(nonlinear_arith)
+        requires z_im_u * z_im_u * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
+    assert(-(pn as int) < z_im_u * z_im_u * pf) by(nonlinear_arith)
+        requires z_im_u * z_im_u >= 0, pn > 0, pf > 0;
 
     lemma_signed_mul_buf_scaled(z_re_u, z_re_u, n, frac_limbs);
     lemma_signed_mul_buf_scaled(z_im_u, z_im_u, n, frac_limbs);
@@ -3170,8 +3197,11 @@ pub proof fn lemma_ref_escape_magnitude_exact(
         requires re2 == z_re_u * z_re_u * pf, im2 == z_im_u * z_im_u * pf,
                  mag == z_re_u * z_re_u + z_im_u * z_im_u;
     assert(mag >= 0);
+    assert(mag * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires mag < escape_radius_sq, pf > 0;
     assert(re2 + im2 < pn) by(nonlinear_arith)
-        requires re2 + im2 == mag * pf, mag < 4, mag >= 0, pn == pf * pk, pf > 0, pk >= 26;
+        requires re2 + im2 == mag * pf, mag * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
     assert(re2 + im2 >= 0) by(nonlinear_arith)
         requires re2 + im2 == mag * pf, mag >= 0, pf > 0;
 }
@@ -3180,47 +3210,45 @@ pub proof fn lemma_ref_escape_magnitude_exact(
 /// Given threshold = 4 * pf (the fixed-point encoding of 4).
 pub proof fn lemma_ref_escape_iff_spec(
     z_re_u: int, z_im_u: int,
+    escape_radius_sq: int,
     threshold: int,
     n: nat, frac_limbs: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        z_re_u * z_re_u + z_im_u * z_im_u < 4,
-        26 <= limb_power((n - frac_limbs) as nat),
-        threshold == 4 * limb_power(frac_limbs),
+        escape_radius_sq > 0,
+        z_re_u * z_re_u + z_im_u * z_im_u < escape_radius_sq,
+        escape_radius_sq * limb_power(frac_limbs) < limb_power(n),
+        threshold == escape_radius_sq * limb_power(frac_limbs),
     ensures
         ({
             let pf = limb_power(frac_limbs);
             let re2 = signed_mul_buf(z_re_u * pf, z_re_u * pf, n, frac_limbs);
             let im2 = signed_mul_buf(z_im_u * pf, z_im_u * pf, n, frac_limbs);
-            // Escape check fires iff spec escapes
-            (re2 + im2 >= threshold) <==> (z_re_u * z_re_u + z_im_u * z_im_u >= 4)
+            (re2 + im2 >= threshold) <==> (z_re_u * z_re_u + z_im_u * z_im_u >= escape_radius_sq)
         }),
 {
-    lemma_ref_escape_magnitude_exact(z_re_u, z_im_u, n, frac_limbs);
+    lemma_ref_escape_magnitude_exact(z_re_u, z_im_u, escape_radius_sq, n, frac_limbs);
     lemma_limb_power_pos(frac_limbs);
     let pf = limb_power(frac_limbs);
     let re2 = signed_mul_buf(z_re_u * pf, z_re_u * pf, n, frac_limbs);
     let im2 = signed_mul_buf(z_im_u * pf, z_im_u * pf, n, frac_limbs);
-    // re2 + im2 == |Z_u|² * pf, threshold == 4 * pf
-    // So (re2 + im2 >= threshold) ↔ (|Z_u|² * pf >= 4 * pf) ↔ (|Z_u|² >= 4)
     assert(re2 + im2 == (z_re_u * z_re_u + z_im_u * z_im_u) * pf);
-    assert((re2 + im2 >= threshold) <==> (z_re_u * z_re_u + z_im_u * z_im_u >= 4)) by(nonlinear_arith)
+    assert((re2 + im2 >= threshold) <==> (z_re_u * z_re_u + z_im_u * z_im_u >= escape_radius_sq)) by(nonlinear_arith)
         requires re2 + im2 == (z_re_u * z_re_u + z_im_u * z_im_u) * pf,
-                 threshold == 4 * pf, pf > 0;
+                 threshold == escape_radius_sq * pf, pf > 0;
 }
 
 /// Perturbation escape: the add Z_buf + δ_buf is exact (no 3-way wrap)
-/// when |Z_u + δ_u| < 2 (i.e., before escape).
+/// when the component sum squared fits: (z_u + d_u)² * pf < pn.
 pub proof fn lemma_pert_escape_add_exact(
     z_u: int, d_u: int,
     n: nat, frac_limbs: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        // The sum is bounded (before escape)
-        (z_u + d_u) * (z_u + d_u) < 4,
-        26 <= limb_power((n - frac_limbs) as nat),
+        // The sum component squared times pf fits in pn
+        (z_u + d_u) * (z_u + d_u) * limb_power(frac_limbs) < limb_power(n),
     ensures
         ({
             let pf = limb_power(frac_limbs);
@@ -3239,12 +3267,11 @@ pub proof fn lemma_pert_escape_add_exact(
     assert(pn == pf * pk);
 
     let sum = z_u + d_u;
-    // |sum| < 2 (from sum² < 4)
-    assert(-2 < sum && sum < 2) by(nonlinear_arith) requires sum * sum < 4;
-    // sum * pf fits in pn (since 2 * pf < pn when 2 < pk)
+    // sum * pf fits in pn (from precondition: sum² * pf < pn, and |sum*pf| ≤ sum²*pf when |sum| ≥ 1, or |sum*pf| < pf ≤ pn when |sum| < 1)
+    assert(sum * sum >= 0) by(nonlinear_arith);
     assert(z_u * pf + d_u * pf == sum * pf) by(nonlinear_arith) requires sum == z_u + d_u;
     assert(sum * pf < pn && sum * pf > -(pn as int)) by(nonlinear_arith)
-        requires -2 < sum, sum < 2, pn == pf * pk, pf > 0, pk >= 26;
+        requires sum * sum * pf < pn, sum * sum >= 0, pf > 0, pn > 0;
     lemma_signed_add_buf_no_wrap(z_u * pf, d_u * pf, n);
 }
 
@@ -3253,16 +3280,18 @@ pub proof fn lemma_pert_escape_add_exact(
 pub proof fn lemma_pert_escape_magnitude_exact(
     z_re_u: int, z_im_u: int,
     d_re_u: int, d_im_u: int,
+    escape_radius_sq: int,
     n: nat, frac_limbs: nat,
 )
     requires
         n >= 1, frac_limbs < n,
+        escape_radius_sq > 0,
         // Reference bounded
-        z_re_u * z_re_u + z_im_u * z_im_u < 4,
+        z_re_u * z_re_u + z_im_u * z_im_u < escape_radius_sq,
         // Full orbit bounded (before escape)
         (z_re_u + d_re_u) * (z_re_u + d_re_u)
-            + (z_im_u + d_im_u) * (z_im_u + d_im_u) < 4,
-        26 <= limb_power((n - frac_limbs) as nat),
+            + (z_im_u + d_im_u) * (z_im_u + d_im_u) < escape_radius_sq,
+        escape_radius_sq * limb_power(frac_limbs) < limb_power(n),
     ensures
         ({
             let pf = limb_power(frac_limbs);
@@ -3294,11 +3323,20 @@ pub proof fn lemma_pert_escape_magnitude_exact(
     // Non-negativity
     assert(w_re * w_re >= 0) by(nonlinear_arith);
     assert(w_im * w_im >= 0) by(nonlinear_arith);
-    assert(w_re * w_re < 4);
-    assert(w_im * w_im < 4);
+    assert(w_re * w_re < escape_radius_sq);
+    assert(w_im * w_im < escape_radius_sq);
 
-    // Adds are exact (no wrap) — uses (w_re)² < 4 and (w_im)² < 4
-    // which come from the full orbit bound
+    // Adds are exact: (w_c)² < escape_radius_sq, so (w_c)² * pf < pn
+    assert(w_re * w_re * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires w_re * w_re < escape_radius_sq, pf > 0;
+    assert(w_re * w_re * pf < pn) by(nonlinear_arith)
+        requires w_re * w_re * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
+    assert(w_im * w_im * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires w_im * w_im < escape_radius_sq, pf > 0;
+    assert(w_im * w_im * pf < pn) by(nonlinear_arith)
+        requires w_im * w_im * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
     lemma_pert_escape_add_exact(z_re_u, d_re_u, n, frac_limbs);
     lemma_pert_escape_add_exact(z_im_u, d_im_u, n, frac_limbs);
     let full_re = signed_add_buf(z_re_u * pf, d_re_u * pf, n);
@@ -3307,10 +3345,20 @@ pub proof fn lemma_pert_escape_magnitude_exact(
     assert(full_im == w_im * pf);
 
     // Squares are exact
-    assert(w_re * w_re * pf < pn && -(pn as int) < w_re * w_re * pf) by(nonlinear_arith)
-        requires w_re * w_re < 4, w_re * w_re >= 0, pn == pf * pk, pf > 0, pk >= 26;
-    assert(w_im * w_im * pf < pn && -(pn as int) < w_im * w_im * pf) by(nonlinear_arith)
-        requires w_im * w_im < 4, w_im * w_im >= 0, pn == pf * pk, pf > 0, pk >= 26;
+    assert(w_re * w_re * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires w_re * w_re < escape_radius_sq, pf > 0;
+    assert(w_re * w_re * pf < pn) by(nonlinear_arith)
+        requires w_re * w_re * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
+    assert(-(pn as int) < w_re * w_re * pf) by(nonlinear_arith)
+        requires w_re * w_re >= 0, pn > 0, pf > 0;
+    assert(w_im * w_im * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires w_im * w_im < escape_radius_sq, pf > 0;
+    assert(w_im * w_im * pf < pn) by(nonlinear_arith)
+        requires w_im * w_im * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
+    assert(-(pn as int) < w_im * w_im * pf) by(nonlinear_arith)
+        requires w_im * w_im >= 0, pn > 0, pf > 0;
 
     lemma_signed_mul_buf_scaled(w_re, w_re, n, frac_limbs);
     lemma_signed_mul_buf_scaled(w_im, w_im, n, frac_limbs);
@@ -3323,8 +3371,11 @@ pub proof fn lemma_pert_escape_magnitude_exact(
         requires sq_re == w_re * w_re * pf, sq_im == w_im * w_im * pf,
                  mag == w_re * w_re + w_im * w_im;
     assert(mag >= 0);
+    assert(mag * pf < escape_radius_sq * pf) by(nonlinear_arith)
+        requires mag < escape_radius_sq, pf > 0;
     assert(sq_re + sq_im < pn) by(nonlinear_arith)
-        requires sq_re + sq_im == mag * pf, mag < 4, mag >= 0, pn == pf * pk, pf > 0, pk >= 26;
+        requires sq_re + sq_im == mag * pf, mag * pf < escape_radius_sq * pf,
+                 escape_radius_sq * pf < pn;
     assert(sq_re + sq_im >= 0) by(nonlinear_arith)
         requires sq_re + sq_im == mag * pf, mag >= 0, pf > 0;
 }
@@ -3333,16 +3384,18 @@ pub proof fn lemma_pert_escape_magnitude_exact(
 pub proof fn lemma_pert_escape_iff_spec(
     z_re_u: int, z_im_u: int,
     d_re_u: int, d_im_u: int,
+    escape_radius_sq: int,
     threshold: int,
     n: nat, frac_limbs: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        z_re_u * z_re_u + z_im_u * z_im_u < 4,
+        escape_radius_sq > 0,
+        z_re_u * z_re_u + z_im_u * z_im_u < escape_radius_sq,
         (z_re_u + d_re_u) * (z_re_u + d_re_u)
-            + (z_im_u + d_im_u) * (z_im_u + d_im_u) < 4,
-        26 <= limb_power((n - frac_limbs) as nat),
-        threshold == 4 * limb_power(frac_limbs),
+            + (z_im_u + d_im_u) * (z_im_u + d_im_u) < escape_radius_sq,
+        escape_radius_sq * limb_power(frac_limbs) < limb_power(n),
+        threshold == escape_radius_sq * limb_power(frac_limbs),
     ensures
         ({
             let pf = limb_power(frac_limbs);
@@ -3352,10 +3405,10 @@ pub proof fn lemma_pert_escape_iff_spec(
             let sq_im = signed_mul_buf(full_im, full_im, n, frac_limbs);
             (sq_re + sq_im >= threshold) <==>
                 ((z_re_u + d_re_u) * (z_re_u + d_re_u)
-                    + (z_im_u + d_im_u) * (z_im_u + d_im_u) >= 4)
+                    + (z_im_u + d_im_u) * (z_im_u + d_im_u) >= escape_radius_sq)
         }),
 {
-    lemma_pert_escape_magnitude_exact(z_re_u, z_im_u, d_re_u, d_im_u, n, frac_limbs);
+    lemma_pert_escape_magnitude_exact(z_re_u, z_im_u, d_re_u, d_im_u, escape_radius_sq, n, frac_limbs);
     lemma_limb_power_pos(frac_limbs);
     let pf = limb_power(frac_limbs);
     let full_re = signed_add_buf(z_re_u * pf, d_re_u * pf, n);
@@ -3364,8 +3417,8 @@ pub proof fn lemma_pert_escape_iff_spec(
     let sq_im = signed_mul_buf(full_im, full_im, n, frac_limbs);
     let mag = (z_re_u + d_re_u) * (z_re_u + d_re_u) + (z_im_u + d_im_u) * (z_im_u + d_im_u);
     assert(sq_re + sq_im == mag * pf);
-    assert((sq_re + sq_im >= threshold) <==> (mag >= 4)) by(nonlinear_arith)
-        requires sq_re + sq_im == mag * pf, threshold == 4 * pf, pf > 0;
+    assert((sq_re + sq_im >= threshold) <==> (mag >= escape_radius_sq)) by(nonlinear_arith)
+        requires sq_re + sq_im == mag * pf, threshold == escape_radius_sq * pf, pf > 0;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3386,19 +3439,17 @@ pub proof fn lemma_pert_escape_iff_spec(
 pub proof fn lemma_kernel_escape_correspondence(
     z0: SpecComplex, c_ref: SpecComplex,
     d0: SpecComplex, dc: SpecComplex,
+    escape_radius_sq: int,
     threshold: int,
     n: nat, frac_limbs: nat, k: nat,
 )
     requires
         n >= 1, frac_limbs < n,
-        26 <= limb_power((n - frac_limbs) as nat),
-        194 <= limb_power((n - frac_limbs) as nat),
-        -1 <= dc.re && dc.re <= 1,
-        -1 <= dc.im && dc.im <= 1,
-        threshold == 4 * limb_power(frac_limbs),
-        c_ref.re * c_ref.re + c_ref.im * c_ref.im < 4,
+        escape_radius_sq > 0,
+        escape_radius_sq * limb_power(frac_limbs) < limb_power(n),
+        threshold == escape_radius_sq * limb_power(frac_limbs),
         // Non-escape for iterations 0..k+1
-        spec_orbit_no_escape(z0, c_ref, d0, dc, (k + 1) as nat),
+        spec_orbit_no_escape(z0, c_ref, d0, dc, escape_radius_sq, (k + 1) as nat),
     ensures
         ({
             let pf = limb_power(frac_limbs);
@@ -3411,22 +3462,16 @@ pub proof fn lemma_kernel_escape_correspondence(
             let sq_im = signed_mul_buf(full_im, full_im, n, frac_limbs);
             (sq_re + sq_im >= threshold) <==>
                 ((z_k.re + d_k.re) * (z_k.re + d_k.re)
-                    + (z_k.im + d_k.im) * (z_k.im + d_k.im) >= 4)
+                    + (z_k.im + d_k.im) * (z_k.im + d_k.im) >= escape_radius_sq)
         }),
 {
-    // Instantiate spec_orbit_no_escape's forall at index k.
-    // The forall is: forall|j: int| 0 <= j < n_steps ==> { let z_j = #[trigger] spec_ref_orbit(...); ... }
-    // We need j = k as int, and n_steps = (k+1) as nat, so k < k+1.
     assert(0 <= k as int && (k as int) < ((k + 1) as nat) as int);
     let z_k = spec_ref_orbit(z0, c_ref, k);
     let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k);
-    // Explicitly assert the two bounds from the forall instantiation
-    // Create the trigger term with k as int → as nat to match the forall's pattern
     let k_int: int = k as int;
     assert(spec_ref_orbit(z0, c_ref, k_int as nat) === z_k);
-    // Now Z3 can instantiate the forall and derive both bounds
     lemma_pert_escape_iff_spec(
-        z_k.re, z_k.im, d_k.re, d_k.im, threshold, n, frac_limbs);
+        z_k.re, z_k.im, d_k.re, d_k.im, escape_radius_sq, threshold, n, frac_limbs);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3492,7 +3537,7 @@ pub proof fn lemma_vote_scatter_race_free(workgroup_size: nat, vote_base: nat)
 /// → Race-free (single writer).
 pub proof fn lemma_kernel_barrier_race_free(workgroup_size: nat, vote_base: nat)
     requires
-        workgroup_size == 256,  // 16 × 16 workgroup
+        workgroup_size > 0,
     ensures
         // Phase 1 & 3: thread-0-only writes — at most 1 writer (trivial)
         workgroup_size > 0,
@@ -3537,7 +3582,7 @@ pub proof fn lemma_sequential_concurrent_equivalence(
     vote_base: nat,
 )
     requires
-        workgroup_size == 256,
+        workgroup_size > 0,
     ensures
         // Phases 1 & 3: thread-0-only (single writer)
         workgroup_size > 0,
