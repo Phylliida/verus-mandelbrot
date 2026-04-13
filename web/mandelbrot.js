@@ -509,12 +509,13 @@ async function render() {
     }
   }
 
-  // Build params: [width, height, max_iters, n_limbs, frac_limbs, thresh_limbs(n), max_rounds]
+  // Build params: [width, height, max_iters, n_limbs, frac_limbs, thresh_limbs(n), max_rounds, use_perturbation]
   // Escape threshold = 4.0 in fixed-point: integer part = 4 in top limb
   const thresh_limbs = new Uint32Array(n);
   thresh_limbs[n - 1] = 4;
   const maxRounds = parseInt(document.getElementById('maxRounds')?.value || '5');
-  const paramsData = new Uint32Array(6 + n);
+  const usePerturbation = document.getElementById('usePerturbation')?.checked ? 1 : 0;
+  const paramsData = new Uint32Array(7 + n);
   paramsData[0] = width;
   paramsData[1] = height;
   paramsData[2] = maxIters;
@@ -522,6 +523,7 @@ async function render() {
   paramsData[4] = frac_limbs;
   paramsData.set(thresh_limbs, 5);
   paramsData[5 + n] = maxRounds;
+  paramsData[6 + n] = usePerturbation;
 
   // No scratch buffer needed — all intermediates are thread-local arrays
   const iterCountsSize = totalPixels * 4;

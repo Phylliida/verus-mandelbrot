@@ -2009,11 +2009,14 @@ fn mandelbrot_perturbation(
         // iter_counts: per-pixel output (with u32 overflow bound)
         old(iter_counts)@.len() as int >= (params@[0] as int) * (params@[1] as int),
         (params@[0] as int) * (params@[1] as int) < u32_max(),
-        // Escape threshold in params[5..5+n], max_rounds at params[5+n]
-        params@.len() as int >= 6 + params@[3] as int,
+        // Escape threshold in params[5..5+n], max_rounds at params[5+n],
+        // use_perturbation at params[6+n]
+        params@.len() as int >= 7 + params@[3] as int,
         // max_rounds: 0 < max_rounds (at least 1 round)
         params@[(5 + params@[3] as int) as int] > 0,
         params@[(5 + params@[3] as int) as int] <= 256, // bounded for termination
+        // use_perturbation: 0 = direct mode, nonzero = perturbation mode
+        params@[(6 + params@[3] as int) as int] <= 1,
 {
     let width = vget(params, 0u32);
     let height = vget(params, 1u32);
@@ -2021,6 +2024,7 @@ fn mandelbrot_perturbation(
     let n = vget(params, 3u32);
     let frac_limbs = vget(params, 4u32);
     let max_rounds = vget(params, 5u32 + n);
+    let use_perturbation = vget(params, 6u32 + n);
 
     // (#1) Parameter validation regression test: if preconditions change,
     // these assertions catch invalid n/frac_limbs/max_iters immediately.
@@ -2209,8 +2213,10 @@ fn mandelbrot_perturbation(
     let mut glitch_iter = 0u32; // iteration where glitch was detected
 
     // ═══════════════════════════════════════════════════
-    // Iterative refinement loop
+    // Iterative refinement loop (perturbation mode only)
     // ═══════════════════════════════════════════════════
+    // When use_perturbation == 0, skip perturbation entirely and let
+    // the direct computation fallback handle all pixels.
     // max_rounds read from params[5+n] (was hardcoded 5)
 
     // Prove shared memory layout bounds before entering the loop
@@ -2222,7 +2228,7 @@ fn mandelbrot_perturbation(
     // Each intermediate offset is strictly less.
 
     let mut round = 0u32;
-    while round < max_rounds
+    while round < max_rounds && use_perturbation != 0u32
         invariant
             round <= max_rounds,
             max_rounds > 0, max_rounds <= 256,
@@ -2250,7 +2256,7 @@ fn mandelbrot_perturbation(
             wh_cs_bound < u32_max(),
             iter_counts@.len() as int >= width as int * height as int,
             // params
-            params@.len() as int >= 5 + n as int,
+            params@.len() as int >= 7 + n as int,
             // Shared memory address bounds
             vote_base + 256u32 < 8192u32,
             glitch_count_addr < 8192u32,
