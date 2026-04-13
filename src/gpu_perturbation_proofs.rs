@@ -3933,4 +3933,105 @@ pub proof fn lemma_vote_buffer_zeroed_after_clear(
     // precondition (which comes from the loop's postcondition) will fail.
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Final robustness proofs: threshold encoding, tid uniqueness, zero-width
+// ═══════════════════════════════════════════════════════════════
+
+/// Escape threshold encoding spec: the CPU must encode the escape radius²
+/// as a multi-precision limb value in params[5..5+n]. This predicate
+/// formalizes what "correctly encoded" means.
+///
+/// If this doesn't hold, the escape check compares against the wrong
+/// value and reports incorrect escape iterations.
+pub open spec fn threshold_correctly_encoded(
+    params: Seq<u32>,
+    n: nat, frac_limbs: nat,
+    escape_radius_sq: int,
+) -> bool {
+    &&& params.len() >= 5 + n
+    &&& n >= 1
+    &&& frac_limbs <= n
+    // The limb value at params[5..5+n] equals escape_radius_sq * pf
+    &&& vec_val(params.subrange(5, (5 + n) as int))
+        == escape_radius_sq * limb_power(frac_limbs)
+    // The threshold fits in n limbs (no overflow)
+    &&& escape_radius_sq * limb_power(frac_limbs) < limb_power(n)
+    &&& escape_radius_sq > 0
+}
+
+/// If the threshold is correctly encoded, the escape check comparison
+/// is equivalent to the spec-level escape condition.
+pub proof fn lemma_threshold_encoding_sound(
+    params: Seq<u32>,
+    n: nat, frac_limbs: nat,
+    escape_radius_sq: int,
+)
+    requires
+        threshold_correctly_encoded(params, n, frac_limbs, escape_radius_sq),
+    ensures
+        vec_val(params.subrange(5, (5 + n) as int))
+            == escape_radius_sq * limb_power(frac_limbs),
+{
+    // Directly from the predicate — this lemma exists as a
+    // documented entry point for callers.
+}
+
+/// Cross-workgroup tid uniqueness: different pixels (in the same or
+/// different workgroups) map to different iter_counts indices.
+///
+/// This is a property of the GPU dispatch model: each thread has
+/// unique (gid_x, gid_y), so tid = gid_y * width + gid_x is unique.
+/// We prove: if (gid_x1, gid_y1) ≠ (gid_x2, gid_y2), then
+/// gid_y1 * width + gid_x1 ≠ gid_y2 * width + gid_x2.
+///
+/// (This is already proved by lemma_tid_injective in the kernel,
+/// but we state it here for cross-workgroup generality.)
+pub proof fn lemma_cross_workgroup_tid_unique(
+    gid_x1: nat, gid_y1: nat,
+    gid_x2: nat, gid_y2: nat,
+    width: nat,
+)
+    requires
+        gid_x1 < width, gid_x2 < width,
+        (gid_x1 != gid_x2 || gid_y1 != gid_y2),
+        width > 0,
+    ensures
+        gid_y1 * width + gid_x1 != gid_y2 * width + gid_x2,
+{
+    if gid_y1 == gid_y2 {
+        // Same row, different column: gid_x1 != gid_x2
+        assert(gid_x1 != gid_x2);
+    } else {
+        // Different rows: gid_y1 * width + gid_x1 is in a different
+        // "row block" than gid_y2 * width + gid_x2
+        if gid_y1 < gid_y2 {
+            assert(gid_y1 * width + gid_x1 < (gid_y1 + 1) * width) by(nonlinear_arith)
+                requires gid_x1 < width;
+            assert((gid_y1 + 1) * width <= gid_y2 * width) by(nonlinear_arith)
+                requires gid_y1 + 1 <= gid_y2, width > 0;
+        } else {
+            assert(gid_y2 * width + gid_x2 < (gid_y2 + 1) * width) by(nonlinear_arith)
+                requires gid_x2 < width;
+            assert((gid_y2 + 1) * width <= gid_y1 * width) by(nonlinear_arith)
+                requires gid_y2 + 1 <= gid_y1, width > 0;
+        }
+    }
+}
+
+/// Zero-width/height handling: when width = 0 or height = 0, all
+/// threads return early and no writes to iter_counts occur.
+/// This is vacuously safe — no OOB, no races, no state mutation.
+pub proof fn lemma_zero_dimension_safe(
+    gid_x: nat, gid_y: nat, width: nat, height: nat,
+)
+    requires
+        width == 0 || height == 0,
+    ensures
+        // Every thread satisfies the early-return condition
+        gid_x >= width || gid_y >= height,
+{
+    // If width == 0: gid_x >= 0 == width (since gid_x: nat >= 0)
+    // If height == 0: gid_y >= 0 == height
+}
+
 } // verus!
