@@ -632,6 +632,35 @@ async function render() {
   const zoomStr = zoomBig > 1n ? `zoom=2^${zoomBig.toString(2).length - 1}` : `zoom=${zoom.toFixed(0)}`;
   statusEl.textContent = `Done in ${elapsed.toFixed(0)}ms (${n} limbs, ${maxIters} iters, ${zoomStr})`;
 
+  // Diagnostic: compare GPU escape counts with CPU BigInt reference
+  {
+    const cx = Math.floor(width / 2), cy = Math.floor(height / 2);
+    // Log GPU escape counts for a 5-pixel row at center
+    const gpuCounts = [];
+    for (let dx = -2; dx <= 2; dx++) {
+      const rgba = iterCounts[cy * width + cx + dx];
+      // Extract escape iter from RGBA: if alpha-only (black) = max_iters, else from color
+      const r = rgba & 0xFF;
+      const iters = r === 0 ? maxIters : Math.round(r * maxIters / 255);
+      gpuCounts.push(iters);
+    }
+    console.log(`[diag] GPU escape counts at center row: [${gpuCounts.join(', ')}]`);
+
+    // CPU reference: iterate Z = Z^2 + c using f64 for the center pixel
+    const cReF64 = Number(centerReBig_ + 0n * pixelStepBig) / Number(scale);
+    const cImF64 = Number(centerImBig_ + 0n * pixelStepBig) / Number(scale);
+    let zr = 0, zi = 0;
+    let cpuEsc = maxIters;
+    for (let i = 0; i < maxIters; i++) {
+      const zr2 = zr * zr, zi2 = zi * zi;
+      if (zr2 + zi2 >= 4) { cpuEsc = i; break; }
+      const zrNew = zr2 - zi2 + cReF64;
+      zi = 2 * zr * zi + cImF64;
+      zr = zrNew;
+    }
+    console.log(`[diag] CPU f64 reference: c=(${cReF64}, ${cImF64}) escaped at ${cpuEsc}`);
+  }
+
   // Render to canvas — GPU outputs packed RGBA directly
   const imageData = ctx2d.createImageData(width, height);
   const pixels = new Uint8Array(iterCounts.buffer);
