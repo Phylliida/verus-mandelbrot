@@ -1746,8 +1746,10 @@ fn ref_orbit_iteration_step(
 }
 
 /// Direct Mandelbrot iteration: Z_{k+1} = Z_k^2 + c_pixel.
-/// Optimized: reuses re²/im² across escape check and next iteration step,
-/// saving 2 multiplies per iteration (3 muls/iter instead of 5).
+/// Optimized:
+/// - Reuses re²/im² across escape check and next step (3 muls/iter instead of 5)
+/// - Periodicity detection: saves checkpoint every 2^k iters, detects cycles early
+/// - First iteration Z₁ = c by direct copy (0 muls)
 fn direct_computation_fallback(
     c_re_slice: &[u32], c_re_sign: u32,
     c_im_slice: &[u32], c_im_sign: u32,
@@ -1757,6 +1759,8 @@ fn direct_computation_fallback(
     t3: &mut Vec<u32>, t4: &mut Vec<u32>, t5: &mut Vec<u32>,
     lprod: &mut Vec<u32>,
     ls1: &mut Vec<u32>, ls2: &mut Vec<u32>,
+    // Checkpoint arrays for periodicity detection (caller passes ref_a/ref_b)
+    chk_re: &mut Vec<u32>, chk_im: &mut Vec<u32>,
     thresh: &[u32],
     n: u32, frac_limbs: u32,
     max_iters: u32,
@@ -1778,6 +1782,8 @@ fn direct_computation_fallback(
         old(lprod)@.len() == 2 * n as int,
         old(ls1)@.len() == n as int,
         old(ls2)@.len() == n as int,
+        old(chk_re)@.len() == n as int,
+        old(chk_im)@.len() == n as int,
         c_re_sign == 0u32 || c_re_sign == 1u32,
         c_im_sign == 0u32 || c_im_sign == 1u32,
         valid_limbs(c_re_slice@.subrange(0, n as int)),
@@ -1798,6 +1804,8 @@ fn direct_computation_fallback(
         lprod@.len() == 2 * n as int,
         ls1@.len() == n as int,
         ls2@.len() == n as int,
+        chk_re@.len() == n as int,
+        chk_im@.len() == n as int,
 {
     let n_us = n as usize;
     let frac_us = frac_limbs as usize;
@@ -1862,6 +1870,21 @@ fn direct_computation_fallback(
         return 0u32; // |c|^2 >= 4 → escaped immediately
     }
 
+    // Periodicity detection: save Z as checkpoint, compare every iteration,
+    // update checkpoint every 2^k iterations (doubling period).
+    // If Z matches checkpoint exactly, orbit is periodic → pixel is in set.
+    let mut chk_re_sign = z_re_sign;
+    let mut chk_im_sign = z_im_sign;
+    for i in 0u32..n
+        invariant n >= 1, n <= 8, z_re@.len() == n as int, z_im@.len() == n as int,
+            chk_re@.len() == n as int, chk_im@.len() == n as int,
+    {
+        chk_re.set(i as usize, z_re[i as usize]);
+        chk_im.set(i as usize, z_im[i as usize]);
+    }
+    let mut check_period = 8u32;
+    let mut period_counter = 0u32;
+
     // Main loop: iter 1..max_iters. re²/im² in t3/t4 carry over from previous escape check.
     let mut iter = 1u32;
     while iter < max_iters
@@ -1891,6 +1914,11 @@ fn direct_computation_fallback(
             valid_limbs(thresh@.subrange(0, n as int)),
             valid_limbs(z_re@), valid_limbs(z_im@),
             valid_limbs(t3@), valid_limbs(t4@),
+            chk_re@.len() == n as int, chk_im@.len() == n as int,
+            chk_re_sign == 0u32 || chk_re_sign == 1u32,
+            chk_im_sign == 0u32 || chk_im_sign == 1u32,
+            check_period >= 8, check_period <= 2048,
+            period_counter < check_period,
             escaped_iter <= max_iters,
         decreases max_iters - iter,
     {
@@ -1966,6 +1994,45 @@ fn direct_computation_fallback(
         if esc_borrow == 0u32 {
             escaped_iter = iter;
             break;
+        }
+
+        // ── Periodicity detection ──
+        // Compare Z with checkpoint. If all limbs and signs match, orbit is periodic.
+        let mut is_periodic = 1u32;
+        if z_re_sign != chk_re_sign { is_periodic = 0u32; }
+        if z_im_sign != chk_im_sign { is_periodic = 0u32; }
+        if is_periodic == 1u32 {
+            for pi in 0u32..n
+                invariant n >= 1, n <= 8,
+                    z_re@.len() == n as int, z_im@.len() == n as int,
+                    chk_re@.len() == n as int, chk_im@.len() == n as int,
+                    is_periodic == 0u32 || is_periodic == 1u32,
+            {
+                if z_re[pi as usize] != chk_re[pi as usize] { is_periodic = 0u32; }
+                if z_im[pi as usize] != chk_im[pi as usize] { is_periodic = 0u32; }
+            }
+        }
+        if is_periodic == 1u32 {
+            // Orbit is periodic → pixel is in the Mandelbrot set
+            escaped_iter = max_iters;
+            break;
+        }
+
+        // Update checkpoint every check_period iterations (doubling schedule)
+        period_counter = period_counter + 1u32;
+        if period_counter >= check_period {
+            chk_re_sign = z_re_sign;
+            chk_im_sign = z_im_sign;
+            for pi in 0u32..n
+                invariant n >= 1, n <= 8,
+                    z_re@.len() == n as int, z_im@.len() == n as int,
+                    chk_re@.len() == n as int, chk_im@.len() == n as int,
+            {
+                chk_re.set(pi as usize, z_re[pi as usize]);
+                chk_im.set(pi as usize, z_im[pi as usize]);
+            }
+            period_counter = 0u32;
+            if check_period < 1024u32 { check_period = check_period * 2u32; }
         }
 
         iter = iter + 1u32;
@@ -3572,6 +3639,7 @@ fn mandelbrot_perturbation(
                 &mut delta_re, &mut delta_im,
                 &mut t1, &mut t2, &mut t3, &mut t4, &mut t5,
                 &mut lprod, &mut ls1, &mut ls2,
+                &mut ref_a, &mut ref_b,  // checkpoint arrays for periodicity detection
                 vslice(params, 5u32),
                 n, frac_limbs, max_iters,
             );
