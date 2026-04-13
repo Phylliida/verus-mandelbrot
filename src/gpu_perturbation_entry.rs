@@ -2003,12 +2003,17 @@ fn mandelbrot_perturbation(
         // z_stride = 2n+2, so total = (max_iters+2)*(2n+2) + 10n + 259 <= wg_mem.len()
         old(wg_mem)@.len() >= 8192,
         (params@[2] as int + 2) * (2 * params@[3] as int + 2) + 10 * params@[3] as int + 259 <= 8192,
-        // c_data: per-pixel complex values (with u32 overflow bound)
+        // c_data: per-pixel complex values (used in perturbation mode)
         c_data@.len() as int >= (params@[0] as int) * (params@[1] as int) * (2 * (params@[3] as int) + 2),
         (params@[0] as int) * (params@[1] as int) * (2 * params@[3] as int + 2) < u32_max(),
-        // iter_counts: per-pixel output (with u32 overflow bound)
+        // params also holds center + step uniforms for GPU-side c computation
+        // Layout after use_perturbation: center_re(n+1), center_im(n+1), step(n+1)
+        // center_re at 8+n, center_im at 9+2n, step at 10+3n, step_sign at 10+4n
+        params@.len() as int >= 11 + 4 * params@[3] as int,
+        // iter_counts: per-pixel output
         old(iter_counts)@.len() as int >= (params@[0] as int) * (params@[1] as int),
         (params@[0] as int) * (params@[1] as int) < u32_max(),
+        (params@[0] as int) * (params@[1] as int) > 0,
         // Escape threshold in params[5..5+n], max_rounds at params[5+n],
         // use_perturbation at params[6+n]
         params@.len() as int >= 7 + params@[3] as int,
@@ -2132,35 +2137,30 @@ fn mandelbrot_perturbation(
         assert(t0_re2 == t0_tmp_base);
         assert((t0_re2 as int) == ((max_iters as int) + 2) * (z_stride as int));
     }
-    // Per-pixel c from c_data buffer (absolute coordinates)
+    // Per-pixel c from c_data buffer (used in perturbation mode)
     let c_stride_px = 2u32 * n + 2u32;
     proof {
         lemma_tid_cstride_safe(tid as int, c_stride_px as int, (width as int) * (height as int));
         lemma_cdata_offset_safe(tid as int, c_stride_px as int, (width as int) * (height as int), c_data@.len() as int);
     }
     let c_re_off = tid * c_stride_px;
-    // PROVED: c_data pixel correspondence.
-    // c_data[tid * c_stride_px .. + c_stride_px] holds the complex coordinate
-    // for pixel (gid_x, gid_y), where tid = gid_y * width + gid_x.
-    // The stride c_stride_px = 2n+2 packs re(n limbs) + sign(1) + im(n limbs) + sign(1).
-    proof {
-        assert(c_re_off as int == (gid_y as int * width as int + gid_x as int) * c_stride_px as int);
-    }
-    // c_re_off + c_stride_px < u32_max, so c_re_off + n < u32_max (since n < c_stride_px)
     let c_re_sign_off = c_re_off + n;
     let c_im_off = c_re_sign_off + 1u32;
     let c_im_sign_off = c_im_off + n;
     proof {
-        // c_data access bounds: c_re_off + c_stride_px <= c_data.len()
-        // c_stride_px = 2n+2 > n+1, so c_re_sign_off = c_re_off + n < c_re_off + c_stride_px
         assert(c_re_sign_off < c_data@.len());
         assert(c_im_off < c_data@.len());
         assert(c_im_sign_off < c_data@.len());
-        // c_im_off + n = c_im_sign_off < c_data.len(), so vslice(c_data, c_im_off) has >= n elements
         assert((c_im_off as int) + (n as int) <= c_data@.len());
-        // ref_escape_addr relationship
         assert((ref_escape_addr as int) == (t0_re2 as int) + 10 * (n as int));
     }
+
+    // Center + step uniforms in params (for GPU-side c computation)
+    // Layout: params[7+n+1 ..] = center_re(n), sign, center_im(n), sign, step(n), sign
+    let uni_base = 7u32 + n + 1u32;
+    let uni_cre_off = uni_base;
+    let uni_cim_off = uni_base + n + 1u32;
+    let uni_step_off = uni_base + 2u32 * (n + 1u32);
 
     // Per-pixel local arrays for perturbation (in registers)
     // #[gpu_local(4)]
@@ -2205,7 +2205,50 @@ fn mandelbrot_perturbation(
     // #[gpu_local(4)]
     let mut ref_b: Vec<u32> = generic_zero_vec(n as usize);
 
-    // Ghost: capture the u32 overflow bound for use in invariants
+    // ── Compute per-pixel c = center + (gid - width/2) * step ──
+    // Uses the verified multi-precision arithmetic (signed_mul_to + signed_add_to).
+    // Center and step are read from params (uniforms), giving full n-limb precision.
+    {
+        let half_w = width / 2u32;
+        let half_h = height / 2u32;
+        // Construct |dx| as integer in fixed-point: [0,...,0,|dx|] at integer limb (n-1)
+        let dx_abs = if gid_x >= half_w { gid_x - half_w } else { half_w - gid_x };
+        let dx_sign = if gid_x >= half_w { 0u32 } else { 1u32 };
+        for i in 0u32..n
+            invariant n >= 1, n <= 8, ref_a@.len() == n as int,
+        { ref_a.set(i as usize, 0u32); }
+        ref_a.set((n - 1u32) as usize, dx_abs);
+        // dx * step → t1
+        let step_sign = vget(params, uni_step_off + n);
+        let dx_step_s = signed_mul_to(
+            &ref_a, &dx_sign,
+            vslice(params, uni_step_off), &step_sign,
+            &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+        // c_pixel_re = center_re + dx * step → dc_re
+        let center_re_sign = vget(params, uni_cre_off + n);
+        dc_re_sign = signed_add_to(
+            vslice(params, uni_cre_off), &center_re_sign,
+            &t1, &dx_step_s,
+            &mut dc_re, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+
+        // Same for imaginary component
+        let dy_abs = if gid_y >= half_h { gid_y - half_h } else { half_h - gid_y };
+        let dy_sign = if gid_y >= half_h { 0u32 } else { 1u32 };
+        for i in 0u32..n
+            invariant n >= 1, n <= 8, ref_a@.len() == n as int,
+        { ref_a.set(i as usize, 0u32); }
+        ref_a.set((n - 1u32) as usize, dy_abs);
+        let dy_step_s = signed_mul_to(
+            &ref_a, &dy_sign,
+            vslice(params, uni_step_off), &step_sign,
+            &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+        let center_im_sign = vget(params, uni_cim_off + n);
+        dc_im_sign = signed_add_to(
+            vslice(params, uni_cim_off), &center_im_sign,
+            &t1, &dy_step_s,
+            &mut dc_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
+    }
+
     let ghost wh_cs_bound: int = (width as int) * (height as int) * (c_stride_px as int);
 
     let mut escaped_iter = max_iters;
@@ -2282,13 +2325,12 @@ fn mandelbrot_perturbation(
             (t0_stmp2 as int) == (t0_re2 as int) + 8 * (n as int),
             (t0_stmp3 as int) == (t0_re2 as int) + 9 * (n as int),
             (ref_escape_addr as int) == (t0_re2 as int) + 10 * (n as int),
-            // c_data per-pixel access bounds
+            // c_data per-pixel access bounds (perturbation mode)
             c_stride_px == 2u32 * n + 2u32,
             (c_im_off as int) + (n as int) <= c_data@.len(),
             (c_re_sign_off as int) < c_data@.len(),
             (c_im_off as int) < c_data@.len(),
             (c_im_sign_off as int) < c_data@.len(),
-            // Per-pixel c_data access bounds
             (c_re_off as int) + (c_stride_px as int) <= c_data@.len() as int,
             (c_re_off as int) + (c_stride_px as int) < u32_max(),
             // Local array sizes
@@ -3475,9 +3517,8 @@ fn mandelbrot_perturbation(
     // Fix: fall back to direct (non-perturbation) iteration Z_{k+1} = Z_k^2 + c.
     // This is slower but always correct — same approach as Kalles Fraktaler et al.
     if is_glitched == 1u32 && escaped_iter == max_iters {
-        let cre_s_fb = vget(c_data, c_re_sign_off);
-        let cim_s_fb = vget(c_data, c_im_sign_off);
-        if cre_s_fb <= 1u32 && cim_s_fb <= 1u32 {
+        // dc_re/dc_im already hold c_pixel (computed at kernel start from center + offset * step)
+        if dc_re_sign <= 1u32 && dc_im_sign <= 1u32 {
             // Zero Z_0
             for zi in 0u32..n
                 invariant
@@ -3490,26 +3531,16 @@ fn mandelbrot_perturbation(
                 delta_re.set(zi as usize, 0u32);
                 delta_im.set(zi as usize, 0u32);
             }
-            // Prove valid_limbs for c_data slices
+            // Prove valid_limbs for dc_re/dc_im and threshold
             proof {
-                let cre_sub = c_data@.subrange(c_re_off as int, c_data@.len() as int);
-                let cim_sub = c_data@.subrange(c_im_off as int, c_data@.len() as int);
-                assert(valid_limbs(cre_sub.subrange(0, n as int))) by {
-                    assert forall |j: int| 0 <= j < n as int
-                        implies 0 <= (#[trigger] cre_sub.subrange(0, n as int)[j]).sem()
-                            && cre_sub.subrange(0, n as int)[j].sem() < LIMB_BASE() by {
-                        // u32 values are always in [0, 2^32) = [0, LIMB_BASE)
-                        assert(cre_sub.subrange(0, n as int)[j] == c_data@[(c_re_off as int + j) as int]);
-                    }
+                assert(valid_limbs(dc_re@)) by {
+                    assert forall |j: int| 0 <= j < dc_re@.len()
+                        implies 0 <= (#[trigger] dc_re@[j]).sem() && dc_re@[j].sem() < LIMB_BASE() by {}
                 }
-                assert(valid_limbs(cim_sub.subrange(0, n as int))) by {
-                    assert forall |j: int| 0 <= j < n as int
-                        implies 0 <= (#[trigger] cim_sub.subrange(0, n as int)[j]).sem()
-                            && cim_sub.subrange(0, n as int)[j].sem() < LIMB_BASE() by {
-                        assert(cim_sub.subrange(0, n as int)[j] == c_data@[(c_im_off as int + j) as int]);
-                    }
+                assert(valid_limbs(dc_im@)) by {
+                    assert forall |j: int| 0 <= j < dc_im@.len()
+                        implies 0 <= (#[trigger] dc_im@[j]).sem() && dc_im@[j].sem() < LIMB_BASE() by {}
                 }
-                // Threshold valid_limbs
                 let thresh_sub = params@.subrange(5, params@.len() as int);
                 assert(valid_limbs(thresh_sub.subrange(0, n as int))) by {
                     assert forall |j: int| 0 <= j < n as int
@@ -3520,8 +3551,8 @@ fn mandelbrot_perturbation(
                 }
             }
             escaped_iter = direct_computation_fallback(
-                vslice(c_data, c_re_off), cre_s_fb,
-                vslice(c_data, c_im_off), cim_s_fb,
+                &dc_re, dc_re_sign,
+                &dc_im, dc_im_sign,
                 &mut delta_re, &mut delta_im,
                 &mut t1, &mut t2, &mut t3, &mut t4, &mut t5,
                 &mut lprod, &mut ls1, &mut ls2,

@@ -1,8 +1,11 @@
-# Pink Tile Fix: Direct Computation Fallback
+# Pink Tile Fix: Direct Computation Fallback — IMPLEMENTED
 
 ## Bug
 Entire 16x16 workgroup tiles appear solid pink at the Mandelbrot boundary.
 Increasing max_rounds doesn't help — the tiles persist.
+
+## Status: COMPLETE
+Implemented in commit 192b9fe. Verified: 100 functions, 0 errors. WGSL regenerated.
 
 ## Root Cause
 When ALL pixels in a workgroup glitch early, the refinement loop picks a
