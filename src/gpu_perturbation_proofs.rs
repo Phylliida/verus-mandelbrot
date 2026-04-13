@@ -3596,4 +3596,244 @@ pub proof fn lemma_sequential_concurrent_equivalence(
     lemma_kernel_barrier_race_free(workgroup_size, vote_base);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Robustness proofs: layout, bounds, overflow, first-escape, gradient
+// ═══════════════════════════════════════════════════════════════
+
+/// Complete shared memory layout specification.
+/// The kernel's wg_mem is divided into 6 non-overlapping regions:
+///   1. Orbit slots:     [0, (max_iters+1) * z_stride)
+///   2. Reference c:     [ref_c_base, ref_c_base + z_stride)
+///   3. Thread-0 temps:  [t0_base, t0_base + 10*n)
+///   4. Ref escape addr: [ref_escape_addr, ref_escape_addr + 1)
+///   5. Vote buffer:     [vote_base, vote_base + 256)
+///   6. Glitch/best:     [glitch_count_addr, best_ref_addr + 1)
+pub open spec fn layout_valid(
+    max_iters: nat, n: nat, z_stride: nat,
+    ref_c_base: nat, t0_base: nat,
+    ref_escape_addr: nat, vote_base: nat,
+    glitch_count_addr: nat, best_ref_addr: nat,
+    wg_mem_size: nat,
+) -> bool {
+    &&& z_stride == 2 * n + 2
+    &&& n >= 1 && n <= 8
+    &&& max_iters > 0 && max_iters <= 4096
+    // Region starts
+    &&& ref_c_base == (max_iters + 1) * z_stride
+    &&& t0_base == (max_iters + 2) * z_stride
+    &&& ref_escape_addr == t0_base + 10 * n
+    &&& vote_base == ref_escape_addr + 1
+    &&& glitch_count_addr == vote_base + 256
+    &&& best_ref_addr == glitch_count_addr + 1
+    // All fit within wg_mem
+    &&& best_ref_addr + 1 <= wg_mem_size
+    &&& wg_mem_size >= 8192
+}
+
+/// All 6 memory regions are pairwise non-overlapping when layout_valid holds.
+pub proof fn lemma_layout_regions_disjoint(
+    max_iters: nat, n: nat, z_stride: nat,
+    ref_c_base: nat, t0_base: nat,
+    ref_escape_addr: nat, vote_base: nat,
+    glitch_count_addr: nat, best_ref_addr: nat,
+    wg_mem_size: nat,
+)
+    requires
+        layout_valid(max_iters, n, z_stride, ref_c_base, t0_base,
+            ref_escape_addr, vote_base, glitch_count_addr, best_ref_addr, wg_mem_size),
+    ensures
+        // Region 1 ends before Region 2 starts
+        (max_iters + 1) * z_stride <= ref_c_base,
+        // Region 2 ends before Region 3 starts
+        ref_c_base + z_stride <= t0_base,
+        // Region 3 ends before Region 4 starts
+        t0_base + 10 * n <= ref_escape_addr,
+        // Region 4 ends before Region 5 starts
+        ref_escape_addr + 1 <= vote_base,
+        // Region 5 ends before Region 6 starts
+        vote_base + 256 <= glitch_count_addr,
+        // Region 6 fits
+        best_ref_addr + 1 <= wg_mem_size,
+        // Every region fits within wg_mem
+        (max_iters + 1) * z_stride < wg_mem_size,
+        ref_c_base + z_stride < wg_mem_size,
+        t0_base + 10 * n < wg_mem_size,
+        ref_escape_addr < wg_mem_size,
+        vote_base + 256 < wg_mem_size,
+{
+    // ref_c_base + z_stride == t0_base by construction
+    assert(ref_c_base + z_stride == t0_base) by(nonlinear_arith)
+        requires ref_c_base == (max_iters + 1) * z_stride,
+                 t0_base == (max_iters + 2) * z_stride;
+    // (max_iters + 1) * z_stride < t0_base + 10*n + 259 <= wg_mem_size
+    assert((max_iters + 1) * z_stride < wg_mem_size) by(nonlinear_arith)
+        requires ref_c_base == (max_iters + 1) * z_stride,
+                 t0_base == (max_iters + 2) * z_stride,
+                 best_ref_addr + 1 <= wg_mem_size,
+                 best_ref_addr == glitch_count_addr + 1,
+                 glitch_count_addr == vote_base + 256,
+                 vote_base == ref_escape_addr + 1,
+                 ref_escape_addr == t0_base + 10 * n,
+                 z_stride >= 4, n >= 1;
+}
+
+/// (#2) iter_counts output bounds: tid < iter_counts.len() for every pixel.
+pub proof fn lemma_iter_counts_in_bounds(
+    gid_x: nat, gid_y: nat, width: nat, height: nat,
+    iter_counts_len: nat,
+)
+    requires
+        gid_x < width,
+        gid_y < height,
+        width > 0,
+        iter_counts_len >= width * height,
+    ensures
+        gid_y * width + gid_x < iter_counts_len,
+{
+    assert(gid_y * width + gid_x < height * width) by(nonlinear_arith)
+        requires gid_x < width, gid_y < height, width > 0;
+    assert(height * width == width * height) by(nonlinear_arith);
+}
+
+/// (#4) First-escape guarantee: if escaped_iter < max_iters, then
+/// the escape condition was NOT satisfied at any earlier iteration.
+///
+/// This follows from the loop invariant `escaped_iter == max_iters || escaped_iter < iter`:
+/// - Initially escaped_iter == max_iters (no escape recorded)
+/// - When escape fires at iteration k: escaped_iter = k (only if still == max_iters)
+/// - So escaped_iter records the FIRST escape, never a later one
+///
+/// Spec-level statement: if the kernel reports escape at K, and the
+/// orbit is correct (buffer = spec), then |Z_j + δ_j|² < escape_radius_sq
+/// for all j < K.
+pub open spec fn first_escape_at(
+    z0: SpecComplex, c_ref: SpecComplex,
+    d0: SpecComplex, dc: SpecComplex,
+    escape_radius_sq: int,
+    k: nat,
+) -> bool {
+    // All iterations before k are non-escaped
+    &&& (forall|j: int| 0 <= j < k as int ==> {
+        let z_j = #[trigger] spec_ref_orbit(z0, c_ref, j as nat);
+        let d_j = spec_pert_orbit(z0, c_ref, d0, dc, j as nat);
+        (z_j.re + d_j.re) * (z_j.re + d_j.re)
+            + (z_j.im + d_j.im) * (z_j.im + d_j.im) < escape_radius_sq
+    })
+    // Iteration k IS escaped
+    &&& ({
+        let z_k = spec_ref_orbit(z0, c_ref, k);
+        let d_k = spec_pert_orbit(z0, c_ref, d0, dc, k);
+        (z_k.re + d_k.re) * (z_k.re + d_k.re)
+            + (z_k.im + d_k.im) * (z_k.im + d_k.im) >= escape_radius_sq
+    })
+}
+
+/// (#5) Coloring gradient monotonicity: the color intensity t_col is
+/// monotonically increasing in escaped_iter for the standard gradient.
+///
+/// t_col = (escaped_iter * 255) / max_iters  (integer division)
+///
+/// For a ≤ b < max_iters: (a * 255) / max_iters ≤ (b * 255) / max_iters
+/// because integer division is monotonic for non-negative numerators.
+pub proof fn lemma_color_monotonic(
+    a: nat, b: nat, max_iters: nat,
+)
+    requires
+        a <= b,
+        b < max_iters,
+        max_iters > 0,
+    ensures
+        (a * 255) / max_iters <= (b * 255) / max_iters,
+{
+    assert(a * 255 <= b * 255) by(nonlinear_arith)
+        requires a <= b;
+    // Integer division is monotonic for non-negative values (nat division)
+    assert((a * 255) / max_iters <= (b * 255) / max_iters) by(nonlinear_arith)
+        requires a * 255 <= b * 255, max_iters > 0;
+}
+
+/// (#5) Color channels are in [0, 255].
+pub proof fn lemma_color_channels_bounded(
+    escaped_iter: nat, max_iters: nat,
+)
+    requires
+        escaped_iter <= max_iters,
+        max_iters > 0,
+    ensures
+        ({
+            let t_col: nat = (escaped_iter * 255) / max_iters;
+            t_col <= 255 && t_col / 2 <= 127
+        }),
+{
+    let t_col: nat = (escaped_iter * 255) / max_iters;
+    assert(escaped_iter * 255 <= max_iters * 255) by(nonlinear_arith)
+        requires escaped_iter <= max_iters;
+    // nat division: 0 <= t_col follows automatically
+    // t_col <= 255: (escaped_iter * 255) / max_iters <= (max_iters * 255) / max_iters = 255
+    // t_col = (escaped_iter * 255) / max_iters
+    // Since escaped_iter * 255 <= max_iters * 255 and division by max_iters:
+    // t_col <= (max_iters * 255) / max_iters = 255
+    // t_col * max_iters <= escaped_iter * 255 (from nat division: q*d <= n)
+    // And escaped_iter * 255 <= max_iters * 255
+    // So t_col * max_iters <= max_iters * 255, hence t_col <= 255
+    assert(t_col * max_iters <= escaped_iter * 255) by(nonlinear_arith)
+        requires t_col == (escaped_iter * 255) / max_iters, max_iters > 0;
+    assert(t_col * max_iters <= max_iters * 255) by(nonlinear_arith)
+        requires t_col * max_iters <= escaped_iter * 255,
+                 escaped_iter * 255 <= max_iters * 255;
+    assert(t_col <= 255) by(nonlinear_arith)
+        requires t_col * max_iters <= max_iters * 255, max_iters > 0;
+}
+
+/// (#3) u32 overflow safety for key address computations.
+/// Given valid layout parameters, all intermediate address computations
+/// fit in u32 (no wrapping).
+pub proof fn lemma_address_overflow_safety(
+    max_iters: nat, n: nat, z_stride: nat, iter: nat,
+    width: nat, height: nat, tid: nat,
+)
+    requires
+        n >= 1, n <= 8,
+        z_stride == 2 * n + 2,
+        max_iters > 0, max_iters <= 4096,
+        (max_iters + 2) * z_stride + 10 * n + 259 <= 8192,
+        iter < max_iters,
+        width > 0, height > 0,
+        tid < width * height,
+        width * height * z_stride < 0xFFFF_FFFF,  // CPU must ensure this
+    ensures
+        // Orbit slot address
+        iter * z_stride < 0xFFFF_FFFF,
+        (iter + 1) * z_stride < 0xFFFF_FFFF,
+        iter * z_stride + 2 * n + 1 < 0xFFFF_FFFF,
+        // ref_c_base
+        (max_iters + 1) * z_stride < 0xFFFF_FFFF,
+        // t0_base
+        (max_iters + 2) * z_stride < 0xFFFF_FFFF,
+        // t0_base + 10n
+        (max_iters + 2) * z_stride + 10 * n < 0xFFFF_FFFF,
+        // c_data offset
+        tid * z_stride < 0xFFFF_FFFF,
+{
+    assert(z_stride <= 18) by(nonlinear_arith) requires z_stride == 2 * n + 2, n <= 8;
+    // All layout values bounded by 8192
+    assert(iter * z_stride < 8192) by(nonlinear_arith)
+        requires iter < max_iters, max_iters <= 4096, z_stride <= 18,
+                 (max_iters + 2) * z_stride + 10 * n + 259 <= 8192;
+    assert((iter + 1) * z_stride < 8192) by(nonlinear_arith)
+        requires iter < max_iters, max_iters <= 4096, z_stride <= 18,
+                 (max_iters + 2) * z_stride + 10 * n + 259 <= 8192;
+    assert((max_iters + 1) * z_stride < 8192) by(nonlinear_arith)
+        requires (max_iters + 2) * z_stride + 10 * n + 259 <= 8192, n >= 1;
+    assert((max_iters + 2) * z_stride < 8192) by(nonlinear_arith)
+        requires (max_iters + 2) * z_stride + 10 * n + 259 <= 8192, n >= 1;
+    assert((max_iters + 2) * z_stride + 10 * n < 8192);
+    // c_data: tid * z_stride ≤ width * height * z_stride ≤ 0xFFFF * 0xFFFF * 18
+    assert(tid * z_stride < width * height * z_stride) by(nonlinear_arith)
+        requires tid < width * height, z_stride > 0;
+    assert(tid * z_stride < 0xFFFF_FFFF) by(nonlinear_arith)
+        requires tid * z_stride < width * height * z_stride,
+                 width * height * z_stride < 0xFFFF_FFFF;
+}
+
 } // verus!
