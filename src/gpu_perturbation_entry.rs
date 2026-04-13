@@ -2113,13 +2113,24 @@ fn mandelbrot_perturbation(
 
             // Compute reference orbit Z_0..Z_{max_iters}
             // Z_0 = 0 (orbit_base = 0, so z0_off = 0)
+            // Zero re limbs [0..n)
             for i in 0u32..n
                 invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, orbit_base == 0u32,
+                    forall |j: int| 0 <= j < i as int ==> wg_mem@[j] == 0u32,
             { vset(wg_mem, orbit_base + i, 0u32); }
+            // Zero re sign [n]
             vset(wg_mem, orbit_base + n, 0u32);
+            // Zero im limbs [n+1..2n+1)
             for i in 0u32..n
                 invariant wg_mem@.len() >= 8192, n >= 1, n <= 8, orbit_base == 0u32,
+                    // Previously written re limbs + sign preserved
+                    forall |j: int| 0 <= j < n as int ==> wg_mem@[j] == 0u32,
+                    wg_mem@[n as int] == 0u32,
+                    // Im limbs written so far
+                    forall |j: int| 0 <= j < i as int
+                        ==> (#[trigger] wg_mem@[(n as int + 1 + j)]) == 0u32,
             { vset(wg_mem, orbit_base + n + 1u32 + i, 0u32); }
+            // Zero im sign [2n+1]
             vset(wg_mem, orbit_base + 2u32 * n + 1u32, 0u32);
 
             let mut ref_escaped = max_iters;
@@ -2136,6 +2147,37 @@ fn mandelbrot_perturbation(
             // Z_0 = 0 (orbit was zeroed), so initial ghost values are 0.
             let ghost mut z_re_int: int = 0;
             let ghost mut z_im_int: int = 0;
+
+            // Establish orbit-slot invariant at iter=0 from zeroing above.
+            proof {
+                assert(0u32 * z_stride == 0u32) by(nonlinear_arith);
+                let re_seq = wg_mem@.subrange(0int, n as int);
+                let im_seq = wg_mem@.subrange((n + 1u32) as int, (2u32 * n + 1u32) as int);
+
+                // All limbs are 0 (from zeroing loops above)
+                assert forall |k: int| 0 <= k < re_seq.len()
+                    implies (#[trigger] re_seq[k]).sem() == 0int by {
+                    assert(re_seq[k] == wg_mem@[k]);
+                    assert(wg_mem@[k] == 0u32);
+                }
+                assert forall |k: int| 0 <= k < im_seq.len()
+                    implies (#[trigger] im_seq[k]).sem() == 0int by {
+                    assert(im_seq[k] == wg_mem@[n as int + 1 + k]);
+                    assert(wg_mem@[n as int + 1 + k] == 0u32);
+                }
+
+                // vec_val of zeros is 0
+                verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_zeros(re_seq);
+                verus_fixed_point::fixed_point::limb_ops::lemma_vec_val_zeros(im_seq);
+
+                // valid_limbs (0 is in [0, LIMB_BASE))
+                lemma_pointwise_to_valid_limbs(wg_mem@, 0int, n as nat);
+                lemma_pointwise_to_valid_limbs(wg_mem@, (n + 1u32) as int, n as nat);
+
+                // Signs are 0
+                assert(wg_mem@[n as int] == 0u32);
+                assert(wg_mem@[(2u32 * n + 1u32) as int] == 0u32);
+            }
 
             for iter in 0u32..max_iters
                 invariant
@@ -2171,6 +2213,27 @@ fn mandelbrot_perturbation(
                     (t0_stmp2 as int) == (t0_re2 as int) + 8 * (n as int),
                     (t0_stmp3 as int) == (t0_re2 as int) + 9 * (n as int),
                     (ref_escape_addr as int) == (t0_re2 as int) + 10 * (n as int),
+                    // ── Exec-spec correspondence: ghost Z matches orbit slot ──
+                    // The orbit slot at iter*z_stride holds limb data whose
+                    // signed value equals the ghost z_re_int / z_im_int.
+                    valid_limbs(wg_mem@.subrange(
+                        (iter * z_stride) as int, (iter * z_stride + n) as int)),
+                    valid_limbs(wg_mem@.subrange(
+                        (iter * z_stride + n + 1u32) as int,
+                        (iter * z_stride + 2u32 * n + 1u32) as int)),
+                    wg_mem@[(iter * z_stride + n) as int].sem() <= 1,
+                    wg_mem@[(iter * z_stride + 2u32 * n + 1u32) as int].sem() <= 1,
+                    signed_val_of(
+                        wg_mem@.subrange(
+                            (iter * z_stride) as int, (iter * z_stride + n) as int),
+                        wg_mem@[(iter * z_stride + n) as int].sem() as int,
+                    ) == z_re_int,
+                    signed_val_of(
+                        wg_mem@.subrange(
+                            (iter * z_stride + n + 1u32) as int,
+                            (iter * z_stride + 2u32 * n + 1u32) as int),
+                        wg_mem@[(iter * z_stride + 2u32 * n + 1u32) as int].sem() as int,
+                    ) == z_im_int,
             {
                 proof {
                     lemma_iter_stride_safe(iter as int, z_stride as int, (max_iters as int) + 1);
@@ -2339,6 +2402,11 @@ fn mandelbrot_perturbation(
                     &mut ref_a, &mut ref_b,
                     n, frac_limbs,
                 );
+                // Capture output subranges from exec helper BEFORE vset
+                let ghost zn_re_out = wg_mem@.subrange(zn as int, (zn + n) as int);
+                let ghost zn_im_out = wg_mem@.subrange(
+                    (zn + n + 1u32) as int, (zn + 2u32 * n + 1u32) as int);
+
                 vset(wg_mem, zn + n, new_re_s);
                 vset(wg_mem, zn + 2u32 * n + 1u32, new_im_s);
 
@@ -2353,6 +2421,13 @@ fn mandelbrot_perturbation(
                     z_im_int = result.1;
                 }
 
+                // Capture orbit slot state before escape check (for frame proof)
+                let ghost zn_re_seq_pre = wg_mem@.subrange(zn as int, (zn + n) as int);
+                let ghost zn_im_seq_pre = wg_mem@.subrange(
+                    (zn + n + 1u32) as int, (zn + 2u32 * n + 1u32) as int);
+                let ghost zn_re_sign_pre = wg_mem@[(zn + n) as int];
+                let ghost zn_im_sign_pre = wg_mem@[(zn + 2u32 * n + 1u32) as int];
+
                 // Check if reference escaped: |Z_{k+1}|² > 4
                 if ref_escaped == max_iters {
                     copy_limbs(wg_mem, t0_re2, &mut ref_a, n);
@@ -2364,6 +2439,98 @@ fn mandelbrot_perturbation(
                     if esc_borrow == 0u32 {
                         ref_escaped = iter + 1u32;
                     }
+                }
+                // ── Re-establish orbit-slot invariant for iter+1 ──
+                // The next iteration reads from zn = (iter+1)*z_stride.
+                // The exec helper wrote limbs to zn..zn+n with signed_val_of == z_re_int.
+                // vset wrote signs to zn+n and zn+2n+1.
+                // The escape check only modifies temp regions (t0_diff, t0_stmp1),
+                // which are above t0_re2 > zn+2n+2, so orbit slots are preserved.
+                proof {
+                    // zn = (iter+1) * z_stride
+                    assert(((iter + 1u32) * z_stride) as int == zn as int) by(nonlinear_arith)
+                        requires zn as int == ((iter as int) + 1) * (z_stride as int);
+
+                    // The exec helper postcondition gives (on wg_mem BEFORE escape check):
+                    //   signed_val_of(wg_mem[zn..zn+n], new_re_s) == z_re_int
+                    //   signed_val_of(wg_mem[zn+n+1..zn+2n+1], new_im_s) == z_im_int
+                    //   valid_limbs on both output regions
+                    //
+                    // vset wrote new_re_s to wg_mem[zn+n] and new_im_s to wg_mem[zn+2n+1].
+                    //
+                    // The escape check only writes to t0_diff (at t0_re2+4n) and
+                    // t0_stmp1 (at t0_re2+7n), both in the temp region above t0_re2.
+                    // Since zn+2n+2 <= t0_re2, all orbit slot indices are below t0_re2.
+                    // Therefore the orbit slot and signs are preserved.
+
+                    // Frame: orbit slot preserved through escape check
+                    // (add_limbs_to writes to t0_diff, sub_limbs_to writes to t0_stmp1,
+                    //  copy_limbs doesn't modify wg_mem — all above t0_re2 > zn+2n+2)
+
+                    // The exec helper + vset established the signed_val_of equations
+                    // on wg_mem BEFORE the escape check. The escape check only modifies
+                    // t0_diff (at t0_re2+4n) and t0_stmp1 (at t0_re2+7n), both above t0_re2.
+                    // Since zn+2n+2 <= t0_re2, the orbit slot [zn, zn+2n+2) is preserved.
+                    //
+                    // Z3 sees the frame postconditions from add_limbs_to and sub_limbs_to
+                    // (which state that indices outside [out_off, out_off+n) are unchanged).
+                    // We just need to assert the orbit slot indices are outside those ranges.
+                    // Frame: orbit slot preserved through escape check.
+                    // add_limbs_to wrote to [t0_diff, t0_diff+n) and
+                    // sub_limbs_to wrote to [t0_stmp1, t0_stmp1+n).
+                    // Both are above t0_re2 > zn + 2n + 2.
+                    assert(zn + 2u32 * n + 1u32 < t0_re2);
+
+                    // Orbit limbs and signs are unchanged from pre-escape-check values
+                    assert(wg_mem@.subrange(zn as int, (zn + n) as int) =~= zn_re_seq_pre) by {
+                        assert forall |j: int| 0 <= j < n as int implies
+                            wg_mem@.subrange(zn as int, (zn + n) as int)[j]
+                                == zn_re_seq_pre[j] by {
+                            assert(wg_mem@[zn as int + j] == zn_re_seq_pre[j]);
+                        }
+                    }
+                    assert(wg_mem@.subrange(
+                        (zn + n + 1u32) as int, (zn + 2u32 * n + 1u32) as int)
+                            =~= zn_im_seq_pre) by {
+                        assert forall |j: int| 0 <= j < n as int implies
+                            wg_mem@.subrange(
+                                (zn + n + 1u32) as int, (zn + 2u32 * n + 1u32) as int)[j]
+                                    == zn_im_seq_pre[j] by {
+                            assert(wg_mem@[(zn + n + 1u32) as int + j] == zn_im_seq_pre[j]);
+                        }
+                    }
+                    assert(wg_mem@[(zn + n) as int] == zn_re_sign_pre);
+                    assert(wg_mem@[(zn + 2u32 * n + 1u32) as int] == zn_im_sign_pre);
+
+                    // Chain: exec postcondition → ghost capture → frame → invariant
+                    // Before escape check: signed_val_of(wg_mem[zn..zn+n], new_re_s) == z_re_int
+                    // Ghost capture: zn_re_seq_pre == wg_mem[zn..zn+n] at that point
+                    // So: signed_val_of(zn_re_seq_pre, new_re_s as int) == z_re_int
+                    // zn_re_out was captured right after exec helper (before vset).
+                    // Exec postcondition: signed_val_of(zn_re_out, new_re_s as int) == result.0 == z_re_int
+                    assert(signed_val_of(zn_re_out, new_re_s as int) == z_re_int);
+                    assert(signed_val_of(zn_im_out, new_im_s as int) == z_im_int);
+                    // vset wrote to zn+n and zn+2n+1 (outside [zn, zn+n)), so subrange unchanged
+                    // Ghost capture zn_re_seq_pre (after vset) == zn_re_out (before vset)
+                    assert(zn_re_seq_pre =~= zn_re_out) by {
+                        assert forall |j: int| 0 <= j < n as int implies
+                            zn_re_seq_pre[j] == zn_re_out[j] by {}
+                    }
+                    assert(zn_im_seq_pre =~= zn_im_out) by {
+                        assert forall |j: int| 0 <= j < n as int implies
+                            zn_im_seq_pre[j] == zn_im_out[j] by {}
+                    }
+                    // Frame: wg_mem_final[zn..] =~= zn_re_seq_pre (proved above)
+                    // Congruence: signed_val_of(wg_mem_final[zn..], x) == signed_val_of(zn_re_seq_pre, x)
+                    assert(signed_val_of(
+                        wg_mem@.subrange(zn as int, (zn + n) as int),
+                        new_re_s as int) == z_re_int);
+                    assert(signed_val_of(
+                        wg_mem@.subrange((zn + n + 1u32) as int, (zn + 2u32 * n + 1u32) as int),
+                        new_im_s as int) == z_im_int);
+                    // wg_mem[zn+n].sem() == new_re_s as int (from frame + u32 sem identity)
+                    assert(wg_mem@[(zn + n) as int].sem() == (new_re_s as int));
+                    assert(wg_mem@[(zn + 2u32 * n + 1u32) as int].sem() == (new_im_s as int));
                 }
                 } // else (valid zk signs)
             }
