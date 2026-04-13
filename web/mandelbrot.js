@@ -555,11 +555,13 @@ async function render() {
   // producing a quotient with full precision across all limbs.
   const numPixelSteps = BigInt(width - 1);
   const pixelStepBig = viewSpanBig / numPixelSteps;
-  // Left/top edge of the visible region
-  const halfSpanRe = (viewSpanBig + 1n) / 2n;
-  const halfSpanIm = (viewSpanBig + 1n) / 2n;
-  const edgeRe = centerReBig_ - halfSpanRe;
-  const edgeIm = centerImBig_ - halfSpanIm;
+  // Left/top edge: center - halfWidth * step.
+  // MUST use halfW * pixelStepBig (full precision) — NOT viewSpan/2 (clean power of 2).
+  // The product halfW * pixelStepBig has bits in all limbs because pixelStepBig does.
+  const halfW = BigInt(Math.floor(width / 2));
+  const halfH = BigInt(Math.floor(height / 2));
+  const edgeRe = centerReBig_ - halfW * pixelStepBig;
+  const edgeIm = centerImBig_ - halfH * pixelStepBig;
 
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {
