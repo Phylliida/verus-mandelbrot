@@ -1745,6 +1745,220 @@ fn ref_orbit_iteration_step(
     (new_re_s, new_im_s)
 }
 
+/// Direct Mandelbrot iteration fallback for unresolved glitched pixels.
+/// Computes Z_{k+1} = Z_k^2 + c_pixel (no perturbation, no reference orbit).
+/// This is slower than perturbation but always correct.
+/// Only called for pixels that failed ALL refinement rounds.
+fn direct_computation_fallback(
+    c_re_slice: &[u32], c_re_sign: u32,
+    c_im_slice: &[u32], c_im_sign: u32,
+    z_re: &mut Vec<u32>,
+    z_im: &mut Vec<u32>,
+    t1: &mut Vec<u32>, t2: &mut Vec<u32>,
+    t3: &mut Vec<u32>, t4: &mut Vec<u32>, t5: &mut Vec<u32>,
+    lprod: &mut Vec<u32>,
+    ls1: &mut Vec<u32>, ls2: &mut Vec<u32>,
+    thresh: &[u32],
+    n: u32, frac_limbs: u32,
+    max_iters: u32,
+) -> (escaped: u32)
+    requires
+        n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+        frac_limbs <= n, frac_limbs + n <= 2 * n,
+        max_iters > 0, max_iters <= 0x1000,
+        c_re_slice@.len() >= n as int,
+        c_im_slice@.len() >= n as int,
+        thresh@.len() >= n as int,
+        old(z_re)@.len() == n as int,
+        old(z_im)@.len() == n as int,
+        old(t1)@.len() == n as int,
+        old(t2)@.len() == n as int,
+        old(t3)@.len() == n as int,
+        old(t4)@.len() == n as int,
+        old(t5)@.len() == n as int,
+        old(lprod)@.len() == 2 * n as int,
+        old(ls1)@.len() == n as int,
+        old(ls2)@.len() == n as int,
+        c_re_sign == 0u32 || c_re_sign == 1u32,
+        c_im_sign == 0u32 || c_im_sign == 1u32,
+        valid_limbs(c_re_slice@.subrange(0, n as int)),
+        valid_limbs(c_im_slice@.subrange(0, n as int)),
+        valid_limbs(thresh@.subrange(0, n as int)),
+        // Z_0 = 0 (caller must zero z_re and z_im before calling)
+        forall |j: int| 0 <= j < n as int ==> old(z_re)@[j] == 0u32,
+        forall |j: int| 0 <= j < n as int ==> old(z_im)@[j] == 0u32,
+    ensures
+        escaped <= max_iters,
+        z_re@.len() == n as int,
+        z_im@.len() == n as int,
+        t1@.len() == n as int,
+        t2@.len() == n as int,
+        t3@.len() == n as int,
+        t4@.len() == n as int,
+        t5@.len() == n as int,
+        lprod@.len() == 2 * n as int,
+        ls1@.len() == n as int,
+        ls2@.len() == n as int,
+{
+    let n_us = n as usize;
+    let frac_us = frac_limbs as usize;
+    let mut z_re_sign = 0u32;
+    let mut z_im_sign = 0u32;
+    let mut escaped_iter = max_iters;
+
+    // Establish valid_limbs for zeroed Z_0
+    proof {
+        assert(valid_limbs(z_re@)) by {
+            assert forall |j: int| 0 <= j < z_re@.len()
+                implies 0 <= (#[trigger] z_re@[j]).sem() && z_re@[j].sem() < LIMB_BASE() by {
+                assert(z_re@[j] == 0u32);
+            }
+        }
+        assert(valid_limbs(z_im@)) by {
+            assert forall |j: int| 0 <= j < z_im@.len()
+                implies 0 <= (#[trigger] z_im@[j]).sem() && z_im@[j].sem() < LIMB_BASE() by {
+                assert(z_im@[j] == 0u32);
+            }
+        }
+    }
+
+    let mut iter = 0u32;
+    while iter < max_iters
+        invariant
+            iter <= max_iters,
+            max_iters > 0, max_iters <= 0x1000,
+            n >= 1, n <= 8, n as int <= 0x1FFF_FFFF,
+            frac_limbs <= n, frac_limbs + n <= 2 * n,
+            n_us == n as usize, frac_us == frac_limbs as usize,
+            z_re@.len() == n as int, z_im@.len() == n as int,
+            t1@.len() == n as int, t2@.len() == n as int,
+            t3@.len() == n as int, t4@.len() == n as int,
+            t5@.len() == n as int,
+            lprod@.len() == 2 * n as int,
+            ls1@.len() == n as int, ls2@.len() == n as int,
+            z_re_sign == 0u32 || z_re_sign == 1u32,
+            z_im_sign == 0u32 || z_im_sign == 1u32,
+            c_re_sign == 0u32 || c_re_sign == 1u32,
+            c_im_sign == 0u32 || c_im_sign == 1u32,
+            c_re_slice@.len() >= n as int,
+            c_im_slice@.len() >= n as int,
+            thresh@.len() >= n as int,
+            valid_limbs(c_re_slice@.subrange(0, n as int)),
+            valid_limbs(c_im_slice@.subrange(0, n as int)),
+            valid_limbs(thresh@.subrange(0, n as int)),
+            valid_limbs(z_re@), valid_limbs(z_im@),
+            escaped_iter <= max_iters,
+        decreases max_iters - iter,
+    {
+        // ── Z_{k+1} = Z_k^2 + c_pixel (9 ops, same as ref_orbit_iteration_step) ──
+
+        // Op 1: re^2 = Z_re * Z_re → t3
+        let re2_s = signed_mul_to(&**z_re, &z_re_sign, &**z_re, &z_re_sign,
+                                   t3, 0usize, lprod, 0usize, n_us, frac_us);
+        // Op 2: im^2 = Z_im * Z_im → t4
+        let im2_s = signed_mul_to(&**z_im, &z_im_sign, &**z_im, &z_im_sign,
+                                   t4, 0usize, lprod, 0usize, n_us, frac_us);
+        // Op 3: rpi = Z_re + Z_im → t1
+        let rpi_s = signed_add_to(&**z_re, &z_re_sign, &**z_im, &z_im_sign,
+                                   t1, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+        // Op 4: rpi^2 = (Z_re + Z_im)^2 → t2
+        let rpi2_s = signed_mul_to(&**t1, &rpi_s, &**t1, &rpi_s,
+                                    t2, 0usize, lprod, 0usize, n_us, frac_us);
+        // Op 5: z_sq_re = re^2 - im^2 → t5
+        let diff_s = signed_sub_to(&**t3, &re2_s, &**t4, &im2_s,
+                                    t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+        // Op 6: new_re = z_sq_re + c_re → z_re
+        // (At this point we are done reading old z_re, safe to overwrite)
+        z_re_sign = signed_add_to(&**t5, &diff_s, c_re_slice, &c_re_sign,
+                                   z_re, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+        // Op 7: x1 = rpi^2 - re^2 → t1
+        let x1_s = signed_sub_to(&**t2, &rpi2_s, &**t3, &re2_s,
+                                  t1, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+        // Op 8: x2 = x1 - im^2 → t5
+        // (x2 = (re+im)^2 - re^2 - im^2 = 2*re*im)
+        let x2_s = signed_sub_to(&**t1, &x1_s, &**t4, &im2_s,
+                                  t5, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+        // Op 9: new_im = x2 + c_im → z_im
+        z_im_sign = signed_add_to(&**t5, &x2_s, c_im_slice, &c_im_sign,
+                                   z_im, 0usize, ls1, 0usize, ls2, 0usize, n_us);
+
+        // Establish valid_limbs for the loop invariant
+        proof {
+            assert(valid_limbs(z_re@)) by {
+                assert forall |j: int| 0 <= j < z_re@.len()
+                    implies 0 <= (#[trigger] z_re@[j]).sem() && z_re@[j].sem() < LIMB_BASE() by {
+                    assert(0 <= z_re@[(0 + j) as int].sem());
+                    assert(z_re@[(0 + j) as int].sem() < LIMB_BASE());
+                }
+            }
+            assert(valid_limbs(z_im@)) by {
+                assert forall |j: int| 0 <= j < z_im@.len()
+                    implies 0 <= (#[trigger] z_im@[j]).sem() && z_im@[j].sem() < LIMB_BASE() by {
+                    assert(0 <= z_im@[(0 + j) as int].sem());
+                    assert(z_im@[(0 + j) as int].sem() < LIMB_BASE());
+                }
+            }
+        }
+
+        // ── Escape check: |Z|^2 >= threshold (4) ──
+        // Squaring with same input gives sign 0 (positive)
+        let _fr2_s = signed_mul_to(&**z_re, &z_re_sign, &**z_re, &z_re_sign,
+                                    t3, 0usize, lprod, 0usize, n_us, frac_us);
+        let _fi2_s = signed_mul_to(&**z_im, &z_im_sign, &**z_im, &z_im_sign,
+                                    t4, 0usize, lprod, 0usize, n_us, frac_us);
+        // t3 = re^2, t4 = im^2 (both non-negative, sign 0)
+        // Prove valid_limbs for add_limbs_to precondition
+        proof {
+            assert(valid_limbs(t3@)) by {
+                assert forall |j: int| 0 <= j < t3@.len()
+                    implies 0 <= (#[trigger] t3@[j]).sem() && t3@[j].sem() < LIMB_BASE() by {
+                    assert(0 <= t3@[(0 + j) as int].sem());
+                    assert(t3@[(0 + j) as int].sem() < LIMB_BASE());
+                }
+            }
+            assert(valid_limbs(t4@)) by {
+                assert forall |j: int| 0 <= j < t4@.len()
+                    implies 0 <= (#[trigger] t4@[j]).sem() && t4@[j].sem() < LIMB_BASE() by {
+                    assert(0 <= t4@[(0 + j) as int].sem());
+                    assert(t4@[(0 + j) as int].sem() < LIMB_BASE());
+                }
+            }
+        }
+        let _mag_carry = add_limbs_to(&**t3, &**t4, t5, 0usize, n_us);
+        // Prove valid_limbs on t5 for sub_limbs_to precondition
+        proof {
+            assert(valid_limbs(t5@)) by {
+                assert forall |j: int| 0 <= j < t5@.len()
+                    implies 0 <= (#[trigger] t5@[j]).sem() && t5@[j].sem() < LIMB_BASE() by {
+                    assert(0 <= t5@[(0 + j) as int].sem());
+                    assert(t5@[(0 + j) as int].sem() < LIMB_BASE());
+                }
+            }
+        }
+        let borrow = sub_limbs_to(&**t5, thresh, t1, 0usize, n_us);
+        if borrow == 0u32 {
+            // |Z|^2 >= threshold → escaped
+            escaped_iter = iter;
+            break;
+        }
+
+        // Restore valid_limbs on t1 after sub_limbs_to modified it
+        proof {
+            assert(valid_limbs(t1@)) by {
+                assert forall |j: int| 0 <= j < t1@.len()
+                    implies 0 <= (#[trigger] t1@[j]).sem() && t1@[j].sem() < LIMB_BASE() by {
+                    assert(0 <= t1@[(0 + j) as int].sem());
+                    assert(t1@[(0 + j) as int].sem() < LIMB_BASE());
+                }
+            }
+        }
+
+        iter = iter + 1u32;
+    }
+
+    escaped_iter
+}
+
 // #[gpu_kernel(workgroup_size(16, 16, 1))]
 // rlimit bump rationale: the strengthened *_to_buf postconditions (#77) add
 // value-equation facts to the Z3 context for every call inside the reference
@@ -3246,6 +3460,69 @@ fn mandelbrot_perturbation(
         assert(escaped_iter <= max_iters);
         assert(is_glitched == 0u32 || is_glitched == 1u32);
         assert(glitch_iter < max_iters);
+    }
+
+    // ── Fallback: direct computation for unresolved glitched pixels ──
+    // When ALL pixels in a workgroup glitch early, the refinement loop can't
+    // find a good local reference. These pixels keep is_glitched==1 and
+    // escaped_iter==max_iters after all rounds, rendering as solid pink tiles.
+    // Fix: fall back to direct (non-perturbation) iteration Z_{k+1} = Z_k^2 + c.
+    // This is slower but always correct — same approach as Kalles Fraktaler et al.
+    if is_glitched == 1u32 && escaped_iter == max_iters {
+        let cre_s_fb = vget(c_data, c_re_sign_off);
+        let cim_s_fb = vget(c_data, c_im_sign_off);
+        if cre_s_fb <= 1u32 && cim_s_fb <= 1u32 {
+            // Zero Z_0
+            for zi in 0u32..n
+                invariant
+                    n >= 1, n <= 8,
+                    delta_re@.len() == n as int,
+                    delta_im@.len() == n as int,
+                    forall |j: int| 0 <= j < zi as int ==> delta_re@[j] == 0u32,
+                    forall |j: int| 0 <= j < zi as int ==> delta_im@[j] == 0u32,
+            {
+                delta_re.set(zi as usize, 0u32);
+                delta_im.set(zi as usize, 0u32);
+            }
+            // Prove valid_limbs for c_data slices
+            proof {
+                let cre_sub = c_data@.subrange(c_re_off as int, c_data@.len() as int);
+                let cim_sub = c_data@.subrange(c_im_off as int, c_data@.len() as int);
+                assert(valid_limbs(cre_sub.subrange(0, n as int))) by {
+                    assert forall |j: int| 0 <= j < n as int
+                        implies 0 <= (#[trigger] cre_sub.subrange(0, n as int)[j]).sem()
+                            && cre_sub.subrange(0, n as int)[j].sem() < LIMB_BASE() by {
+                        // u32 values are always in [0, 2^32) = [0, LIMB_BASE)
+                        assert(cre_sub.subrange(0, n as int)[j] == c_data@[(c_re_off as int + j) as int]);
+                    }
+                }
+                assert(valid_limbs(cim_sub.subrange(0, n as int))) by {
+                    assert forall |j: int| 0 <= j < n as int
+                        implies 0 <= (#[trigger] cim_sub.subrange(0, n as int)[j]).sem()
+                            && cim_sub.subrange(0, n as int)[j].sem() < LIMB_BASE() by {
+                        assert(cim_sub.subrange(0, n as int)[j] == c_data@[(c_im_off as int + j) as int]);
+                    }
+                }
+                // Threshold valid_limbs
+                let thresh_sub = params@.subrange(5, params@.len() as int);
+                assert(valid_limbs(thresh_sub.subrange(0, n as int))) by {
+                    assert forall |j: int| 0 <= j < n as int
+                        implies 0 <= (#[trigger] thresh_sub.subrange(0, n as int)[j]).sem()
+                            && thresh_sub.subrange(0, n as int)[j].sem() < LIMB_BASE() by {
+                        assert(thresh_sub.subrange(0, n as int)[j] == params@[(5 + j) as int]);
+                    }
+                }
+            }
+            escaped_iter = direct_computation_fallback(
+                vslice(c_data, c_re_off), cre_s_fb,
+                vslice(c_data, c_im_off), cim_s_fb,
+                &mut delta_re, &mut delta_im,
+                &mut t1, &mut t2, &mut t3, &mut t4, &mut t5,
+                &mut lprod, &mut ls1, &mut ls2,
+                vslice(params, 5u32),
+                n, frac_limbs, max_iters,
+            );
+        }
     }
 
     // ── Colorize ──
