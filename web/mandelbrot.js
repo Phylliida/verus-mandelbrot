@@ -622,6 +622,12 @@ async function render() {
   const stepFixed = bigintToFixedPoint(pixelStepBig, n);
   paramsData.set(stepFixed.limbs, uniBase + 2 * (n + 1));
   paramsData[uniBase + 3 * n + 2] = stepFixed.sign;
+  // Diagnostic: log center + step as packed for GPU
+  console.log(`[gpu-uni] center_re limbs: [${Array.from(centerReFixed.limbs).join(', ')}] sign=${centerReFixed.sign}`);
+  console.log(`[gpu-uni] center_im limbs: [${Array.from(centerImFixed.limbs).join(', ')}] sign=${centerImFixed.sign}`);
+  console.log(`[gpu-uni] step limbs: [${Array.from(stepFixed.limbs).join(', ')}] sign=${stepFixed.sign}`);
+  console.log(`[gpu-uni] centerReBig_ = ${centerReBig_}`);
+  console.log(`[gpu-uni] pixelStepBig = ${pixelStepBig}`);
 
   // No scratch buffer needed — all intermediates are thread-local arrays
   const iterCountsSize = totalPixels * 4;
