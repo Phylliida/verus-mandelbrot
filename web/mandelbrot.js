@@ -10,24 +10,28 @@
 // transpiled from the verified Verus source. For the web demo, we inline
 // a clean version that mirrors the verified code structure exactly.
 
-// Load the auto-generated WGSL from verified Verus code
-let SHADER_CODE = null;
+// Load the auto-generated WGSL shaders from verified Verus code.
+// One shader per limb count (n=4,8,16,32,64) with matching array sizes.
+const SHADER_VARIANTS = {};  // n -> { code, pipeline }
+let ENTRY_POINT = 'mandelbrot_perturbation';
 
 async function loadShader() {
-  // Try perturbation shader first (supports deep zoom), fall back to direct
-  let resp = await fetch('mandelbrot_perturbation.wgsl');
-  if (resp.ok) {
-    SHADER_CODE = await resp.text();
-    ENTRY_POINT = 'mandelbrot_perturbation';
-    console.log(`Loaded ${SHADER_CODE.split('\\n').length} lines of perturbation WGSL`);
-  } else {
-    resp = await fetch('mandelbrot_verified.wgsl');
-    SHADER_CODE = await resp.text();
-    ENTRY_POINT = 'mandelbrot_fixedpoint';
-    console.log(`Loaded ${SHADER_CODE.split('\\n').length} lines of verified WGSL`);
+  const sizes = [4, 8, 16, 32, 64];
+  for (const n of sizes) {
+    const resp = await fetch(`mandelbrot_perturbation_n${n}.wgsl`);
+    if (resp.ok) {
+      SHADER_VARIANTS[n] = { code: await resp.text(), pipeline: null };
+      console.log(`Loaded shader for n=${n}: ${SHADER_VARIANTS[n].code.split('\\n').length} lines`);
+    }
+  }
+  // Fallback: try the default shader (for n=4)
+  if (!SHADER_VARIANTS[4]) {
+    const resp = await fetch('mandelbrot_perturbation.wgsl');
+    if (resp.ok) {
+      SHADER_VARIANTS[4] = { code: await resp.text(), pipeline: null };
+    }
   }
 }
-let ENTRY_POINT = 'mandelbrot_fixedpoint';
 
 const SHADER_CODE_FALLBACK = `
 // Fallback (should not be used — load mandelbrot_verified.wgsl instead)
@@ -352,9 +356,19 @@ const resSlider = document.getElementById('resolution');
 const maxRoundsSlider = document.getElementById('maxRounds');
 const renderBtn = document.getElementById('renderBtn');
 
-refNSlider.oninput = () => document.getElementById('refNVal').textContent = (1 << refNSlider.value);
+refNSlider.oninput = () => {
+  const n = 1 << refNSlider.value;
+  document.getElementById('refNVal').textContent = n;
+  // Show max iters for this n (shared memory constraint)
+  const maxI = Math.floor((8192 - 10 * n - 259) / (2 * n + 2)) - 2;
+  document.getElementById('maxItersVal').textContent = maxItersSlider.value + ` (max ${maxI})`;
+};
 pertNSlider.oninput = () => document.getElementById('pertNVal').textContent = (1 << pertNSlider.value);
-maxItersSlider.oninput = () => document.getElementById('maxItersVal').textContent = maxItersSlider.value;
+maxItersSlider.oninput = () => {
+  const n = 1 << refNSlider.value;
+  const maxI = Math.floor((8192 - 10 * n - 259) / (2 * n + 2)) - 2;
+  document.getElementById('maxItersVal').textContent = maxItersSlider.value + ` (max ${maxI})`;
+};
 resSlider.oninput = () => document.getElementById('resVal').textContent = resSlider.value;
 if (maxRoundsSlider) maxRoundsSlider.oninput = () => document.getElementById('maxRoundsVal').textContent = maxRoundsSlider.value;
 
@@ -373,26 +387,34 @@ async function initWebGPU() {
     return false;
   }
   device = await adapter.requestDevice();
+  statusEl.textContent = 'Ready';
+  return true;
+}
 
-  const shaderModule = device.createShaderModule({ code: SHADER_CODE });
+// Get or create a compute pipeline for the given limb count n.
+async function getPipeline(n) {
+  const variant = SHADER_VARIANTS[n];
+  if (!variant) {
+    statusEl.textContent = `No shader for n=${n}`;
+    return null;
+  }
+  if (variant.pipeline) return variant.pipeline;
 
-  // Check for compilation errors
+  const shaderModule = device.createShaderModule({ code: variant.code });
   const info = await shaderModule.getCompilationInfo();
   for (const msg of info.messages) {
     if (msg.type === 'error') {
-      statusEl.textContent = `Shader error: ${msg.message}`;
+      statusEl.textContent = `Shader error (n=${n}): ${msg.message}`;
       console.error('Shader error:', msg);
-      return false;
+      return null;
     }
   }
-
-  pipeline = device.createComputePipeline({
+  variant.pipeline = device.createComputePipeline({
     layout: 'auto',
     compute: { module: shaderModule, entryPoint: ENTRY_POINT },
   });
-
-  statusEl.textContent = 'Ready';
-  return true;
+  console.log(`Created pipeline for n=${n}`);
+  return variant.pipeline;
 }
 
 // Convert a double to sign-magnitude fixed-point limbs.
@@ -473,6 +495,18 @@ async function render() {
   const n = 1 << parseInt(refNSlider.value); // limbs per value
   const maxIters = parseInt(maxItersSlider.value);
   const frac_limbs = n - 1; // n-1 fractional limbs, 1 integer limb
+
+  // Enforce shared memory constraint: (maxIters+2)*(2n+2) + 10n + 259 <= 8192
+  const sharedMemNeeded = (maxIters + 2) * (2 * n + 2) + 10 * n + 259;
+  const maxItersForN = Math.floor((8192 - 10 * n - 259) / (2 * n + 2)) - 2;
+  if (sharedMemNeeded > 8192) {
+    statusEl.textContent = `n=${n} requires max_iters <= ${maxItersForN} (shared memory limit). Reduce iters or N.`;
+    return;
+  }
+
+  // Get pipeline for this n
+  pipeline = await getPipeline(n);
+  if (!pipeline) return;
 
   statusEl.textContent = `Computing ${width}x${height}, N=${n} limbs, ${maxIters} iters...`;
 
