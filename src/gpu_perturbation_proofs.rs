@@ -3836,4 +3836,99 @@ pub proof fn lemma_address_overflow_safety(
                  width * height * z_stride < 0xFFFF_FFFF;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Bug-catching proofs: items 1-7
+// ═══════════════════════════════════════════════════════════════
+
+/// (#1) Parameter validation: the kernel relies on preconditions
+/// (params@[3] >= 1, params@[3] <= 8, etc.) rather than runtime guards.
+/// This is sound — the CPU must satisfy preconditions. No runtime bug.
+
+/// (#2) c_data bounds in refinement: the best_tid computation clamps
+/// best_gx < width and best_gy < height, then lemma_cdata_offset_safe
+/// proves best_c_off + c_stride_px <= c_data.len(). No OOB bug.
+
+/// (#3) RGBA bit-field non-overlap: channels occupy disjoint bit ranges.
+pub proof fn lemma_rgba_bitfield_non_overlap(r: u32, g: u32, b: u32)
+    requires
+        r <= 255,
+        g <= 127,    // g = t_col / 3 ≤ 255/3 = 85, or t_col / 2 ≤ 127
+        b <= 255,
+    ensures
+        // The four fields occupy non-overlapping bit ranges:
+        // r:     bits [7:0]      — value < 2^8
+        // g<<8:  bits [15:8]     — value < 2^16, zero in [7:0]
+        // b<<16: bits [23:16]    — value < 2^24, zero in [15:0]
+        // alpha: bits [31:24]    — 0xFF000000, zero in [23:0]
+        r < 256,
+        (g << 8u32) < 65536,
+        (g << 8u32) & 0xFFu32 == 0u32,
+        (b << 16u32) < 16777216,
+        (b << 16u32) & 0xFFFFu32 == 0u32,
+{
+    assert(r < 256);
+    assert((g << 8u32) < 65536) by(bit_vector) requires g <= 127;
+    assert((g << 8u32) & 0xFFu32 == 0u32) by(bit_vector) requires g <= 127;
+    assert((b << 16u32) < 16777216) by(bit_vector) requires b <= 255;
+    assert((b << 16u32) & 0xFFFFu32 == 0u32) by(bit_vector) requires b <= 255;
+}
+
+/// (#4) gid_x >= lid_x is a kernel precondition (GPU dispatch invariant).
+/// No underflow in gid_x - lid_x. Documented, not a bug.
+
+/// (#5) ref_escaped address consistency: both read and write use the
+/// same `ref_escape_addr` variable. Documented, not a bug.
+
+/// (#6) Double-escape then glitch: the glitch check (with break) executes
+/// BEFORE the escape check in each iteration. If glitch fires, the loop
+/// breaks and escape check never runs. No double-state bug.
+
+/// (#7) **BUG FOUND**: Vote buffer stale data for boundary workgroups.
+///
+/// Threads with `gid_x >= width` or `gid_y >= height` return early
+/// (line 1807-1808) and NEVER write to their vote slot at
+/// `wg_mem[vote_base + local_id]`. On a GPU, shared memory is
+/// uninitialized per-workgroup. For boundary workgroups where some
+/// threads have out-of-bounds coordinates, the vote scan (line 3108)
+/// reads ALL 256 slots, including uninitialized slots from
+/// non-participating threads.
+///
+/// Impact: the vote scan could read garbage > 0 from non-participating
+/// threads' slots, inflating `g_count` and potentially selecting a
+/// non-existent pixel as the new reference. The clamping code
+/// (best_gx = min(best_gx_raw, width-1)) prevents OOB access but
+/// the WRONG pixel would be selected as the reference, causing
+/// incorrect perturbation results for the next refinement round.
+///
+/// Fix: ALL 256 threads should zero their vote slot BEFORE any
+/// conditional branches:
+///   vset(wg_mem, vote_base + local_id, 0u32);
+///   gpu_workgroup_barrier();
+/// This should happen at the VERY START of Step 3, before the
+/// `if is_glitched` conditional.
+///
+/// Alternatively, the vote scan should only scan `min(256, width_rem * height_rem)`
+/// slots where width_rem/height_rem are the active pixel counts
+/// in this workgroup.
+pub proof fn lemma_vote_stale_data_bug_exists(
+    wg_mem_len: nat, vote_base: nat, local_id: nat,
+    gid_x: nat, width: nat,
+)
+    requires
+        wg_mem_len >= 8192,
+        vote_base + 256 < wg_mem_len,
+        local_id < 256,
+        gid_x >= width,  // thread is out-of-bounds (returns early)
+        width > 0,
+    ensures
+        // The thread returns early and NEVER writes to vote_base + local_id.
+        // The vote scan reads this slot, finding whatever value was there.
+        // No guarantee that wg_mem[vote_base + local_id] == 0.
+        true,
+{
+    // This is a documentation lemma. The ensures `true` is trivially satisfied.
+    // The bug is in the kernel code, not provable/disprovable from specs alone.
+    // The lemma exists to document the finding and link to the fix recommendation.
+}
+
 } // verus!
