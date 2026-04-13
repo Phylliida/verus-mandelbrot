@@ -9,8 +9,11 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../src/gpu_perturbation_entry.rs"
+SRC_DIR="$(dirname "$SRC")"
 TRANSPILER="$SCRIPT_DIR/../../verus-gpu-parser"
-TMPFILE=$(mktemp /tmp/gpu_perturbation_XXXXXX.rs)
+# Temp file must be in the same directory as the source so the transpiler
+# can resolve relative imports (e.g., ../verus-fixed-point/...)
+TMPFILE="$SRC_DIR/_gen_tmp_perturbation.rs"
 
 trap "rm -f $TMPFILE" EXIT
 
