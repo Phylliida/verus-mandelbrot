@@ -3090,6 +3090,30 @@ fn mandelbrot_perturbation(
         gpu_workgroup_barrier();
 
         // ── Step 3: Glitch analysis — find best new reference ──
+        //
+        // FIX for Bug #7 (vote buffer stale data):
+        // Thread 0 zeroes ALL 256 vote slots before any thread writes its vote.
+        // This ensures non-participating threads (those that returned early due
+        // to gid_x >= width or gid_y >= height) don't leave stale/uninitialized
+        // data in the vote buffer. Without this, boundary workgroups could read
+        // garbage votes from non-existent pixels.
+        if local_id == 0u32 {
+            let mut vi = 0u32;
+            while vi < 256u32
+                invariant
+                    wg_mem@.len() >= 8192,
+                    vote_base + 256u32 < 8192u32,
+                    vi <= 256u32,
+                    forall |j: int| 0 <= j < vi as int
+                        ==> (#[trigger] wg_mem@[(vote_base + j as u32) as int]) == 0u32,
+                decreases 256 - vi,
+            {
+                vset(wg_mem, vote_base + vi, 0u32);
+                vi = vi + 1u32;
+            }
+        }
+        gpu_workgroup_barrier();
+
         // Each thread votes: glitched pixels report their glitch iteration
         // (higher = iterated longer = better reference candidate)
         if is_glitched == 1u32 && escaped_iter == max_iters {

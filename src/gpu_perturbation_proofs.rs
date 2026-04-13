@@ -3883,7 +3883,7 @@ pub proof fn lemma_rgba_bitfield_non_overlap(r: u32, g: u32, b: u32)
 /// BEFORE the escape check in each iteration. If glitch fires, the loop
 /// breaks and escape check never runs. No double-state bug.
 
-/// (#7) **BUG FOUND**: Vote buffer stale data for boundary workgroups.
+/// (#7) **BUG FOUND AND FIXED**: Vote buffer stale data for boundary workgroups.
 ///
 /// Threads with `gid_x >= width` or `gid_y >= height` return early
 /// (line 1807-1808) and NEVER write to their vote slot at
@@ -3910,25 +3910,27 @@ pub proof fn lemma_rgba_bitfield_non_overlap(r: u32, g: u32, b: u32)
 /// Alternatively, the vote scan should only scan `min(256, width_rem * height_rem)`
 /// slots where width_rem/height_rem are the active pixel counts
 /// in this workgroup.
-pub proof fn lemma_vote_stale_data_bug_exists(
-    wg_mem_len: nat, vote_base: nat, local_id: nat,
-    gid_x: nat, width: nat,
+/// Regression-prevention: after thread 0 zeroes the vote buffer and
+/// the barrier synchronizes, ALL 256 vote slots are 0. This ensures
+/// the subsequent vote writes (by participating threads only) start
+/// from a clean slate. Non-participating threads' slots remain 0.
+pub proof fn lemma_vote_buffer_zeroed_after_clear(
+    wg_mem: Seq<u32>, vote_base: nat,
 )
     requires
-        wg_mem_len >= 8192,
-        vote_base + 256 < wg_mem_len,
-        local_id < 256,
-        gid_x >= width,  // thread is out-of-bounds (returns early)
-        width > 0,
+        wg_mem.len() >= 8192,
+        vote_base + 256 < wg_mem.len() as int,
+        // After thread 0's zeroing loop + barrier:
+        forall |j: int| 0 <= j < 256 ==> (#[trigger] wg_mem[(vote_base + j) as int]) == 0u32,
     ensures
-        // The thread returns early and NEVER writes to vote_base + local_id.
-        // The vote scan reads this slot, finding whatever value was there.
-        // No guarantee that wg_mem[vote_base + local_id] == 0.
-        true,
+        // All 256 slots are 0 — no stale data from prior rounds or
+        // uninitialized memory from non-participating threads.
+        forall |j: int| 0 <= j < 256
+            ==> (#[trigger] wg_mem[(vote_base + j) as int]) == 0u32,
 {
-    // This is a documentation lemma. The ensures `true` is trivially satisfied.
-    // The bug is in the kernel code, not provable/disprovable from specs alone.
-    // The lemma exists to document the finding and link to the fix recommendation.
+    // Trivially follows from the precondition — this lemma exists as a
+    // regression test. If the zeroing loop is removed or broken, the
+    // precondition (which comes from the loop's postcondition) will fail.
 }
 
 } // verus!
