@@ -1745,6 +1745,57 @@ fn ref_orbit_iteration_step(
     (new_re_s, new_im_s)
 }
 
+/// Multiply an n-limb fixed-point value by a u32 scalar (integer at the top limb).
+/// Result = scalar * value, stored in out. O(n) instead of O(n²) schoolbook.
+/// The scalar represents an integer offset (e.g., pixel dx), placed at the
+/// integer limb position. The product is truncated to n limbs.
+fn scalar_mul_int(
+    scalar: u32, scalar_sign: u32,
+    value: &[u32], value_sign: u32,
+    out: &mut Vec<u32>,
+    n: u32, frac_limbs: u32,
+) -> (out_sign: u32)
+    requires
+        n >= 1, n <= 8,
+        frac_limbs <= n, frac_limbs + n <= 2 * n,
+        scalar_sign <= 1, value_sign <= 1,
+        value@.len() >= n as int,
+        old(out)@.len() == n as int,
+        valid_limbs(value@.subrange(0, n as int)),
+    ensures
+        out@.len() == n as int,
+        out_sign == 0u32 || out_sign == 1u32,
+{
+    // scalar * value: multiply each limb of value by scalar, propagate carry.
+    // This is equivalent to schoolbook with a = [0,...,0,scalar] at limb n-1,
+    // but O(n) instead of O(n²).
+    // The product scalar * value[j] lands at position (n-1+j) in the full 2n-limb product.
+    // After truncating bottom frac_limbs limbs (= n-1 limbs):
+    //   result[j] = product[n-1+j] shifted down by (n-1) = product[j + n - 1 - (n-1)] = product[j]
+    // Wait, let me re-derive. a = scalar at position n-1. b = value.
+    // product[n-1+j] = scalar * value[j] for j=0..n-1
+    // After truncation (keep limbs frac_limbs..frac_limbs+n-1 = n-1..2n-2):
+    //   result[k] = product[n-1+k] for k=0..n-1
+    //   result[k] = scalar * value[k] (with carries)
+    // So result is just scalar * each limb of value with carry propagation!
+    let mut carry = 0u32;
+    for i in 0u32..n
+        invariant
+            n >= 1, n <= 8,
+            out@.len() == n as int,
+            value@.len() >= n as int,
+    {
+        let (lo, hi) = u32::mul2(&scalar, &value[i as usize]);
+        let (sum, c1) = u32::add3(&lo, &carry, &0u32);
+        out.set(i as usize, sum);
+        let (new_carry, _c2) = u32::add3(&hi, &c1, &0u32);
+        carry = new_carry;
+    }
+    // Sign = XOR of input signs
+    let out_sign = if scalar_sign == value_sign { 0u32 } else { 1u32 };
+    out_sign
+}
+
 /// Direct Mandelbrot iteration: Z_{k+1} = Z_k^2 + c_pixel.
 /// Optimized:
 /// - Reuses re²/im² across escape check and next step (3 muls/iter instead of 5)
@@ -2305,10 +2356,11 @@ fn mandelbrot_perturbation(
     let center_im_sign_u = vget(params, uni_cim_off + n);
     // Validate signs from params (must be 0 or 1)
     if step_sign <= 1u32 && center_re_sign_u <= 1u32 && center_im_sign_u <= 1u32 {
-        let dx_step_s = signed_mul_to(
-            &ref_a, &dx_sign,
-            vslice(params, uni_step_off), &step_sign,
-            &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+        // dx * step → t1  (O(n) scalar multiply instead of O(n²) schoolbook)
+        let dx_step_s = scalar_mul_int(
+            dx_abs, dx_sign,
+            vslice(params, uni_step_off), step_sign,
+            &mut t1, n, frac_limbs);
         // c_pixel_re = center_re + dx * step → dc_re
         dc_re_sign = signed_add_to(
             vslice(params, uni_cre_off), &center_re_sign_u,
@@ -2318,14 +2370,10 @@ fn mandelbrot_perturbation(
         // Same for imaginary component
         let dy_abs = if gid_y >= half_h { gid_y - half_h } else { half_h - gid_y };
         let dy_sign = if gid_y >= half_h { 0u32 } else { 1u32 };
-        for i in 0u32..n
-            invariant n >= 1, n <= 8, ref_a@.len() == n as int,
-        { ref_a.set(i as usize, 0u32); }
-        ref_a.set((n - 1u32) as usize, dy_abs);
-        let dy_step_s = signed_mul_to(
-            &ref_a, &dy_sign,
-            vslice(params, uni_step_off), &step_sign,
-            &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
+        let dy_step_s = scalar_mul_int(
+            dy_abs, dy_sign,
+            vslice(params, uni_step_off), step_sign,
+            &mut t1, n, frac_limbs);
         dc_im_sign = signed_add_to(
             vslice(params, uni_cim_off), &center_im_sign_u,
             &t1, &dy_step_s,
