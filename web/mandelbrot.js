@@ -343,6 +343,7 @@ let device, pipeline, bindGroupLayout;
 let centerRe = -0.5, centerIm = 0.0, zoom = 1.0;
 // BigInt versions for deep zoom (initialized lazily)
 let centerReBig = null, centerImBig = null, zoomBig = 1n;
+let currentFracLimbs = 0;  // frac_limbs used for the stored BigInt center
 
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('canvas');
@@ -496,6 +497,19 @@ async function render() {
   const maxIters = parseInt(maxItersSlider.value);
   const frac_limbs = n - 1; // n-1 fractional limbs, 1 integer limb
 
+  // Rescale BigInt center when frac_limbs changes (N slider moved)
+  if (centerReBig !== null && currentFracLimbs !== frac_limbs) {
+    const shift = BigInt(32 * (frac_limbs - currentFracLimbs));
+    if (shift > 0n) {
+      centerReBig <<= shift;
+      centerImBig <<= shift;
+    } else {
+      centerReBig >>= -shift;
+      centerImBig >>= -shift;
+    }
+    currentFracLimbs = frac_limbs;
+  }
+
   // Enforce shared memory constraint: (maxIters+2)*(2n+2) + 10n + 259 <= 8192
   const sharedMemNeeded = (maxIters + 2) * (2 * n + 2) + 10 * n + 259;
   const maxItersForN = Math.floor((8192 - 10 * n - 259) / (2 * n + 2)) - 2;
@@ -625,6 +639,7 @@ canvas.addEventListener('click', (e) => {
   if (centerReBig === null) {
     centerReBig = doubleToBigFixed(centerRe, frac_limbs);
     centerImBig = doubleToBigFixed(centerIm, frac_limbs);
+    currentFracLimbs = frac_limbs;
     zoomBig = BigInt(Math.round(zoom));
     if (zoomBig < 1n) zoomBig = 1n;
   }
