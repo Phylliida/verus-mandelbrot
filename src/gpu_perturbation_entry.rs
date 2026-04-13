@@ -1056,6 +1056,8 @@ fn ref_orbit_step_part_b(
         // Frame: Part A outputs [t0_re2, t0_re2+3n) preserved
         forall |j: int| t0_re2 as int <= j < t0_re2 as int + 3 * n as int
             ==> wg_mem@[j] == old(wg_mem)@[j],
+        // Frame: prior orbit slots [0, zn) preserved
+        forall |j: int| 0 <= j < zn as int ==> wg_mem@[j] == old(wg_mem)@[j],
         // Frame: c_ref region preserved (zn+n ≤ ref_c_base, so op 6 doesn't touch c_ref)
         forall |j: int| ref_c_base as int <= j < ref_c_base as int + 2 * n as int + 2
             ==> wg_mem@[j] == old(wg_mem)@[j],
@@ -1232,6 +1234,8 @@ fn ref_orbit_step_part_c(
         valid_limbs(wg_mem@.subrange(t0_re2 as int + 9 * n as int, t0_re2 as int + 10 * n as int)),
         valid_limbs(wg_mem@.subrange(
             zn as int + n as int + 1, zn as int + 2 * n as int + 1)),
+        // Frame: prior orbit slots [0, zn) preserved
+        forall |j: int| 0 <= j < zn as int ==> wg_mem@[j] == old(wg_mem)@[j],
         // Frame: Part A re2/im2 [t0_re2, t0_re2+2n) preserved
         forall |j: int| t0_re2 as int <= j < t0_re2 as int + 2 * n as int
             ==> wg_mem@[j] == old(wg_mem)@[j],
@@ -1467,6 +1471,8 @@ fn ref_orbit_iteration_step(
         valid_limbs(wg_mem@.subrange(
             zn as int + n as int + 1,
             zn as int + 2 * n as int + 1)),
+        // Frame: everything below zn is unchanged (prior orbit slots preserved)
+        forall |j: int| 0 <= j < zn as int ==> wg_mem@[j] == old(wg_mem)@[j],
         // Value equation: output equals ref_step_buf_int on inputs.
         ({
             let z_re_int = signed_val_of(
@@ -2147,6 +2153,11 @@ fn mandelbrot_perturbation(
             // Z_0 = 0 (orbit was zeroed), so initial ghost values are 0.
             let ghost mut z_re_int: int = 0;
             let ghost mut z_im_int: int = 0;
+            // History: ghost sequences tracking all z_int values at each iteration.
+            // z_re_history[k] == z_re_int after iteration k wrote slot k+1.
+            // At iter=0: z_re_history == [0] (Z_0 = 0).
+            let ghost mut z_re_history: Seq<int> = seq![0int];
+            let ghost mut z_im_history: Seq<int> = seq![0int];
 
             // Establish orbit-slot invariant at iter=0 from zeroing above.
             proof {
@@ -2234,7 +2245,29 @@ fn mandelbrot_perturbation(
                             (iter * z_stride + 2u32 * n + 1u32) as int),
                         wg_mem@[(iter * z_stride + 2u32 * n + 1u32) as int].sem() as int,
                     ) == z_im_int,
+                    // ── History invariant: ALL prior orbit slots preserved ──
+                    z_re_history.len() == (iter + 1) as nat,
+                    z_im_history.len() == (iter + 1) as nat,
+                    z_re_history[iter as int] == z_re_int,
+                    z_im_history[iter as int] == z_im_int,
+                    // Every prior slot k matches z_history[k]
+                    forall |k: int| 0 <= k <= iter as int ==> {
+                        let off = #[trigger] (k * (z_stride as int));
+                        &&& wg_mem@[(off + n as int) as int].sem() <= 1
+                        &&& wg_mem@[(off + 2 * n as int + 1) as int].sem() <= 1
+                        &&& signed_val_of(
+                                wg_mem@.subrange(off, off + n as int),
+                                wg_mem@[(off + n as int) as int].sem() as int)
+                            == z_re_history[k]
+                        &&& signed_val_of(
+                                wg_mem@.subrange(off + n as int + 1, off + 2 * n as int + 1),
+                                wg_mem@[(off + 2 * n as int + 1) as int].sem() as int)
+                            == z_im_history[k]
+                    },
             {
+                // Capture wg_mem at loop body start for history frame chain
+                let ghost wg_mem_body_start = wg_mem@;
+
                 proof {
                     lemma_iter_stride_safe(iter as int, z_stride as int, (max_iters as int) + 1);
                     lemma_orbit_access_safe(iter as int, z_stride as int, max_iters as int);
@@ -2419,6 +2452,8 @@ fn mandelbrot_perturbation(
                         n as nat, frac_limbs as nat);
                     z_re_int = result.0;
                     z_im_int = result.1;
+                    z_re_history = z_re_history.push(z_re_int);
+                    z_im_history = z_im_history.push(z_im_int);
                 }
 
                 // Capture orbit slot state before escape check (for frame proof)
@@ -2531,6 +2566,61 @@ fn mandelbrot_perturbation(
                     // wg_mem[zn+n].sem() == new_re_s as int (from frame + u32 sem identity)
                     assert(wg_mem@[(zn + n) as int].sem() == (new_re_s as int));
                     assert(wg_mem@[(zn + 2u32 * n + 1u32) as int].sem() == (new_im_s as int));
+
+                    // ── Frame chain: wg_mem[j] == wg_mem_body_start[j] for j < zn ──
+                    // The exec helper, vset, and escape check all preserve j < zn:
+                    // - exec helper frame: j < zn ==> preserved (new postcondition)
+                    // - vset at zn+n and zn+2n+1: both ≥ zn, so j < zn unaffected
+                    // - escape check: writes to t0_diff, t0_stmp1 ≥ t0_re2 > zn
+                    assert forall |j: int| 0 <= j < zn as int implies
+                        wg_mem@[j] == wg_mem_body_start[j] by {}
+
+                    // ── History invariant maintenance ──
+                    // All prior slots k ≤ iter are preserved because:
+                    // - The exec helper wrote to slot iter+1 (= zn), not any prior slot
+                    // - vset wrote to zn+n and zn+2n+1 (within slot iter+1)
+                    // - The escape check wrote to t0_diff and t0_stmp1 (temp region)
+                    // - Slot k ends at k*z_stride + 2n+1, slot iter+1 starts at (iter+1)*z_stride
+                    // - For k ≤ iter: k*z_stride + 2n+1 < (k+1)*z_stride ≤ (iter+1)*z_stride = zn
+                    // So no overlap.
+                    assert forall |k: int| 0 <= k <= (iter + 1u32) as int implies {
+                        let off = #[trigger] (k * (z_stride as int));
+                        &&& wg_mem@[(off + n as int) as int].sem() <= 1
+                        &&& wg_mem@[(off + 2 * n as int + 1) as int].sem() <= 1
+                        &&& signed_val_of(
+                                wg_mem@.subrange(off, off + n as int),
+                                wg_mem@[(off + n as int) as int].sem() as int)
+                            == z_re_history[k]
+                        &&& signed_val_of(
+                                wg_mem@.subrange(off + n as int + 1, off + 2 * n as int + 1),
+                                wg_mem@[(off + 2 * n as int + 1) as int].sem() as int)
+                            == z_im_history[k]
+                    } by {
+                        let off = k * (z_stride as int);
+                        if k <= iter as int {
+                            // Prior slot k ≤ iter: all indices are below zn
+                            assert(off + 2 * (n as int) + 1 < zn as int) by(nonlinear_arith)
+                                requires k <= iter as int, off == k * (z_stride as int),
+                                         z_stride as int == 2 * (n as int) + 2,
+                                         zn as int == ((iter as int) + 1) * (z_stride as int),
+                                         n >= 1;
+                            // Frame: wg_mem[j] == wg_mem_body_start[j] for j < zn
+                            // → wg_mem[off..+2n+2] == wg_mem_body_start[off..+2n+2]
+                            // Induction hypothesis (on wg_mem_body_start) gives the result
+                            // Subranges equal via pointwise frame
+                            assert(wg_mem@.subrange(off, off + n as int)
+                                =~= wg_mem_body_start.subrange(off, off + n as int));
+                            assert(wg_mem@.subrange(off + n as int + 1, off + 2 * n as int + 1)
+                                =~= wg_mem_body_start.subrange(off + n as int + 1, off + 2 * n as int + 1));
+                        } else {
+                            // k == iter + 1: new slot just written
+                            assert(k == (iter as int) + 1);
+                            assert(off == zn as int) by(nonlinear_arith)
+                                requires k == (iter as int) + 1,
+                                         off == k * (z_stride as int),
+                                         zn as int == ((iter as int) + 1) * (z_stride as int);
+                        }
+                    }
                 }
                 } // else (valid zk signs)
             }
