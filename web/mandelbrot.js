@@ -461,7 +461,7 @@ function doubleToBigFixed(val, fracLimbs) {
   for (let i = 0; i < fracLimbs; i++) {
     remaining *= 4294967296;
     const limb = BigInt(Math.floor(remaining) >>> 0);
-    frac += limb << BigInt(32 * i);
+    frac += limb << BigInt(32 * (fracLimbs - 1 - i));
     remaining -= Number(limb);
   }
   return sign * (intPart * scale + frac);
