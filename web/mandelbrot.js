@@ -537,22 +537,34 @@ async function render() {
   const stride = 2 * n + 2; // words per pixel
   const c_data = new Uint32Array(totalPixels * stride);
 
-  // Convert center to BigInt fixed-point if not already
+  // Compute per-pixel c values using full-precision BigInt arithmetic.
+  // Key insight: the pixel step must have bits in ALL limbs, not just the
+  // top one. Dividing viewSpan by (width-1) instead of width ensures a
+  // non-power-of-2 divisor (e.g., 511 instead of 512), so BigInt division
+  // distributes the remainder across all limbs (~200+ significant bits).
+  // With the old width (power of 2), the step was 3*2^k — only 2 bits!
+  const scale = 1n << BigInt(32 * frac_limbs);
+  const zoomBig_ = zoomBig > 1n ? zoomBig : BigInt(Math.round(zoom));
   const centerReBig_ = centerReBig !== null ? centerReBig : doubleToBigFixed(centerRe, frac_limbs);
   const centerImBig_ = centerImBig !== null ? centerImBig : doubleToBigFixed(centerIm, frac_limbs);
 
-  // Pixel step in BigInt: 3 * 2^(32*frac_limbs) / (zoom * width)
-  // = 3 * scale / (zoom * width)
-  const scale = 1n << BigInt(32 * frac_limbs);
-  const zoomBig_ = zoomBig > 1n ? zoomBig : BigInt(Math.round(zoom));
-  const pixelStepBig = (3n * scale) / (zoomBig_ * BigInt(width));
+  // View span = 3/zoom in real coords = 3*scale/zoom in fixed-point.
+  const viewSpanBig = (3n * scale) / zoomBig_;
+  // Pixel step: divide by (width-1) so pixel 0 = left edge, pixel (width-1) = right edge.
+  // (width-1) is odd (e.g., 511), so the BigInt division is NOT exact,
+  // producing a quotient with full precision across all limbs.
+  const numPixelSteps = BigInt(width - 1);
+  const pixelStepBig = viewSpanBig / numPixelSteps;
+  // Left/top edge of the visible region
+  const halfSpanRe = (viewSpanBig + 1n) / 2n;
+  const halfSpanIm = (viewSpanBig + 1n) / 2n;
+  const edgeRe = centerReBig_ - halfSpanRe;
+  const edgeIm = centerImBig_ - halfSpanIm;
 
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {
-      const dx = BigInt(px - Math.floor(width / 2));
-      const dy = BigInt(py - Math.floor(height / 2));
-      const cr = centerReBig_ + dx * pixelStepBig;
-      const ci = centerImBig_ + dy * pixelStepBig;
+      const cr = edgeRe + BigInt(px) * pixelStepBig;
+      const ci = edgeIm + BigInt(py) * pixelStepBig;
       const idx = (py * width + px) * stride;
       const re = bigintToFixedPoint(cr, n);
       const im = bigintToFixedPoint(ci, n);
@@ -692,7 +704,11 @@ canvas.addEventListener('click', (e) => {
     if (zoomBig < 1n) zoomBig = 1n;
   }
 
-  const pixelStepBig = (3n * scale) / (zoomBig * BigInt(canvas.width));
+  // Use full-precision pixel step (matching render's computation)
+  const viewSpanBig = (3n * scale) / zoomBig;
+  const numSteps = BigInt(canvas.width - 1);
+  const pixelStepBig = viewSpanBig / numSteps;
+  // Click offset from center in pixel coordinates
   const dx = BigInt(Math.round((px - 0.5) * canvas.width));
   const dy = BigInt(Math.round((py - 0.5) * canvas.height));
   centerReBig += dx * pixelStepBig;
