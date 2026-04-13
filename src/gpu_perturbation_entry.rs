@@ -3687,7 +3687,7 @@ fn mandelbrot_perturbation(
                 &mut delta_re, &mut delta_im,
                 &mut t1, &mut t2, &mut t3, &mut t4, &mut t5,
                 &mut lprod, &mut ls1, &mut ls2,
-                &mut ref_a, &mut ref_b,  // checkpoint arrays for periodicity detection
+                &mut ref_a, &mut ref_b,
                 vslice(params, 5u32),
                 n, frac_limbs, max_iters,
             );
