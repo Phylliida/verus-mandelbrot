@@ -2208,31 +2208,28 @@ fn mandelbrot_perturbation(
     // ── Compute per-pixel c = center + (gid - width/2) * step ──
     // Uses the verified multi-precision arithmetic (signed_mul_to + signed_add_to).
     // Center and step are read from params (uniforms), giving full n-limb precision.
-    {
-        let half_w = width / 2u32;
-        let half_h = height / 2u32;
-        // Construct |dx| as integer in fixed-point: [0,...,0,|dx|] at integer limb (n-1)
-        let dx_abs = if gid_x >= half_w { gid_x - half_w } else { half_w - gid_x };
-        let dx_sign = if gid_x >= half_w { 0u32 } else { 1u32 };
-        for i in 0u32..n
-            invariant n >= 1, n <= 8, ref_a@.len() == n as int,
-        { ref_a.set(i as usize, 0u32); }
-        ref_a.set((n - 1u32) as usize, dx_abs);
-        // dx * step → t1
-        let step_sign = vget(params, uni_step_off + n);
-        let center_re_sign = vget(params, uni_cre_off + n);
-        let center_im_sign = vget(params, uni_cim_off + n);
-        // Validate signs from params (must be 0 or 1)
-        if step_sign > 1u32 || center_re_sign > 1u32 || center_im_sign > 1u32 {
-            // Invalid uniform data — skip computation, will render as black
-        } else {
+    let half_w = width / 2u32;
+    let half_h = height / 2u32;
+    // Construct |dx| as integer in fixed-point: [0,...,0,|dx|] at integer limb (n-1)
+    let dx_abs = if gid_x >= half_w { gid_x - half_w } else { half_w - gid_x };
+    let dx_sign = if gid_x >= half_w { 0u32 } else { 1u32 };
+    for i in 0u32..n
+        invariant n >= 1, n <= 8, ref_a@.len() == n as int,
+    { ref_a.set(i as usize, 0u32); }
+    ref_a.set((n - 1u32) as usize, dx_abs);
+    // dx * step → t1
+    let step_sign = vget(params, uni_step_off + n);
+    let center_re_sign_u = vget(params, uni_cre_off + n);
+    let center_im_sign_u = vget(params, uni_cim_off + n);
+    // Validate signs from params (must be 0 or 1)
+    if step_sign <= 1u32 && center_re_sign_u <= 1u32 && center_im_sign_u <= 1u32 {
         let dx_step_s = signed_mul_to(
             &ref_a, &dx_sign,
             vslice(params, uni_step_off), &step_sign,
             &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
         // c_pixel_re = center_re + dx * step → dc_re
         dc_re_sign = signed_add_to(
-            vslice(params, uni_cre_off), &center_re_sign,
+            vslice(params, uni_cre_off), &center_re_sign_u,
             &t1, &dx_step_s,
             &mut dc_re, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
 
@@ -2248,10 +2245,9 @@ fn mandelbrot_perturbation(
             vslice(params, uni_step_off), &step_sign,
             &mut t1, 0usize, &mut lprod, 0usize, n as usize, frac_limbs as usize);
         dc_im_sign = signed_add_to(
-            vslice(params, uni_cim_off), &center_im_sign,
+            vslice(params, uni_cim_off), &center_im_sign_u,
             &t1, &dy_step_s,
             &mut dc_im, 0usize, &mut ls1, 0usize, &mut ls2, 0usize, n as usize);
-        } // else (valid signs)
     }
 
     let ghost wh_cs_bound: int = (width as int) * (height as int) * (c_stride_px as int);
