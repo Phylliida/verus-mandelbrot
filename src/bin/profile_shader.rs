@@ -16,6 +16,8 @@
 //!   --warmup N         Warmup runs before measurement (default: 1)
 //!   --csv              Output CSV instead of table
 
+use vstd::prelude::*;
+
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -44,10 +46,10 @@ struct Config {
 fn parse_args() -> Config {
     let args: Vec<String> = std::env::args().collect();
     let mut cfg = Config {
-        wgsl_path: PathBuf::from("web/mandelbrot_verified.wgsl"),
-        limbs: vec![4, 8],
-        resolutions: vec![64, 128, 256],
-        iters: vec![50, 100, 200],
+        wgsl_path: PathBuf::from("web/mandelbrot_perturbation_n4.wgsl"),
+        limbs: vec![4, 8, 16],
+        resolutions: vec![128, 256, 512],
+        iters: vec![100, 200, 500],
         runs: 3,
         warmup: 1,
         csv: false,
@@ -127,25 +129,8 @@ fn stats(v: &[f64]) -> (f64, f64, f64) {
 fn main() {
     let cfg = parse_args();
 
-    // Read shader
-    let wgsl = match std::fs::read_to_string(&cfg.wgsl_path) {
-        Ok(s) => s,
-        Err(e) => {
-            // Try relative to crate root
-            let alt = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&cfg.wgsl_path);
-            match std::fs::read_to_string(&alt) {
-                Ok(s) => s,
-                Err(_) => {
-                    eprintln!("Cannot read WGSL: {} (tried {} and {})", e, cfg.wgsl_path.display(), alt.display());
-                    std::process::exit(1);
-                }
-            }
-        }
-    };
-    eprintln!("Loaded {} lines of WGSL from {}", wgsl.lines().count(), cfg.wgsl_path.display());
-
     // Init wgpu
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..Default::default()
     });
@@ -187,29 +172,45 @@ fn main() {
         (device, queue, has_ts)
     });
 
-    // Compile shader once
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("mandelbrot"),
-        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("mandelbrot"),
-        layout: None,
-        module: &shader_module,
-        entry_point: Some("mandelbrot_fixedpoint"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    // Run configs
+    // Run configs — compile a separate shader per limb count
     let total_configs = cfg.limbs.len() * cfg.resolutions.len() * cfg.iters.len();
     eprintln!("\nProfiling {} configurations ({} warmup + {} measured runs each)\n",
         total_configs, cfg.warmup, cfg.runs);
 
     let mut results = Vec::new();
+    let mut cached_pipeline: Option<(u32, wgpu::ComputePipeline)> = None;
 
     for &n in &cfg.limbs {
+        // Load the right shader for this limb count
+        let wgsl_path = PathBuf::from(format!("web/mandelbrot_perturbation_n{}.wgsl", n));
+        let wgsl = match std::fs::read_to_string(&wgsl_path) {
+            Ok(s) => s,
+            Err(_) => {
+                let alt = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&wgsl_path);
+                match std::fs::read_to_string(&alt) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Cannot read WGSL for n={}: {} (tried {})", n, e, wgsl_path.display());
+                        continue;
+                    }
+                }
+            }
+        };
+        eprintln!("Loaded {} lines for n={}", wgsl.lines().count(), n);
+
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mandelbrot"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mandelbrot"),
+            layout: None,
+            module: &shader_module,
+            entry_point: "mandelbrot_perturbation",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         for &res in &cfg.resolutions {
             for &max_iters in &cfg.iters {
                 let result = run_config(
@@ -226,7 +227,7 @@ fn main() {
                 results.push(result);
             }
         }
-    }
+    } // for n
 
     // Print results
     eprintln!();
@@ -274,17 +275,33 @@ fn run_config(
         }
     }
 
-    // Build params: [width, height, max_iters, n_limbs, frac_limbs, thresh_limbs(n)]
-    let mut params_data = vec![0u32; 5 + n as usize];
+    // Build params: [width, height, max_iters, n, frac_limbs, thresh(n), max_rounds, use_perturbation,
+    //                center_re(n+1), center_im(n+1), step(n+1)]
+    let params_len = 11 + 4 * n as usize;
+    let mut params_data = vec![0u32; params_len];
     params_data[0] = width;
     params_data[1] = height;
     params_data[2] = max_iters;
     params_data[3] = n;
     params_data[4] = frac_limbs;
     params_data[5 + n as usize - 1] = 4; // threshold = 4.0 in top limb
+    params_data[5 + n as usize] = 5;     // max_rounds
+    params_data[6 + n as usize] = 0;     // use_perturbation = 0 (direct mode)
 
-    let words_per_thread = 16 * n + 8;
-    let scratch_size = (total_pixels * words_per_thread * 4) as u64;
+    // Pack center + step uniforms
+    let uni_base = 8 + n as usize;
+    // center_re = -0.5 → top fractional limb = 2^31
+    let (cre_limbs, cre_sign) = double_to_fixed_point(center_re, n as usize);
+    for i in 0..n as usize { params_data[uni_base + i] = cre_limbs[i]; }
+    params_data[uni_base + n as usize] = cre_sign;
+    // center_im = 0
+    params_data[uni_base + 2 * n as usize + 1] = 0; // im sign
+    // step = pixel_step
+    let (step_limbs, step_sign) = double_to_fixed_point(pixel_step, n as usize);
+    let step_off = uni_base + 2 * (n as usize + 1);
+    for i in 0..n as usize { params_data[step_off + i] = step_limbs[i]; }
+    params_data[step_off + n as usize] = step_sign;
+
     let iter_counts_size = (total_pixels * 4) as u64;
 
     // Create GPU buffers
@@ -292,12 +309,6 @@ fn run_config(
         label: Some("c_data"),
         size: (c_data.len() * 4) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let scratch_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("scratch"),
-        size: scratch_size,
-        usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
     let iter_counts_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -322,7 +333,6 @@ fn run_config(
         layout: &bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: c_data_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: scratch_buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: iter_counts_buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
         ],
@@ -441,7 +451,6 @@ fn run_config(
 
     // Clean up
     c_data_buf.destroy();
-    scratch_buf.destroy();
     iter_counts_buf.destroy();
     params_buf.destroy();
 
