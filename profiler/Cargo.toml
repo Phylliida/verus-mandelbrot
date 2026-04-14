@@ -1,0 +1,12 @@
+[package]
+name = "mandelbrot-profiler"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "profile_shader"
+path = "../src/bin/profile_shader.rs"
+
+[dependencies]
+wgpu = "25"
+pollster = "0.4"
